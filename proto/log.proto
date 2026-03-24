@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package raft.log;
+
+option go_package = "github.com/SHREYANSHSINGH14/raft/types";
+
+import "google/protobuf/timestamp.proto";
+
+// ─────────────────────────────────────────────
+//  Enums
+// ─────────────────────────────────────────────
+
+// EntryType distinguishes the kind of payload carried by a LogEntry.
+// Keeping this explicit makes snapshot/config-change handling easier later.
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED  = 0; // should never appear in a real log
+  ENTRY_TYPE_COMMAND      = 1; // normal state-machine command
+  ENTRY_TYPE_NO_OP        = 2; // leader no-op written on election win
+  ENTRY_TYPE_CONFIG       = 3; // joint-consensus / cluster membership change
+  ENTRY_TYPE_BARRIER      = 4; // force a commit-index advance (optional)
+}
+
+// ─────────────────────────────────────────────
+//  Core log structures
+// ─────────────────────────────────────────────
+
+// LogEntry is a single record in the replicated log.
+// Fields map directly to §5.3 of the Raft paper.
+message LogEntry {
+  // Monotonically increasing position in the log (1-based).
+  uint64 index = 1;
+
+  // Term in which this entry was created.
+  uint64 term = 2;
+
+  // What kind of payload this entry carries.
+  EntryType type = 3;
+
+  // Raw command bytes — your state machine interprets these.
+  // Keep opaque here so the log layer stays generic.
+  bytes data = 4;
+
+  // Client-supplied identifier used for exactly-once semantics.
+  // Format: "<client_id>:<sequence_no>" — leave empty for internal entries.
+  string client_request_id = 5;
+
+  // Wall-clock time the leader appended this entry.
+  // Useful for debugging and replication-lag metrics; not used for correctness.
+  google.protobuf.Timestamp created_at = 6;
+}
+
