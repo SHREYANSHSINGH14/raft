@@ -13,6 +13,8 @@ import (
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/cockroachdb/pebble"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type ServerRole string
@@ -38,7 +40,7 @@ type PeerIndexes struct {
 type Server struct {
 	ID                string
 	Role              ServerRole
-	ServerIDRpcUrlMap map[string]string
+	ServerIDRpcUrlMap map[string]types.RaftRpcClient
 
 	store types.RaftDBInterface
 
@@ -47,11 +49,6 @@ type Server struct {
 
 	// below fields will be bootstrapped as nil
 	// only gets initialized when role is LEADER
-	nextIndex  map[string]uint
-	matchIndex map[string]uint
-
-	mu sync.Mutex
-
 	peerIndexes map[string]PeerIndexes
 
 	mu         sync.Mutex
@@ -77,13 +74,28 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	var srv Server
 	srv.ID = cfg.ID
 	srv.Role = ServerRole_Follower
-	srv.ServerIDRpcUrlMap = cfg.ServerIDS
 	srv.store = store
 	srv.commitIndex = 0
 	srv.lastApplied = 0
 	srv.peerIndexes = nil
 	srv.electionTimeoutCh = make(chan struct{})
 	srv.ctx, srv.cancelFunc = context.WithCancel(ctx)
+
+	dialOptions := []grpc.DialOption{}
+	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+	// initialize rpc clients for all other servers
+	srv.ServerIDRpcUrlMap = make(map[string]types.RaftRpcClient)
+	for id, url := range cfg.ServerIDS {
+		if id == cfg.ID {
+			continue
+		}
+		conn, err := grpc.NewClient(url, dialOptions...)
+		if err != nil {
+			return nil, fmt.Errorf("error creating grpc client for server %s: %w", id, err)
+		}
+		srv.ServerIDRpcUrlMap[id] = types.NewRaftRpcClient(conn)
+	}
 
 	return &srv, nil
 }

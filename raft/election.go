@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
@@ -29,9 +30,6 @@ func (p *Server) startElection(ctx context.Context) {
 			// either we received a log from leader or we received a vote response from peer
 			// in both cases we should reset the election timeout and start waiting for next timeout
 			case <-p.electionTimeoutCh:
-				cancel()
-				// becomefollower
-				return
 				cancel() // cancel the previous election context to stop the previous election goroutine
 				p.becomeFollower(ctx)
 				return
@@ -124,16 +122,26 @@ func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
 
 		return
 	}
-	_ = lastLogIndex
 
-	requestVoteResponses := make(chan RequestResponse, len(p.ServerIDRpcUrlMap))
+	lastLog, err := p.store.GetLogByIndex(ctx, lastLogIndex)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
+		electionRes.transitonRole = p.getRole()
+		electionRes.err = err
+
+		resCh <- electionRes
+
+		return
+	}
+
+	requestVoteResponses := make(chan ResponseRequestVote, len(p.ServerIDRpcUrlMap))
 	defer close(requestVoteResponses)
 
 	var wg sync.WaitGroup
 
-	for id, url := range p.ServerIDRpcUrlMap {
+	for id, client := range p.ServerIDRpcUrlMap {
 		wg.Add(1)
-		go sendRequestVote(ctx, &wg, id, url, requestVoteResponses)
+		go sendRequestVote(ctx, &wg, p.getID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
 	}
 
 	wg.Wait()
@@ -146,7 +154,12 @@ func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
 		res := <-requestVoteResponses
 		responseReceived++
 
-		if res.term > newTerm {
+		if res.err != nil {
+			zerolog.Ctx(ctx).Error().Err(res.err).Msgf("error in request vote rpc response from peer %s", res.id)
+			continue
+		}
+
+		if uint(res.rpcRes.Term) > newTerm {
 			electionRes.transitonRole = ServerRole_Follower
 			electionRes.err = nil
 
@@ -155,7 +168,7 @@ func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
 			return
 		}
 
-		if res.voteGranted && p.getRole() == ServerRole_Candidate {
+		if res.rpcRes.VoteGranted && p.getRole() == ServerRole_Candidate {
 			votesReceived++
 		}
 
@@ -176,17 +189,39 @@ func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
 }
 
 type ResponseRequestVote struct {
-	voteGranted bool
-	term        uint
-	id          string
+	rpcRes *types.RequestVoteResponse
+	id     string
+	err    error
 }
 
-func sendRequestVote(ctx context.Context, wg *sync.WaitGroup, peerID string, url string, responseCh chan<- RequestResponse) { // TODO: change this simple type with proto type
+func sendRequestVote(ctx context.Context, wg *sync.WaitGroup, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote) { // TODO: change this simple type with proto type
 	defer wg.Done()
-	//  send RPC request
+
+	rpcCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond) // TODO: Replace with config
+	defer cancel()
+
+	rpcReq := &types.RequestVoteArgs{
+		Term:         newTerm,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+		CandidateId:  candidateID,
+	}
+
 	var res ResponseRequestVote
-	res.voteGranted = true
-	res.term = 1 // change with actual value
+
+	rpcRes, err := client.RequestVote(rpcCtx, rpcReq)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending request vote rpc to peer %s: %s", peerID, err.Error())
+		res.err = err
+		res.id = peerID
+
+		responseCh <- res
+
+		return
+	}
+
+	res.rpcRes.VoteGranted = rpcRes.VoteGranted
+	res.rpcRes.Term = rpcRes.Term
 	res.id = peerID
 
 	responseCh <- res

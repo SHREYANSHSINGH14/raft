@@ -40,7 +40,7 @@ func (p *Server) sendLogs(ctx context.Context) error {
 	responseCh := make(chan ResponseAppendLogs, len(p.ServerIDRpcUrlMap))
 	peerLogLen := make(map[string]uint)
 
-	for id, url := range p.ServerIDRpcUrlMap {
+	for id, client := range p.ServerIDRpcUrlMap {
 		nextIdx := p.getPeerIndex(id).nextIndex
 
 		prevLog, err := p.store.GetLogByIndex(ctx, nextIdx-1)
@@ -58,7 +58,7 @@ func (p *Server) sendLogs(ctx context.Context) error {
 		peerLogLen[id] = uint(len(logs))
 
 		wg.Add(1)
-		go sendAppendLogs(ctx, &wg, p.getID(), id, url, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, responseCh)
+		go sendAppendLogs(ctx, &wg, p.getID(), id, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, responseCh)
 
 	}
 
@@ -66,12 +66,18 @@ func (p *Server) sendLogs(ctx context.Context) error {
 
 	for _ = range len(p.ServerIDRpcUrlMap) {
 		res := <-responseCh
-		if res.term > currentTerm {
+
+		if res.err != nil {
+			zerolog.Ctx(ctx).Error().Err(res.err).Msgf("error in append logs rpc response from peer %s", res.id)
+			continue
+		}
+
+		if uint(res.rpcRes.Term) > currentTerm {
 			p.becomeFollower(ctx)
 			return nil
 		}
 
-		if res.success {
+		if res.rpcRes.Success {
 			p.setMatchPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id]-1)
 			p.setNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id])
 		} else {
@@ -97,17 +103,40 @@ func (p *Server) sendLogs(ctx context.Context) error {
 }
 
 type ResponseAppendLogs struct {
-	term    uint
-	success bool
-	id      string
+	rpcRes *types.AppendEntriesResponse
+	id     string
+	err    error
 }
 
-func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID, url string, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, responseCh chan<- ResponseAppendLogs) {
+func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, responseCh chan<- ResponseAppendLogs) {
 	defer wg.Done()
-	// send append entries
+
+	rpcCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond) // TODO: Replace with config
+	defer cancel()
+
+	rpcReq := types.AppendEntriesArgs{
+		Term:         uint64(currentTerm),
+		LeaderId:     leaderID,
+		PrevLogIndex: uint64(prevLogIndex),
+		PrevLogTerm:  uint64(prevLogTerm),
+		Entries:      logs,
+		LeaderCommit: uint64(leaderCommit),
+	}
+
 	var res ResponseAppendLogs
-	res.term = 1
-	res.success = true
+
+	rpcRes, err := client.AppendEntries(rpcCtx, &rpcReq)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending append logs rpc to peer %s: %s", peerID, err.Error())
+		res.err = err
+		res.id = peerID
+
+		responseCh <- res
+		return
+	}
+
+	res.rpcRes.Term = rpcRes.Term
+	res.rpcRes.Success = rpcRes.Success
 	res.id = peerID
 
 	responseCh <- res
