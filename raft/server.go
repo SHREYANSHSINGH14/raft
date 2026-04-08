@@ -30,6 +30,11 @@ type Config struct {
 	LogLevel  string
 }
 
+type PeerIndexes struct {
+	nextIndex  uint
+	matchIndex uint
+}
+
 type Server struct {
 	ID                string
 	Role              ServerRole
