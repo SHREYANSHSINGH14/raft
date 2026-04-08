@@ -47,6 +47,15 @@ type Server struct {
 
 	mu sync.Mutex
 
+	peerIndexes map[string]PeerIndexes
+
+	mu         sync.Mutex
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+
+	// this channel is called whenever a log is received from leader or a vote is granted to reset election timeout
+	// election timeout triggers role transition from follower to candidate so if we receive a log or grant vote then we should reset the election timeout
+	// by passing an empty struct to this channel, the election timeout goroutine will reset the timer and start waiting for next timeout
 	electionTimeoutCh chan struct{}
 }
 
@@ -67,9 +76,9 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	srv.store = store
 	srv.commitIndex = 0
 	srv.lastApplied = 0
-	srv.nextIndex = nil
-	srv.matchIndex = nil
+	srv.peerIndexes = nil
 	srv.electionTimeoutCh = make(chan struct{})
+	srv.ctx, srv.cancelFunc = context.WithCancel(ctx)
 
 	return &srv, nil
 }
@@ -101,12 +110,18 @@ func (p *Server) Start(ctx context.Context) {
 		}
 	}
 
-	p.startElectionOut()
+	p.startElectionOut(ctx)
 }
 
-func (p *Server) becomeFollower() {
+// -------------------------------------------
+// Role transition functions
+// These functions are called when we want to transition from one role to another role
+// They also starts the necessary goroutines for that role like election timeout for follower and send logs for leader
+// -------------------------------------------
+
+func (p *Server) becomeFollower(ctx context.Context) {
 	p.setRole(ServerRole_Follower)
-	p.startElectionOut()
+	p.startElectionOut(ctx)
 }
 
 func (p *Server) becomeCandidate(ctx context.Context) {
@@ -114,7 +129,32 @@ func (p *Server) becomeCandidate(ctx context.Context) {
 	p.startElection(ctx)
 }
 
-func (p *Server) startElectionOut() {
+func (p *Server) becomeLeader(ctx context.Context) {
+	p.setRole(ServerRole_Leader)
+	p.peerIndexes = make(map[string]PeerIndexes)
+
+	lastIndex, err := p.store.GetLastLogIndex(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error getting latest log index")
+		return
+	}
+
+	for id, _ := range p.ServerIDRpcUrlMap {
+		p.peerIndexes[id] = PeerIndexes{
+			nextIndex:  lastIndex + 1,
+			matchIndex: 0,
+		}
+	}
+	p.startSendLogs(ctx)
+}
+
+// -------------------------------------------
+// Since being a follower is default role, we only need to start election timeout goroutine when we become follower
+// For candidate we need to start election and for leader we need to start sending logs to followers
+// find functions for candidate and leader in respective files
+// -------------------------------------------
+
+func (p *Server) startElectionOut(ctx context.Context) {
 	go func() {
 		duration, err := rand.Int(rand.Reader, big.NewInt(100))
 		if err != nil {
@@ -132,12 +172,17 @@ func (p *Server) startElectionOut() {
 				continue
 			case <-ticker.C:
 				ticker.Stop()
-				// startElection
+				p.becomeCandidate(ctx)
 				return
 			}
 		}
 	}()
 }
+
+// -------------------------------------------
+// Below are some helper functions to get and set server state like role, peer indexes, commit index etc
+// These functions are thread safe and should be used whenever we want to read or write these state variables
+// -------------------------------------------
 
 func (p *Server) setRole(role ServerRole) {
 	p.mu.Lock()
@@ -150,6 +195,56 @@ func (p *Server) getRole() ServerRole {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.Role
+}
+
+func (p *Server) getID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ID
+}
+
+func (p *Server) getPeerIndex(id string) PeerIndexes {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.peerIndexes[id]
+}
+
+func (p *Server) setNextPeerIndex(id string, idx uint) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// map returns a copy of value so if we do
+	// p.peerIndexes[id].nextIndex = idx
+	// it won't work coz we change value of copy
+	// not the original thing so to change the
+	// actual value assign a new struct
+	// Better to use pointers if frequent change
+	// but for learning we keep it like this
+	peer, ok := p.peerIndexes[id] // copy
+	if !ok {
+		peer = PeerIndexes{}
+	}
+	peer.nextIndex = idx     // modify
+	p.peerIndexes[id] = peer // write back
+}
+
+func (p *Server) setMatchPeerIndex(id string, idx uint) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	peer, ok := p.peerIndexes[id]
+	if !ok {
+		peer = PeerIndexes{}
+	}
+	peer.matchIndex = idx
+	p.peerIndexes[id] = peer
+}
+
+func (p *Server) setCommitIndex(idx uint) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.commitIndex = idx
 }
 
 func getLogLevel(level string) zerolog.Level {
