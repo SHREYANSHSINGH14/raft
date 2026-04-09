@@ -41,6 +41,7 @@ type Server struct {
 	ID                string
 	Role              ServerRole
 	ServerIDRpcUrlMap map[string]types.RaftRpcClient
+	LeaderID          string
 
 	store types.RaftDBInterface
 
@@ -59,7 +60,12 @@ type Server struct {
 	// election timeout triggers role transition from follower to candidate so if we receive a log or grant vote then we should reset the election timeout
 	// by passing an empty struct to this channel, the election timeout goroutine will reset the timer and start waiting for next timeout
 	electionTimeoutCh chan struct{}
+
+	// embedding the unimplemented server to make sure if we add any new rpc in future then we will get compile error if we forget to implement that rpc
+	types.UnimplementedRaftRpcServer
 }
+
+var _ types.RaftRpcServer = &Server{}
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	store, err := db.NewStore(ctx, cfg.DBDir)
@@ -78,7 +84,13 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	srv.commitIndex = 0
 	srv.lastApplied = 0
 	srv.peerIndexes = nil
-	srv.electionTimeoutCh = make(chan struct{})
+	srv.LeaderID = ""
+
+	// buffered channel to avoid blocking in case of multiple logs received in short time, 2 is just to be safe, 1 should be enought since we
+	// will get logs from leader one by one and we just need to reset the election timeout for that log, if we receive multiple logs in short time then it means there is some issue with the leader
+	// and in that case we can just reset the election timeout for the first log and ignore the rest of the logs because if there is some issue with the leader then it will be removed in next election
+	// and we will get a new leader
+	srv.electionTimeoutCh = make(chan struct{}, 2)
 	srv.ctx, srv.cancelFunc = context.WithCancel(ctx)
 
 	dialOptions := []grpc.DialOption{}
@@ -262,6 +274,27 @@ func (p *Server) setCommitIndex(idx uint) {
 	defer p.mu.Unlock()
 
 	p.commitIndex = idx
+}
+
+func (p *Server) getCommitIndex() uint {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.commitIndex
+}
+
+func (p *Server) setLeaderID(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.LeaderID = id
+}
+
+func (p *Server) getLeaderID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.LeaderID
 }
 
 func getLogLevel(level string) zerolog.Level {
