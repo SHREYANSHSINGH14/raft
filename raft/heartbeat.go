@@ -94,7 +94,16 @@ func (p *Server) sendLogs(ctx context.Context) error {
 	}
 
 	for idx, count := range matchIndexes {
-		if count >= uint(len(p.ServerIDRpcUrlMap)/2+1) && idx > p.commitIndex {
+		idxLog, err := p.store.GetLogByIndex(ctx, idx)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log by index %d: %+w", idx, err)
+			continue
+		}
+
+		// only update commit index if the log has been replicated on majority of servers and the log is from current term
+		// this is important to make sure that we don't commit any log from previous term which might not be present on the new leader after a leader change
+		// read 5.4.2 of raft thesis for more details
+		if count >= uint(len(p.ServerIDRpcUrlMap)/2+1) && idx > p.commitIndex && idxLog.Term == uint64(currentTerm) {
 			p.setCommitIndex(idx)
 		}
 	}
