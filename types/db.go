@@ -12,7 +12,7 @@ type RaftDBInterface interface {
 	GetVotedFor(context.Context) (string, error)
 
 	// Logs
-	AppendLogs(context.Context, []LogEntry) error
+	AppendLogs(context.Context, []*LogEntry) error
 	GetLogs(ctx context.Context, startIdx, endIdx *uint) ([]*LogEntry, error)
 	GetLogByIndex(ctx context.Context, idx uint) (*LogEntry, error)
 	GetLogsByTerm(ctx context.Context, term uint) ([]*LogEntry, error)
@@ -22,4 +22,5 @@ type RaftDBInterface interface {
 	// Log metadata
 	GetLastLogTerm(context.Context) (uint, error)
 	GetLastLogIndex(context.Context) (uint, error)
+	GetLastLogEntry(context.Context) (*LogEntry, error)
 }

@@ -153,14 +153,42 @@ func (s *Store) GetLastLogTerm(ctx context.Context) (uint, error) {
 	return uint(log.Term), nil
 }
 
+func (s *Store) GetLastLogEntry(ctx context.Context) (*types.LogEntry, error) {
+	lastIdx, err := s.GetLastLogIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	key := logKey(uint64(lastIdx))
+
+	val, closer, err := s.db.Get(key)
+	if err != nil {
+		return nil, err
+	}
+
+	var log types.LogEntry
+
+	err = proto.Unmarshal(val, &log)
+	if err != nil {
+		return nil, err
+	}
+
+	err = closer.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return &log, nil
+}
+
 // Note: we leave the entry.Index and index key check to business logic
 // this layer is just supposed set them in db
-func (s *Store) AppendLogs(ctx context.Context, logs []types.LogEntry) error {
+func (s *Store) AppendLogs(ctx context.Context, logs []*types.LogEntry) error {
 	batch := s.db.NewBatch()
 
 	for i := range logs {
 		key := logKey(uint64(logs[i].Index))
-		val, err := proto.Marshal(&logs[i])
+		val, err := proto.Marshal(logs[i])
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("error marshaling")
 			return err

@@ -85,7 +85,7 @@ func TestAppendLogs_ThenGetLogs(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1"), ClientRequestId: "c:1"},
 		{Index: 2, Term: 1, Data: []byte("cmd-2"), ClientRequestId: "c:2"},
 		{Index: 3, Term: 2, Data: []byte("cmd-3"), ClientRequestId: "c:3"},
@@ -110,14 +110,14 @@ func TestAppendLogs_MultipleAppends_AllPersisted(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	firstBatch := []types.LogEntry{
+	firstBatch := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 	}
 	err := store.AppendLogs(ctx, firstBatch)
 	assert.NoError(t, err)
 
-	secondBatch := []types.LogEntry{
+	secondBatch := []*types.LogEntry{
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
 		{Index: 4, Term: 2, Data: []byte("cmd-4")},
 	}
@@ -133,7 +133,7 @@ func TestAppendLogs_EmptySlice(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	err := store.AppendLogs(ctx, []types.LogEntry{})
+	err := store.AppendLogs(ctx, []*types.LogEntry{})
 	assert.NoError(t, err)
 
 	idx, err := store.GetLastLogIndex(ctx)
@@ -156,7 +156,7 @@ func TestGetLogs_PartialRange(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -178,7 +178,7 @@ func TestGetLogs_ExclusiveUpperBound(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 1, Data: []byte("cmd-3")},
@@ -199,7 +199,7 @@ func TestGetLogs_NilEndIdx_ReturnsAllFromStart(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -217,7 +217,7 @@ func TestGetLogs_NilEndIdx_FromMiddle(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -248,7 +248,7 @@ func TestGetLogByIndex_ReturnsCorrectEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1"), ClientRequestId: "c:1"},
 		{Index: 2, Term: 1, Data: []byte("cmd-2"), ClientRequestId: "c:2"},
 		{Index: 3, Term: 2, Data: []byte("cmd-3"), ClientRequestId: "c:3"},
@@ -269,7 +269,7 @@ func TestGetLogByIndex_FirstEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 3, Data: []byte("cmd-1")},
 		{Index: 2, Term: 3, Data: []byte("cmd-2")},
 	}
@@ -287,7 +287,7 @@ func TestGetLogByIndex_LastEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 2, Data: []byte("cmd-2")},
 		{Index: 3, Term: 3, Data: []byte("cmd-3")},
@@ -327,7 +327,7 @@ func TestGetLogsByTerm_SingleTerm(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -347,7 +347,7 @@ func TestGetLogsByTerm_MultipleTerms(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -377,7 +377,7 @@ func TestGetLogsByTerm_TermNotPresent(t *testing.T) {
 
 	// terms 1 and 3 exist, term 2 does not
 	// since we do a full scan with no early break, this must still return empty
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 3, Data: []byte("cmd-2")},
 	}
@@ -404,7 +404,7 @@ func TestTruncateLogs_RemovesFromIndexOnwards(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -437,7 +437,7 @@ func TestTruncateLogs_FromFirstIndex_RemovesAll(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -461,7 +461,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []types.LogEntry{
+	logs := []*types.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -477,7 +477,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	assert.Equal(t, uint(1), idx, "last index should reflect truncation")
 
 	// re-append from where truncation left off
-	newLogs := []types.LogEntry{
+	newLogs := []*types.LogEntry{
 		{Index: 2, Term: 3, Data: []byte("cmd-new-2")},
 		{Index: 3, Term: 3, Data: []byte("cmd-new-3")},
 	}
