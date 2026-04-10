@@ -25,6 +25,9 @@ func (p *Server) startSendLogs(ctx context.Context) {
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("error sending logs")
 			}
+		case <-ctx.Done():
+			cancel()
+			return
 		}
 	}
 }
