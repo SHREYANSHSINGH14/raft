@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
+	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -24,13 +27,6 @@ const (
 	ServerRole_Candidate ServerRole = "CANDIDATE"
 	ServerRole_Leader    ServerRole = "LEADER"
 )
-
-type Config struct {
-	ID        string
-	ServerIDS map[string]string
-	DBDir     string
-	LogLevel  string
-}
 
 type PeerIndexes struct {
 	nextIndex  uint
@@ -63,6 +59,8 @@ type Server struct {
 
 	// embedding the unimplemented server to make sure if we add any new rpc in future then we will get compile error if we forget to implement that rpc
 	types.UnimplementedRaftRpcServer
+
+	url string
 }
 
 var _ types.RaftRpcServer = &Server{}
@@ -75,6 +73,8 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	logLevel := getLogLevel(cfg.LogLevel)
+	logger := zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
+	zerolog.DefaultContextLogger = &logger
 	zerolog.SetGlobalLevel(logLevel)
 
 	var srv Server
@@ -85,6 +85,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	srv.lastApplied = 0
 	srv.peerIndexes = nil
 	srv.LeaderID = ""
+	srv.url = fmt.Sprintf("http://%s:%s", cfg.BaseURL, cfg.Port)
 
 	// buffered channel to avoid blocking in case of multiple logs received in short time, 2 is just to be safe, 1 should be enought since we
 	// will get logs from leader one by one and we just need to reset the election timeout for that log, if we receive multiple logs in short time then it means there is some issue with the leader
@@ -92,6 +93,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	// and we will get a new leader
 	srv.electionTimeoutCh = make(chan struct{}, 2)
 	srv.ctx, srv.cancelFunc = context.WithCancel(ctx)
+	srv.ctx = logger.WithContext(srv.ctx)
 
 	dialOptions := []grpc.DialOption{}
 	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -112,34 +114,73 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	return &srv, nil
 }
 
-func (p *Server) Start(ctx context.Context) {
-	_, err := p.store.GetCurrentTerm(ctx)
+func (p *Server) Start() {
+	_, err := p.store.GetCurrentTerm(p.ctx)
 	if err != nil {
 		if !errors.Is(pebble.ErrNotFound, err) {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("error getting current term")
+			zerolog.Ctx(p.ctx).Error().Err(err).Msg("error getting current term")
 			return
 		}
-		err := p.store.SetCurrentTerm(ctx, 0)
+		err := p.store.SetCurrentTerm(p.ctx, 0)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("error initializing current term")
+			zerolog.Ctx(p.ctx).Error().Err(err).Msg("error initializing current term")
 			return
 		}
 	}
 
-	_, err = p.store.GetVotedFor(ctx)
+	_, err = p.store.GetVotedFor(p.ctx)
 	if err != nil {
 		if !errors.Is(pebble.ErrNotFound, err) {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("error getting vote for")
+			zerolog.Ctx(p.ctx).Error().Err(err).Msg("error getting vote for")
 			return
 		}
-		err := p.store.SetVotedFor(ctx, "")
+		err := p.store.SetVotedFor(p.ctx, "")
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("error initializing voted for")
+			zerolog.Ctx(p.ctx).Error().Err(err).Msg("error initializing voted for")
 			return
 		}
 	}
 
-	p.startElectionOut(ctx)
+	// Start grpc server
+	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", 3001))
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	types.RegisterRaftRpcServer(grpcServer, p)
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
+
+	// This goroutine will wait for the context to be done and then gracefully stop the grpc server and cancel the server context to stop all other goroutines
+	// IMPORTANT to gracefully stop the grpc server to avoid any panics in case of any ongoing rpc calls when the server is stopped
+	// Also canceling the server context will stop all other goroutines like election timeout and send logs goroutine to avoid any
+	// unwanted role transitions or rpc calls when the server is stopped
+
+	// This is an important concept to remeber that whenever we have some long running goroutines in our server then we should always have a way to stop those goroutines gracefully when
+	// the server is stopped to avoid any unwanted behavior and also to free up the resources used by those goroutines
+	go func() {
+		<-p.ctx.Done()
+		grpcServer.GracefulStop()
+	}()
+
+	p.startElectionOut(p.ctx)
+
+	// Since startElectionOut is a separate goroutine, we need to block the main goroutine to keep the server running,
+	// we can block it by waiting for the server context to be done, which will happen when the server is stopped
+
+	// We run startElectionOut in a separate goroutine and block here on ctx.Done() to keep the server alive.
+	// Alternative: run startElectionOut directly on the main goroutine (no goroutine inside it) — it would
+	// block forever in its select loop, keeping the process alive without needing <-p.ctx.Done().
+	// We prefer the goroutine approach because it keeps Start() extensible — any future work after
+	// startElectionOut (e.g. metrics, health checks) would be unreachable if main goroutine was blocked there.
+
+	zerolog.Ctx(p.ctx).Debug().Str("id", p.ID).Str("role", string(p.Role)).Str("listen_address", p.url).Msg("server started")
+
+	<-p.ctx.Done()
 }
 
 // -------------------------------------------
@@ -185,13 +226,13 @@ func (p *Server) becomeLeader(ctx context.Context) {
 
 func (p *Server) startElectionOut(ctx context.Context) {
 	go func() {
-		duration, err := rand.Int(rand.Reader, big.NewInt(100))
+		duration, err := rand.Int(rand.Reader, big.NewInt(300))
 		if err != nil {
 			zerolog.Ctx(context.Background()).Error().Err(err).Msg("error getting random number for duration")
 			return
 		}
 
-		timeOut := time.Duration(duration.Int64() * int64(time.Millisecond))
+		timeOut := time.Duration((duration.Int64() + 150) * int64(time.Millisecond))
 		ticker := time.NewTicker(timeOut)
 
 		for {
@@ -202,6 +243,9 @@ func (p *Server) startElectionOut(ctx context.Context) {
 			case <-ticker.C:
 				ticker.Stop()
 				p.becomeCandidate(ctx)
+				return
+			case <-ctx.Done():
+				ticker.Stop()
 				return
 			}
 		}
