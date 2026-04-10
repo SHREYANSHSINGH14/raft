@@ -1,0 +1,11 @@
+peers:
+  - id: peer1
+    rpc_url: http://localhost:50051
+  - id: peer2
+    rpc_url: http://localhost:50052
+  - id: peer3
+    rpc_url: http://localhost:50053
+  - id: peer4
+    rpc_url: http://localhost:50054
+  - id: peer5
+    rpc_url: http://localhost:50055
