@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/cockroachdb/pebble"
@@ -112,6 +113,9 @@ func (s *Store) GetLastLogIndex(ctx context.Context) (uint, error) {
 
 	iter, err := s.db.NewIter(iterOptions)
 	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return 0, nil // no logs yet
+		}
 		return 0, err
 	}
 	defer iter.Close()
@@ -246,6 +250,14 @@ func (s *Store) GetLogByIndex(ctx context.Context, idx uint) (*types.LogEntry, e
 	key := logKey(uint64(idx))
 	val, closer, err := s.db.Get(key)
 	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return &types.LogEntry{
+				Index: 0,
+				Term:  0,
+				Data:  []byte{},
+				Type:  types.EntryType_ENTRY_TYPE_NO_OP,
+			}, nil // no logs yet
+		}
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log for index: %d", idx)
 		return nil, err
 	}
