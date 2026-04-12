@@ -48,7 +48,24 @@ type Server struct {
 	// only gets initialized when role is LEADER
 	peerIndexes map[string]PeerIndexes
 
-	mu         sync.Mutex
+	mu sync.Mutex
+
+	// This second mutex is to protect from concurrent calls at RequestVote and AppendEntries rpc handlers, since both of these handlers can be called concurrently and
+	// they both read and write to the same state variables like current term, voted for, leader id etc so to avoid any race conditions we need to have a separate mutex for these rpc handlers
+	// we can't use the same mutex for both client calls and internal state changes because it will lead to deadlocks in case of any long running operations in the rpc handlers like db calls
+	// or network calls to other servers, so we need to have a separate mutex for these rpc handlers to avoid any deadlocks
+
+	// This will make calls sequential to RequestVote and AppendEntries handlers, which will strip away concurrency advantage of grpc but for this specific implementation we value correctness
+	// and that is btw the protocol requirement of raft that the server should handle rpc calls sequentially to avoid any race conditions
+
+	// Other ways like erlang actors model can also be used to handle concurrent calls to rpc handlers sequentially without using mutex but for simplicity we are using mutex here
+	// PHASE 2: Use actors model to handle concurrent calls to rpc handlers sequentially without using mutex, this will improve the performance of the server by allowing concurrent calls to rpc
+	// handlers without blocking each other and also it will make the code more clean and easy to understand by avoiding the use of mutex and locks (DISCARDED)
+
+	// Mutex also does the same thing of handling concurrent calls to rpc handlers sequentially, by putting goroutines to a FIFO queue and allowing only one goroutine to access the critical section
+	// at a time, since in Raft we'd only be having small number of peers so advantage of handling backpressure, cancellation, queue depth in actors model over mutex will not be significant in this case
+	raftMu sync.Mutex
+
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 
