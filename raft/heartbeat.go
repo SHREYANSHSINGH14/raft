@@ -14,6 +14,7 @@ func (p *Server) startSendLogs(ctx context.Context) {
 	_ = heartBeatTime
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogCtx, cancel := context.WithCancel(ctx)
+	sendLogErrChan := make(chan error, 1)
 	for {
 		select {
 		case <-p.electionTimeoutCh:
@@ -21,9 +22,16 @@ func (p *Server) startSendLogs(ctx context.Context) {
 			p.becomeFollower(ctx)
 			return
 		case <-ticker.C:
-			err := p.sendLogs(sendLogCtx)
+			// this needs to be non blocking call because if it gets blocked then it won't be able to send logs to peers at regular interval
+			// and if there is a bug in sendLogs function which is causing it to get blocked then it will also block the server indefinitely
+			// and we won't be able to fix the bug because we won't be able to see the logs of sendLogs function
+
+			// it won't be able to check for electionTimeoutCh while it is blocked in sendLogs function and if there is a bug in sendLogs, then
+			// it won't become a follower and it will keep trying to send logs to peers and it will keep getting blocked in sendLogs function and it will keep getting blocked indefinitely
+			go p.sendLogs(sendLogCtx, sendLogErrChan)
+		case err := <-sendLogErrChan:
 			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("error sending logs")
+				zerolog.Ctx(ctx).Error().Err(err).Msg("error sending logs to peers")
 			}
 		case <-ctx.Done():
 			cancel()
@@ -32,11 +40,12 @@ func (p *Server) startSendLogs(ctx context.Context) {
 	}
 }
 
-func (p *Server) sendLogs(ctx context.Context) error {
+func (p *Server) sendLogs(ctx context.Context, errChan chan<- error) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %+w", err)
-		return err
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+		errChan <- err
+		return
 	}
 
 	var wg sync.WaitGroup
@@ -48,14 +57,16 @@ func (p *Server) sendLogs(ctx context.Context) error {
 
 		prevLog, err := p.store.GetLogByIndex(ctx, nextIdx-1)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %+w", err)
-			return err
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+			errChan <- err
+			return
 		}
 
 		logs, err := p.store.GetLogs(ctx, &nextIdx, nil)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %+w", err)
-			return err
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+			errChan <- err
+			return
 		}
 
 		peerLogLen[id] = uint(len(logs))
@@ -77,7 +88,8 @@ func (p *Server) sendLogs(ctx context.Context) error {
 
 		if uint(res.rpcRes.Term) > currentTerm {
 			p.becomeFollower(ctx)
-			return nil
+			errChan <- nil
+			return
 		}
 
 		if res.rpcRes.Success {
@@ -99,7 +111,7 @@ func (p *Server) sendLogs(ctx context.Context) error {
 	for idx, count := range matchIndexes {
 		idxLog, err := p.store.GetLogByIndex(ctx, idx)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log by index %d: %+w", idx, err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log by index %d: %s", idx, err.Error())
 			continue
 		}
 
@@ -111,7 +123,8 @@ func (p *Server) sendLogs(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	errChan <- nil
+	return
 }
 
 type ResponseAppendLogs struct {

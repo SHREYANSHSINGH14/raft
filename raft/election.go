@@ -60,6 +60,8 @@ func (p *Server) startElection(ctx context.Context) {
 				case ServerRole_Candidate:
 					p.becomeCandidate(ctx)
 				}
+				cancel()
+				return
 			case <-ctx.Done():
 				cancel()
 				return
