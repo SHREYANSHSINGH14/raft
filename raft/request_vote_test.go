@@ -21,9 +21,12 @@ const (
 
 func newTestServer(store *db.MockStore) *Server {
 	return &Server{
-		ID:    "node-1",
-		Role:  ServerRole_Follower,
-		store: store,
+		ID:                "node-1",
+		Role:              ServerRole_Follower,
+		store:             store,
+		electionTimeoutCh: make(chan struct{}, 2),
+		LeaderID:          "",
+		commitIndex:       0,
 	}
 }
 
@@ -412,5 +415,60 @@ func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
+	store.AssertExpectations(t)
+}
+
+// 20. ── GetLastLogEntry returns nil (defensive nil guard) ─────────────────────────
+// Real store never returns nil since we fixed it to return zero value entry.
+// This test ensures the nil guard in RequestVote still behaves correctly
+// if a buggy implementation or future change returns nil without an error.
+
+func TestRequestVote_LastLogEntryNil_AllowVote(t *testing.T) {
+	store := new(db.MockStore)
+	srv := newTestServer(store)
+	ctx := context.Background()
+
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
+	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
+	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
+
+	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+		CandidateId:  "candidate-1",
+		Term:         5,
+		LastLogTerm:  0,
+		LastLogIndex: 0,
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, resp.VoteGranted)
+	store.AssertExpectations(t)
+}
+
+// 21. ── Zero value lastLog (Index=0, Term=0) → any candidate log passes ───────────
+// Covers the fix where zero value entry passes all log up-to-date checks
+// because: anything < 0 is false, and 0 == 0 && anything < 0 is false.
+// Both deny conditions never trigger → vote always granted by a fresh node.
+
+func TestRequestVote_ZeroValueLastLog_CandidateAhead_AllowVote(t *testing.T) {
+	store := new(db.MockStore)
+	srv := newTestServer(store)
+	ctx := context.Background()
+
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
+	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
+	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
+
+	// candidate has real logs, node has none — candidate is strictly ahead
+	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+		CandidateId:  "candidate-1",
+		Term:         5,
+		LastLogTerm:  3,
+		LastLogIndex: 10,
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, resp.VoteGranted)
 	store.AssertExpectations(t)
 }
