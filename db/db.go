@@ -135,6 +135,10 @@ func (s *Store) GetLastLogTerm(ctx context.Context) (uint, error) {
 		return 0, err
 	}
 
+	if lastIdx == 0 {
+		return 0, nil // no logs yet
+	}
+
 	key := logKey(uint64(lastIdx))
 
 	val, closer, err := s.db.Get(key)
@@ -161,6 +165,15 @@ func (s *Store) GetLastLogEntry(ctx context.Context) (*types.LogEntry, error) {
 	lastIdx, err := s.GetLastLogIndex(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	if lastIdx == 0 {
+		return &types.LogEntry{
+			Index: 0,
+			Term:  0,
+			Data:  []byte{},
+			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
+		}, nil // no logs yet
 	}
 
 	key := logKey(uint64(lastIdx))
