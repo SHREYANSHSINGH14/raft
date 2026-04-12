@@ -18,7 +18,7 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -32,21 +32,21 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 	if args.Term > uint64(currentTerm) {
 		err := p.store.SetCurrentTerm(ctx, uint(args.Term))
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
 		currentTerm = uint(args.Term)
 
 		err = p.store.SetVotedFor(ctx, "")
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
 	}
 
 	prevLog, err := p.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -79,7 +79,7 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 	// we have many inconsistent logs then it means there is some issue with the leader and in that case we can just truncate all the logs after prevLogIndex and append the new logs from leader which are correct
 	err = p.store.TruncateLogs(ctx, uint(args.PrevLogIndex)+1)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -87,7 +87,7 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 	if len(args.Entries) > 0 {
 		err = p.store.AppendLogs(ctx, args.Entries)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
 	}
@@ -95,7 +95,7 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 	if args.LeaderCommit > uint64(p.getCommitIndex()) {
 		lastLogIdx, err := p.store.GetLastLogIndex(ctx)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
 

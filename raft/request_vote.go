@@ -18,7 +18,7 @@ func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -36,7 +36,7 @@ func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 	if args.Term > uint64(currentTerm) {
 		err := p.store.SetCurrentTerm(ctx, uint(args.Term))
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 			return nil, err
 		}
 
@@ -44,14 +44,14 @@ func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 
 		err = p.store.SetVotedFor(ctx, "")
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 			return nil, err
 		}
 	}
 
 	votedFor, err := p.store.GetVotedFor(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -64,7 +64,7 @@ func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 
 	lastLog, err := p.store.GetLastLogEntry(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 		return nil, err
 	}
 
@@ -85,7 +85,7 @@ func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 
 	err = p.store.SetVotedFor(ctx, args.CandidateId)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %+w", err)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 		return nil, err
 	}
 
