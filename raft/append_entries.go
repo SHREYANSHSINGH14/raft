@@ -2,10 +2,12 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/SHREYANSHSINGH14/raft/types"
+	"github.com/cockroachdb/pebble"
 	"github.com/rs/zerolog"
 )
 
@@ -49,8 +51,19 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 
 	prevLog, err := p.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-		return nil, err
+		if !errors.Is(err, pebble.ErrNotFound) {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
+			return nil, err
+		}
+		if args.PrevLogIndex != 0 {
+			// If prevLogIndex is not 0 and we are getting ErrNotFound then it means there is log inconsistency because it means leader is expecting some log at prevLogIndex but follower doesn't have that log
+			// This can happen when there is a new leader and it is trying to replicate its logs to the followers but some followers are lagging behind and they don't have the logs that leader has,
+			// in that case we should just return false and let the leader handle the log inconsistency in next append entries call by sending the logs from nextIndex to end of log to that follower
+			return &types.AppendEntriesResponse{
+				Term:    uint64(currentTerm),
+				Success: false,
+			}, nil
+		}
 	}
 
 	if prevLog != nil && prevLog.Term != args.PrevLogTerm {

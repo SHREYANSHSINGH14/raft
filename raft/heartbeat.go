@@ -55,11 +55,21 @@ func (p *Server) sendLogs(ctx context.Context, errChan chan<- error) {
 	for id, client := range p.ServerIDRpcUrlMap {
 		nextIdx := p.getPeerIndex(id).nextIndex
 
-		prevLog, err := p.store.GetLogByIndex(ctx, nextIdx-1)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
-			errChan <- err
-			return
+		var prevLog *types.LogEntry
+		if nextIdx > 1 {
+			prevLog, err = p.store.GetLogByIndex(ctx, nextIdx-1)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+				errChan <- err
+				return
+			}
+		} else {
+			prevLog = &types.LogEntry{
+				Index: 0,
+				Term:  0,
+				Data:  []byte{},
+				Type:  types.EntryType_ENTRY_TYPE_NO_OP,
+			}
 		}
 
 		logs, err := p.store.GetLogs(ctx, &nextIdx, nil)

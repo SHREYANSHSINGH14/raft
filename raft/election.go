@@ -128,15 +128,25 @@ func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	lastLog, err := p.store.GetLogByIndex(ctx, lastLogIndex)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.getRole()
-		electionRes.err = err
+	var lastLog *types.LogEntry
+	if lastLogIndex > 0 {
+		lastLog, err = p.store.GetLogByIndex(ctx, lastLogIndex)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
+			electionRes.transitonRole = p.getRole()
+			electionRes.err = err
 
-		resCh <- electionRes
+			resCh <- electionRes
 
-		return
+			return
+		}
+	} else {
+		lastLog = &types.LogEntry{
+			Index: 0,
+			Term:  0,
+			Data:  []byte{},
+			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
+		}
 	}
 
 	requestVoteResponses := make(chan ResponseRequestVote, len(p.ServerIDRpcUrlMap))
