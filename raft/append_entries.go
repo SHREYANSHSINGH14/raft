@@ -11,10 +11,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func (p *Peer) AppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
-	p.raftMu.Lock()
-	defer p.raftMu.Unlock()
-
+func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
 	if strings.TrimSpace(args.LeaderId) == "" {
 		err := fmt.Errorf("leader id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("leader id is empty")

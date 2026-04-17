@@ -9,10 +9,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func (p *Peer) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
-	p.raftMu.Lock()
-	defer p.raftMu.Unlock()
-
+func (p *Peer) HandleRequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
 	if strings.TrimSpace(args.CandidateId) == "" {
 		err := fmt.Errorf("candidate id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("candidate id is empty")

@@ -19,14 +19,16 @@ const (
 	methodGetLastLogEntry = "GetLastLogEntry"
 )
 
-func newTestServer(store *db.MockStore) *Peer {
-	return &Peer{
-		ID:                "node-1",
-		Role:              ServerRole_Follower,
-		store:             store,
-		electionTimeoutCh: make(chan struct{}, 2),
-		LeaderID:          "",
-		commitIndex:       0,
+func newTestServer(store *db.MockStore) *Server {
+	return &Server{
+		Peer: &Peer{
+			ID:                "node-1",
+			Role:              ServerRole_Follower,
+			store:             store,
+			electionTimeoutCh: make(chan struct{}, 2),
+			LeaderID:          "",
+			commitIndex:       0,
+		},
 	}
 }
 

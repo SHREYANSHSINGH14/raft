@@ -5,10 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
-	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -64,23 +61,16 @@ type Peer struct {
 
 	// Mutex also does the same thing of handling concurrent calls to rpc handlers sequentially, by putting goroutines to a FIFO queue and allowing only one goroutine to access the critical section
 	// at a time, since in Raft we'd only be having small number of peers so advantage of handling backpressure, cancellation, queue depth in actors model over mutex will not be significant in this case
-	raftMu sync.Mutex
+	// raftMu sync.Mutex (DEPRECATED) moved the rpc server handling to a separate server struct to avoid the need of this mutex, since now the rpc handlers will be called on the server struct which will have its
+	// own mutex to handle concurrent calls to rpc handlers sequentially without blocking the main peer struct which will handle the internal state changes and role transitions, this will avoid any deadlocks (DEPRECATED)
 
-	ctx        context.Context
-	cancelFunc context.CancelFunc
+	ctx context.Context
 
 	// this channel is called whenever a log is received from leader or a vote is granted to reset election timeout
 	// election timeout triggers role transition from follower to candidate so if we receive a log or grant vote then we should reset the election timeout
 	// by passing an empty struct to this channel, the election timeout goroutine will reset the timer and start waiting for next timeout
 	electionTimeoutCh chan struct{}
-
-	// embedding the unimplemented server to make sure if we add any new rpc in future then we will get compile error if we forget to implement that rpc
-	types.UnimplementedRaftRpcServer
-
-	url string
 }
-
-var _ types.RaftRpcServer = &Peer{}
 
 func NewPeer(ctx context.Context, cfg Config) (*Peer, error) {
 	store, err := db.NewStore(ctx, cfg.DBDir)
@@ -88,11 +78,6 @@ func NewPeer(ctx context.Context, cfg Config) (*Peer, error) {
 		fmt.Println("error while initializing db store")
 		return nil, err
 	}
-
-	logLevel := getLogLevel(cfg.LogLevel)
-	logger := zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
-	zerolog.DefaultContextLogger = &logger
-	zerolog.SetGlobalLevel(logLevel)
 
 	var srv Peer
 	srv.ID = cfg.ID
@@ -102,15 +87,14 @@ func NewPeer(ctx context.Context, cfg Config) (*Peer, error) {
 	srv.lastApplied = 0
 	srv.peerIndexes = nil
 	srv.LeaderID = ""
-	srv.url = fmt.Sprintf("http://%s:%s", cfg.BaseURL, cfg.Port)
 
 	// buffered channel to avoid blocking in case of multiple logs received in short time, 2 is just to be safe, 1 should be enought since we
 	// will get logs from leader one by one and we just need to reset the election timeout for that log, if we receive multiple logs in short time then it means there is some issue with the leader
 	// and in that case we can just reset the election timeout for the first log and ignore the rest of the logs because if there is some issue with the leader then it will be removed in next election
 	// and we will get a new leader
 	srv.electionTimeoutCh = make(chan struct{}, 2)
-	srv.ctx, srv.cancelFunc = context.WithCancel(ctx)
-	srv.ctx = logger.WithContext(srv.ctx)
+	srv.ctx = ctx
+	srv.ctx = srv.ctx
 
 	dialOptions := []grpc.DialOption{}
 	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -158,32 +142,6 @@ func (p *Peer) Start() {
 		}
 	}
 
-	// Start grpc server
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", 3001))
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
-
-	grpcServer := grpc.NewServer()
-	types.RegisterRaftRpcServer(grpcServer, p)
-	go func() {
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("failed to serve: %v", err)
-		}
-	}()
-
-	// This goroutine will wait for the context to be done and then gracefully stop the grpc server and cancel the server context to stop all other goroutines
-	// IMPORTANT to gracefully stop the grpc server to avoid any panics in case of any ongoing rpc calls when the server is stopped
-	// Also canceling the server context will stop all other goroutines like election timeout and send logs goroutine to avoid any
-	// unwanted role transitions or rpc calls when the server is stopped
-
-	// This is an important concept to remeber that whenever we have some long running goroutines in our server then we should always have a way to stop those goroutines gracefully when
-	// the server is stopped to avoid any unwanted behavior and also to free up the resources used by those goroutines
-	go func() {
-		<-p.ctx.Done()
-		grpcServer.GracefulStop()
-	}()
-
 	p.startElectionOut(p.ctx)
 
 	// Since startElectionOut is a separate goroutine, we need to block the main goroutine to keep the server running,
@@ -194,8 +152,6 @@ func (p *Peer) Start() {
 	// block forever in its select loop, keeping the process alive without needing <-p.ctx.Done().
 	// We prefer the goroutine approach because it keeps Start() extensible — any future work after
 	// startElectionOut (e.g. metrics, health checks) would be unreachable if main goroutine was blocked there.
-
-	zerolog.Ctx(p.ctx).Debug().Str("id", p.ID).Str("role", string(p.Role)).Str("listen_address", p.url).Msg("server started")
 
 	<-p.ctx.Done()
 }
