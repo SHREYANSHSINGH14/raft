@@ -15,13 +15,13 @@ type Config struct {
 	Port      string
 }
 
-type Peer struct {
+type PeerClient struct {
 	ID     string `yaml:"id"`
 	RPCUrl string `yaml:"rpc_url"`
 }
 
-type PeerInfo struct {
-	Peers []Peer `yaml:"peers"`
+type PeerClientInfo struct {
+	PeerClients []PeerClient `yaml:"peers"`
 }
 
 func (c *Config) LoadConfig() {
@@ -38,14 +38,14 @@ func (c *Config) LoadConfig() {
 		panic("error reading peer info file: " + err.Error())
 	}
 
-	var peerInfo PeerInfo
+	var peerInfo PeerClientInfo
 	err = yaml.Unmarshal(f, &peerInfo)
 	if err != nil {
 		panic("error unmarshalling peer info: " + err.Error())
 	}
 
 	c.ServerIDS = make(map[string]string)
-	for _, peer := range peerInfo.Peers {
+	for _, peer := range peerInfo.PeerClients {
 		if peer.ID == c.ID {
 			continue
 		}

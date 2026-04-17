@@ -15,7 +15,7 @@ type ElectionResponse struct {
 	err           error
 }
 
-func (p *Server) startElection(ctx context.Context) {
+func (p *Peer) startElection(ctx context.Context) {
 	go func() {
 		electionTime := time.Duration(500 * time.Millisecond) // TODO: Replace with config
 		ticker := time.NewTicker(electionTime)
@@ -70,7 +70,7 @@ func (p *Server) startElection(ctx context.Context) {
 	}()
 }
 
-func (p *Server) election(ctx context.Context, resCh chan ElectionResponse) {
+func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	var electionRes ElectionResponse
 	if p.getRole() != ServerRole_Candidate {
 		err := fmt.Errorf("server is not a candidate cannot start election")

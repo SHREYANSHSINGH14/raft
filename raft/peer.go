@@ -33,7 +33,7 @@ type PeerIndexes struct {
 	matchIndex uint
 }
 
-type Server struct {
+type Peer struct {
 	ID                string
 	Role              ServerRole
 	ServerIDRpcUrlMap map[string]types.RaftRpcClient
@@ -80,9 +80,9 @@ type Server struct {
 	url string
 }
 
-var _ types.RaftRpcServer = &Server{}
+var _ types.RaftRpcServer = &Peer{}
 
-func NewServer(ctx context.Context, cfg Config) (*Server, error) {
+func NewPeer(ctx context.Context, cfg Config) (*Peer, error) {
 	store, err := db.NewStore(ctx, cfg.DBDir)
 	if err != nil {
 		fmt.Println("error while initializing db store")
@@ -94,7 +94,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	zerolog.DefaultContextLogger = &logger
 	zerolog.SetGlobalLevel(logLevel)
 
-	var srv Server
+	var srv Peer
 	srv.ID = cfg.ID
 	srv.Role = ServerRole_Follower
 	srv.store = store
@@ -131,7 +131,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	return &srv, nil
 }
 
-func (p *Server) Start() {
+func (p *Peer) Start() {
 	_, err := p.store.GetCurrentTerm(p.ctx)
 	if err != nil {
 		if !errors.Is(pebble.ErrNotFound, err) {
@@ -206,17 +206,17 @@ func (p *Server) Start() {
 // They also starts the necessary goroutines for that role like election timeout for follower and send logs for leader
 // -------------------------------------------
 
-func (p *Server) becomeFollower(ctx context.Context) {
+func (p *Peer) becomeFollower(ctx context.Context) {
 	p.setRole(ServerRole_Follower)
 	p.startElectionOut(ctx)
 }
 
-func (p *Server) becomeCandidate(ctx context.Context) {
+func (p *Peer) becomeCandidate(ctx context.Context) {
 	p.setRole(ServerRole_Candidate)
 	p.startElection(ctx)
 }
 
-func (p *Server) becomeLeader(ctx context.Context) {
+func (p *Peer) becomeLeader(ctx context.Context) {
 	p.setRole(ServerRole_Leader)
 	p.peerIndexes = make(map[string]PeerIndexes)
 
@@ -241,7 +241,7 @@ func (p *Server) becomeLeader(ctx context.Context) {
 // find functions for candidate and leader in respective files
 // -------------------------------------------
 
-func (p *Server) startElectionOut(ctx context.Context) {
+func (p *Peer) startElectionOut(ctx context.Context) {
 	go func() {
 		duration, err := rand.Int(rand.Reader, big.NewInt(300))
 		if err != nil {
@@ -274,32 +274,32 @@ func (p *Server) startElectionOut(ctx context.Context) {
 // These functions are thread safe and should be used whenever we want to read or write these state variables
 // -------------------------------------------
 
-func (p *Server) setRole(role ServerRole) {
+func (p *Peer) setRole(role ServerRole) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Role = role
 	return
 }
 
-func (p *Server) getRole() ServerRole {
+func (p *Peer) getRole() ServerRole {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.Role
 }
 
-func (p *Server) getID() string {
+func (p *Peer) getID() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ID
 }
 
-func (p *Server) getPeerIndex(id string) PeerIndexes {
+func (p *Peer) getPeerIndex(id string) PeerIndexes {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.peerIndexes[id]
 }
 
-func (p *Server) setNextPeerIndex(id string, idx uint) {
+func (p *Peer) setNextPeerIndex(id string, idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -318,7 +318,7 @@ func (p *Server) setNextPeerIndex(id string, idx uint) {
 	p.peerIndexes[id] = peer // write back
 }
 
-func (p *Server) setMatchPeerIndex(id string, idx uint) {
+func (p *Peer) setMatchPeerIndex(id string, idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -330,28 +330,28 @@ func (p *Server) setMatchPeerIndex(id string, idx uint) {
 	p.peerIndexes[id] = peer
 }
 
-func (p *Server) setCommitIndex(idx uint) {
+func (p *Peer) setCommitIndex(idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.commitIndex = idx
 }
 
-func (p *Server) getCommitIndex() uint {
+func (p *Peer) getCommitIndex() uint {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	return p.commitIndex
 }
 
-func (p *Server) setLeaderID(id string) {
+func (p *Peer) setLeaderID(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.LeaderID = id
 }
 
-func (p *Server) getLeaderID() string {
+func (p *Peer) getLeaderID() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

@@ -11,7 +11,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
+func (p *Peer) AppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
 	p.raftMu.Lock()
 	defer p.raftMu.Unlock()
 
@@ -108,12 +108,14 @@ func (p *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArg
 		}
 	}
 
+	fmt.Printf("\nArg commit: %d srv commit: %d\n", args.LeaderCommit, p.getCommitIndex())
 	if args.LeaderCommit > uint64(p.getCommitIndex()) {
 		lastLogIdx, err := p.store.GetLastLogIndex(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
+		fmt.Printf("\nLast log index: %d\n", lastLogIdx)
 
 		minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))
 		p.setCommitIndex(uint(minCommitIndex))

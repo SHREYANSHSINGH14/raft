@@ -9,7 +9,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func (p *Server) startSendLogs(ctx context.Context) {
+func (p *Peer) startSendLogs(ctx context.Context) {
 	heartBeatTime := time.Duration(500 * time.Millisecond) // TODO: replace with config value
 	_ = heartBeatTime
 	ticker := time.NewTicker(heartBeatTime)
@@ -40,7 +40,7 @@ func (p *Server) startSendLogs(ctx context.Context) {
 	}
 }
 
-func (p *Server) sendLogs(ctx context.Context, errChan chan<- error) {
+func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())

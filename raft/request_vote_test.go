@@ -19,8 +19,8 @@ const (
 	methodGetLastLogEntry = "GetLastLogEntry"
 )
 
-func newTestServer(store *db.MockStore) *Server {
-	return &Server{
+func newTestServer(store *db.MockStore) *Peer {
+	return &Peer{
 		ID:                "node-1",
 		Role:              ServerRole_Follower,
 		store:             store,

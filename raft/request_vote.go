@@ -9,7 +9,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func (p *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
+func (p *Peer) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
 	p.raftMu.Lock()
 	defer p.raftMu.Unlock()
 
