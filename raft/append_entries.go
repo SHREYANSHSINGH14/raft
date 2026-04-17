@@ -105,14 +105,12 @@ func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntrie
 		}
 	}
 
-	fmt.Printf("\nArg commit: %d srv commit: %d\n", args.LeaderCommit, p.getCommitIndex())
-	if args.LeaderCommit > uint64(p.getCommitIndex()) {
+	if args.LeaderCommit >= uint64(p.getCommitIndex()) {
 		lastLogIdx, err := p.store.GetLastLogIndex(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}
-		fmt.Printf("\nLast log index: %d\n", lastLogIdx)
 
 		minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))
 		p.setCommitIndex(uint(minCommitIndex))
