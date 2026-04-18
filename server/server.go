@@ -1,4 +1,4 @@
-package raft
+package server
 
 import (
 	"context"
@@ -8,13 +8,15 @@ import (
 	"os"
 	"sync"
 
+	"github.com/SHREYANSHSINGH14/raft/config"
+	"github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 )
 
 type Server struct {
-	Peer *Peer
+	Peer *raft.Peer
 
 	baseUrl string
 	port    string
@@ -30,19 +32,19 @@ type Server struct {
 
 var _ types.RaftRpcServer = &Server{}
 
-func NewServer(ctx context.Context, cfg Config) (*Server, error) {
+func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	var server Server
 	server.ctx, server.cancelFunc = context.WithCancel(ctx)
 
 	// initialize logger here, attach to server context
-	logLevel := getLogLevel(cfg.LogLevel)
+	logLevel := config.GetLogLevel(cfg.LogLevel)
 	logger := zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 	zerolog.DefaultContextLogger = &logger
 	zerolog.SetGlobalLevel(logLevel)
 	server.ctx = logger.WithContext(server.ctx)
 
 	// pass server.ctx down to Peer — same context, same lifecycle
-	peer, err := NewPeer(server.ctx, cfg)
+	peer, err := raft.NewPeer(server.ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +83,7 @@ func (s *Server) Start() {
 		grpcServer.GracefulStop()
 	}()
 
-	zerolog.Ctx(s.Peer.ctx).Debug().Str("id", s.Peer.ID).Str("role", string(s.Peer.Role)).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
+	zerolog.Ctx(s.ctx).Debug().Str("id", s.Peer.GetID()).Str("role", string(s.Peer.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
 
 	s.Peer.Start()
 }

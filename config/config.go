@@ -1,8 +1,9 @@
-package raft
+package config
 
 import (
 	"os"
 
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v2"
 )
 
@@ -50,5 +51,26 @@ func (c *Config) LoadConfig() {
 			continue
 		}
 		c.ServerIDS[peer.ID] = peer.RPCUrl
+	}
+}
+
+func GetLogLevel(level string) zerolog.Level {
+	switch level {
+	case "info":
+		return zerolog.InfoLevel
+	case "debug":
+		return zerolog.DebugLevel
+	case "warn":
+		return zerolog.WarnLevel
+	case "error":
+		return zerolog.ErrorLevel
+	case "fatal":
+		return zerolog.FatalLevel
+	case "panic":
+		return zerolog.PanicLevel
+	case "disable":
+		return zerolog.Disabled
+	default:
+		return zerolog.DebugLevel
 	}
 }

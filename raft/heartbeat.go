@@ -53,7 +53,7 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 	peerLogLen := make(map[string]uint)
 
 	for id, client := range p.ServerIDRpcUrlMap {
-		nextIdx := p.getPeerIndex(id).nextIndex
+		nextIdx := p.GetPeerIndex(id).nextIndex
 
 		var prevLog *types.LogEntry
 		if nextIdx > 1 {
@@ -82,7 +82,7 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		peerLogLen[id] = uint(len(logs))
 
 		wg.Add(1)
-		go sendAppendLogs(ctx, &wg, p.getID(), id, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, responseCh)
+		go sendAppendLogs(ctx, &wg, p.GetID(), id, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, responseCh)
 
 	}
 
@@ -103,10 +103,10 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		}
 
 		if res.rpcRes.Success {
-			p.setMatchPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id]-1)
-			p.setNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id])
+			p.SetMatchPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id]-1)
+			p.SetNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id])
 		} else {
-			p.setNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex-1)
+			p.SetNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex-1)
 		}
 	}
 
@@ -129,7 +129,7 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		// this is important to make sure that we don't commit any log from previous term which might not be present on the new leader after a leader change
 		// read 5.4.2 of raft thesis for more details
 		if count >= uint(len(p.ServerIDRpcUrlMap)/2+1) && idx > p.commitIndex && idxLog.Term == uint64(currentTerm) {
-			p.setCommitIndex(idx)
+			p.SetCommitIndex(idx)
 		}
 	}
 

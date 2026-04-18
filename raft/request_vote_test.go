@@ -19,19 +19,6 @@ const (
 	methodGetLastLogEntry = "GetLastLogEntry"
 )
 
-func newTestServer(store *db.MockStore) *Server {
-	return &Server{
-		Peer: &Peer{
-			ID:                "node-1",
-			Role:              ServerRole_Follower,
-			store:             store,
-			electionTimeoutCh: make(chan struct{}, 2),
-			LeaderID:          "",
-			commitIndex:       0,
-		},
-	}
-}
-
 func defaultZeroLogEntry() *types.LogEntry {
 	return &types.LogEntry{
 		Index: 0,
@@ -45,9 +32,9 @@ func defaultZeroLogEntry() *types.LogEntry {
 
 func TestRequestVote_EmptyCandidateID(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "   ",
 	})
 
@@ -60,12 +47,12 @@ func TestRequestVote_EmptyCandidateID(t *testing.T) {
 
 func TestRequestVote_TermLessThanCurrent(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        3,
 	})
@@ -80,7 +67,7 @@ func TestRequestVote_TermLessThanCurrent(t *testing.T) {
 
 func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
@@ -90,7 +77,7 @@ func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -107,7 +94,7 @@ func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 
 func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -116,7 +103,7 @@ func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -135,7 +122,7 @@ func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 
 func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -143,7 +130,7 @@ func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -159,13 +146,13 @@ func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 
 func TestRequestVote_AlreadyVotedForDifferentCandidate(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("candidate-2", nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -179,7 +166,7 @@ func TestRequestVote_AlreadyVotedForDifferentCandidate(t *testing.T) {
 
 func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -187,7 +174,7 @@ func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -203,7 +190,7 @@ func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 
 func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -213,7 +200,7 @@ func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 		Term:  4,
 	}, nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  3, // behind
@@ -229,7 +216,7 @@ func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 
 func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -239,7 +226,7 @@ func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 		Term:  4,
 	}, nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  4,
@@ -255,7 +242,7 @@ func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 
 func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -266,7 +253,7 @@ func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 	}, nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  4,
@@ -282,7 +269,7 @@ func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 
 func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -293,7 +280,7 @@ func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 	}, nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  5, // ahead
@@ -310,11 +297,11 @@ func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 // 14. GetCurrentTerm fails
 func TestRequestVote_DBErr_GetCurrentTerm(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -327,12 +314,12 @@ func TestRequestVote_DBErr_GetCurrentTerm(t *testing.T) {
 // 15. SetCurrentTerm fails (when term update needed)
 func TestRequestVote_DBErr_SetCurrentTerm(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -345,13 +332,13 @@ func TestRequestVote_DBErr_SetCurrentTerm(t *testing.T) {
 // 16. SetVotedFor("") fails (reset after term update)
 func TestRequestVote_DBErr_SetVotedForReset(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -364,12 +351,12 @@ func TestRequestVote_DBErr_SetVotedForReset(t *testing.T) {
 // 17. GetVotedFor fails
 func TestRequestVote_DBErr_GetVotedFor(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -382,13 +369,13 @@ func TestRequestVote_DBErr_GetVotedFor(t *testing.T) {
 // 18. GetLastLogEntry fails
 func TestRequestVote_DBErr_GetLastLogEntry(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
 	store.On(methodGetLastLogEntry, mock.Anything).Return(nil, errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId: "candidate-1",
 		Term:        5,
 	})
@@ -401,14 +388,14 @@ func TestRequestVote_DBErr_GetLastLogEntry(t *testing.T) {
 // 19. SetVotedFor(candidateID) fails (final vote persist)
 func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(errors.New("db error"))
 
-	resp, err := srv.RequestVote(context.Background(), &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(context.Background(), &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -422,12 +409,12 @@ func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 
 // 20. ── GetLastLogEntry returns nil (defensive nil guard) ─────────────────────────
 // Real store never returns nil since we fixed it to return zero value entry.
-// This test ensures the nil guard in RequestVote still behaves correctly
+// This test ensures the nil guard in HandleRequestVote still behaves correctly
 // if a buggy implementation or future change returns nil without an error.
 
 func TestRequestVote_LastLogEntryNil_AllowVote(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -435,7 +422,7 @@ func TestRequestVote_LastLogEntryNil_AllowVote(t *testing.T) {
 	store.On(methodGetLastLogEntry, mock.Anything).Return(defaultZeroLogEntry(), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  0,
@@ -454,7 +441,7 @@ func TestRequestVote_LastLogEntryNil_AllowVote(t *testing.T) {
 
 func TestRequestVote_ZeroValueLastLog_CandidateAhead_AllowVote(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -463,7 +450,7 @@ func TestRequestVote_ZeroValueLastLog_CandidateAhead_AllowVote(t *testing.T) {
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	// candidate has real logs, node has none — candidate is strictly ahead
-	resp, err := srv.RequestVote(ctx, &types.RequestVoteArgs{
+	resp, err := peer.HandleRequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  "candidate-1",
 		Term:         5,
 		LastLogTerm:  3,

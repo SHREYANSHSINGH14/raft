@@ -23,16 +23,16 @@ const (
 
 func TestAppendEntries_EmptyLeaderID(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId: "   ",
 	})
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -40,19 +40,19 @@ func TestAppendEntries_EmptyLeaderID(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetCurrentTerm(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId: "leader-1",
 		Term:     5,
 	})
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -60,12 +60,12 @@ func TestAppendEntries_DBErr_GetCurrentTerm(t *testing.T) {
 
 func TestAppendEntries_TermLessThanCurrent(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId: "leader-1",
 		Term:     3,
 	})
@@ -73,8 +73,8 @@ func TestAppendEntries_TermLessThanCurrent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, resp.Success)
 	assert.Equal(t, uint64(5), resp.Term)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -82,7 +82,7 @@ func TestAppendEntries_TermLessThanCurrent(t *testing.T) {
 
 func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -91,7 +91,7 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -101,8 +101,8 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -110,7 +110,7 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 
 func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
@@ -120,7 +120,7 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -131,8 +131,8 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
 	assert.Equal(t, uint64(5), resp.Term)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -140,20 +140,20 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 
 func TestAppendEntries_DBErr_SetCurrentTerm(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId: "leader-1",
 		Term:     5,
 	})
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -161,21 +161,21 @@ func TestAppendEntries_DBErr_SetCurrentTerm(t *testing.T) {
 
 func TestAppendEntries_DBErr_SetVotedForReset(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId: "leader-1",
 		Term:     5,
 	})
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -183,12 +183,12 @@ func TestAppendEntries_DBErr_SetVotedForReset(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetLogByIndex(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(nil, errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -196,8 +196,8 @@ func TestAppendEntries_DBErr_GetLogByIndex(t *testing.T) {
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -205,7 +205,7 @@ func TestAppendEntries_DBErr_GetLogByIndex(t *testing.T) {
 
 func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -213,7 +213,7 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -223,8 +223,8 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -232,7 +232,7 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 
 func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -241,7 +241,7 @@ func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 		Term:  2,
 	}, nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -250,8 +250,8 @@ func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.False(t, resp.Success)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -259,13 +259,13 @@ func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 
 func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(&types.LogEntry{Index: 3, Term: 4}, nil)
 	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -274,8 +274,8 @@ func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -283,7 +283,7 @@ func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
 
 func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -292,7 +292,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 	// AppendLogs must NOT be called
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -303,8 +303,8 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -312,7 +312,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 
 func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 
 	entries := []*types.LogEntry{{Index: 4, Term: 5}}
 
@@ -321,7 +321,7 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -331,8 +331,8 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -340,8 +340,8 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 
 func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
-	srv.Peer.commitIndex = 5
+	peer := NewPeerMock(store)
+	peer.commitIndex = 5
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -349,7 +349,7 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
 	// GetLastLogIndex must NOT be called
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -359,9 +359,9 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, uint(5), srv.Peer.commitIndex) // unchanged
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, uint(5), peer.commitIndex) // unchanged
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -369,8 +369,8 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 
 func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
-	srv.Peer.commitIndex = 2
+	peer := NewPeerMock(store)
+	peer.commitIndex = 2
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -378,7 +378,7 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(6), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -388,9 +388,9 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, uint(6), srv.Peer.commitIndex)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, uint(6), peer.commitIndex)
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -398,15 +398,15 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
-	srv.Peer.commitIndex = 2
+	peer := NewPeerMock(store)
+	peer.commitIndex = 2
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(&types.LogEntry{Index: 3, Term: 4}, nil)
 	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
-	resp, err := srv.AppendEntries(context.Background(), &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(context.Background(), &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -416,8 +416,8 @@ func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 
 	assert.Nil(t, resp)
 	assert.Error(t, err)
-	assert.Equal(t, "", srv.Peer.getLeaderID())
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "", peer.GetLeaderID())
+	assert.Equal(t, 0, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -425,8 +425,8 @@ func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 
 func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
-	srv.Peer.LeaderID = "old-leader"
+	peer := NewPeerMock(store)
+	peer.LeaderID = "old-leader"
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -434,7 +434,7 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "new-leader",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -444,8 +444,8 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "new-leader", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "new-leader", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -453,7 +453,7 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 
 func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -461,7 +461,7 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -471,8 +471,8 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -480,8 +480,8 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 
 func TestAppendEntries_HappyPath(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
-	srv.Peer.commitIndex = 2
+	peer := NewPeerMock(store)
+	peer.commitIndex = 2
 	ctx := context.Background()
 
 	entries := []*types.LogEntry{
@@ -495,7 +495,7 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(5), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 3,
@@ -507,9 +507,9 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
 	assert.Equal(t, uint64(5), resp.Term)
-	assert.Equal(t, uint(5), srv.Peer.commitIndex)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, uint(5), peer.commitIndex)
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -520,7 +520,7 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 
 func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -528,7 +528,7 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 0,
@@ -538,8 +538,8 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, resp.Success)
-	assert.Equal(t, "leader-1", srv.Peer.getLeaderID())
-	assert.Equal(t, 1, len(srv.Peer.electionTimeoutCh))
+	assert.Equal(t, "leader-1", peer.GetLeaderID())
+	assert.Equal(t, 1, len(peer.electionTimeoutCh))
 	store.AssertExpectations(t)
 }
 
@@ -551,14 +551,14 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 
 func TestAppendEntries_PrevLogIndexNonZero_NotFound_ReturnsFalse(t *testing.T) {
 	store := new(db.MockStore)
-	srv := newTestServer(store)
+	peer := NewPeerMock(store)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(5)).Return(nil, pebble.ErrNotFound)
 	// TruncateLogs, AppendLogs, electionTimeoutCh must NOT be touched
 
-	resp, err := srv.AppendEntries(ctx, &types.AppendEntriesArgs{
+	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{
 		LeaderId:     "leader-1",
 		Term:         5,
 		PrevLogIndex: 5, // follower doesn't have this
@@ -568,7 +568,7 @@ func TestAppendEntries_PrevLogIndexNonZero_NotFound_ReturnsFalse(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, resp.Success)
 	assert.Equal(t, uint64(5), resp.Term)
-	assert.Equal(t, "", srv.Peer.getLeaderID())         // leaderID not set on false
-	assert.Equal(t, 0, len(srv.Peer.electionTimeoutCh)) // no signal on false
+	assert.Equal(t, "", peer.GetLeaderID())         // leaderID not set on false
+	assert.Equal(t, 0, len(peer.electionTimeoutCh)) // no signal on false
 	store.AssertExpectations(t)
 }

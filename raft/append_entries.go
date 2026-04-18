@@ -105,7 +105,7 @@ func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntrie
 		}
 	}
 
-	if args.LeaderCommit >= uint64(p.getCommitIndex()) {
+	if args.LeaderCommit >= uint64(p.GetCommitIndex()) {
 		lastLogIdx, err := p.store.GetLastLogIndex(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
@@ -113,11 +113,11 @@ func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntrie
 		}
 
 		minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))
-		p.setCommitIndex(uint(minCommitIndex))
+		p.SetCommitIndex(uint(minCommitIndex))
 	}
 
-	if p.getLeaderID() != args.LeaderId {
-		p.setLeaderID(args.LeaderId)
+	if p.GetLeaderID() != args.LeaderId {
+		p.SetLeaderID(args.LeaderId)
 	}
 
 	p.electionTimeoutCh <- struct{}{} // reset election timeout

@@ -72,10 +72,10 @@ func (p *Peer) startElection(ctx context.Context) {
 
 func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	var electionRes ElectionResponse
-	if p.getRole() != ServerRole_Candidate {
+	if p.GetRole() != ServerRole_Candidate {
 		err := fmt.Errorf("server is not a candidate cannot start election")
 		zerolog.Ctx(ctx).Error().Err(err).Msg(err.Error())
-		electionRes.transitonRole = p.getRole()
+		electionRes.transitonRole = p.GetRole()
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -86,7 +86,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.getRole()
+		electionRes.transitonRole = p.GetRole()
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -98,7 +98,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	err = p.store.SetCurrentTerm(ctx, newTerm)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.getRole()
+		electionRes.transitonRole = p.GetRole()
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -109,7 +109,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	err = p.store.SetVotedFor(ctx, p.ID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.getRole()
+		electionRes.transitonRole = p.GetRole()
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -120,7 +120,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	lastLogIndex, err := p.store.GetLastLogIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.getRole()
+		electionRes.transitonRole = p.GetRole()
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -133,7 +133,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		lastLog, err = p.store.GetLogByIndex(ctx, lastLogIndex)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-			electionRes.transitonRole = p.getRole()
+			electionRes.transitonRole = p.GetRole()
 			electionRes.err = err
 
 			resCh <- electionRes
@@ -156,7 +156,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 
 	for id, client := range p.ServerIDRpcUrlMap {
 		wg.Add(1)
-		go sendRequestVote(ctx, &wg, p.getID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
+		go sendRequestVote(ctx, &wg, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
 	}
 
 	wg.Wait()
@@ -183,7 +183,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 			return
 		}
 
-		if res.rpcRes.VoteGranted && p.getRole() == ServerRole_Candidate {
+		if res.rpcRes.VoteGranted && p.GetRole() == ServerRole_Candidate {
 			votesReceived++
 		}
 
@@ -197,7 +197,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		}
 	}
 
-	electionRes.transitonRole = p.getRole()
+	electionRes.transitonRole = p.GetRole()
 	electionRes.err = nil
 
 	resCh <- electionRes

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/db"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/cockroachdb/pebble"
@@ -72,7 +73,7 @@ type Peer struct {
 	electionTimeoutCh chan struct{}
 }
 
-func NewPeer(ctx context.Context, cfg Config) (*Peer, error) {
+func NewPeer(ctx context.Context, cfg config.Config) (*Peer, error) {
 	store, err := db.NewStore(ctx, cfg.DBDir)
 	if err != nil {
 		fmt.Println("error while initializing db store")
@@ -163,17 +164,17 @@ func (p *Peer) Start() {
 // -------------------------------------------
 
 func (p *Peer) becomeFollower(ctx context.Context) {
-	p.setRole(ServerRole_Follower)
+	p.SetRole(ServerRole_Follower)
 	p.startElectionOut(ctx)
 }
 
 func (p *Peer) becomeCandidate(ctx context.Context) {
-	p.setRole(ServerRole_Candidate)
+	p.SetRole(ServerRole_Candidate)
 	p.startElection(ctx)
 }
 
 func (p *Peer) becomeLeader(ctx context.Context) {
-	p.setRole(ServerRole_Leader)
+	p.SetRole(ServerRole_Leader)
 	p.peerIndexes = make(map[string]PeerIndexes)
 
 	lastIndex, err := p.store.GetLastLogIndex(ctx)
@@ -230,32 +231,32 @@ func (p *Peer) startElectionOut(ctx context.Context) {
 // These functions are thread safe and should be used whenever we want to read or write these state variables
 // -------------------------------------------
 
-func (p *Peer) setRole(role ServerRole) {
+func (p *Peer) SetRole(role ServerRole) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Role = role
 	return
 }
 
-func (p *Peer) getRole() ServerRole {
+func (p *Peer) GetRole() ServerRole {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.Role
 }
 
-func (p *Peer) getID() string {
+func (p *Peer) GetID() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ID
 }
 
-func (p *Peer) getPeerIndex(id string) PeerIndexes {
+func (p *Peer) GetPeerIndex(id string) PeerIndexes {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.peerIndexes[id]
 }
 
-func (p *Peer) setNextPeerIndex(id string, idx uint) {
+func (p *Peer) SetNextPeerIndex(id string, idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -274,7 +275,7 @@ func (p *Peer) setNextPeerIndex(id string, idx uint) {
 	p.peerIndexes[id] = peer // write back
 }
 
-func (p *Peer) setMatchPeerIndex(id string, idx uint) {
+func (p *Peer) SetMatchPeerIndex(id string, idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -286,51 +287,30 @@ func (p *Peer) setMatchPeerIndex(id string, idx uint) {
 	p.peerIndexes[id] = peer
 }
 
-func (p *Peer) setCommitIndex(idx uint) {
+func (p *Peer) SetCommitIndex(idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.commitIndex = idx
 }
 
-func (p *Peer) getCommitIndex() uint {
+func (p *Peer) GetCommitIndex() uint {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	return p.commitIndex
 }
 
-func (p *Peer) setLeaderID(id string) {
+func (p *Peer) SetLeaderID(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.LeaderID = id
 }
 
-func (p *Peer) getLeaderID() string {
+func (p *Peer) GetLeaderID() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	return p.LeaderID
-}
-
-func getLogLevel(level string) zerolog.Level {
-	switch level {
-	case "info":
-		return zerolog.InfoLevel
-	case "debug":
-		return zerolog.DebugLevel
-	case "warn":
-		return zerolog.WarnLevel
-	case "error":
-		return zerolog.ErrorLevel
-	case "fatal":
-		return zerolog.FatalLevel
-	case "panic":
-		return zerolog.PanicLevel
-	case "disable":
-		return zerolog.Disabled
-	default:
-		return zerolog.DebugLevel
-	}
 }

@@ -1,4 +1,4 @@
-package raft
+package server
 
 import (
 	"context"
@@ -7,20 +7,14 @@ import (
 	"testing"
 
 	"github.com/SHREYANSHSINGH14/raft/db"
+	"github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/stretchr/testify/assert"
 )
 
 func newConcurrentTestServer(store types.RaftDBInterface) *Server {
 	return &Server{
-		Peer: &Peer{
-			ID:                "node-1",
-			Role:              ServerRole_Follower,
-			store:             store,
-			electionTimeoutCh: make(chan struct{}, 10),
-			LeaderID:          "",
-			commitIndex:       0,
-		},
+		Peer: raft.NewPeerMock(store),
 	}
 }
 
@@ -135,7 +129,7 @@ func TestInvariant_RequestVote_IdempotentVote(t *testing.T) {
 func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 	store := db.NewMockKVStore()
 	srv := newConcurrentTestServer(store)
-	srv.Peer.commitIndex = 5
+	srv.Peer.SetCommitIndex(5)
 	ctx := context.Background()
 
 	store.SetCurrentTerm(ctx, 5)
@@ -183,9 +177,9 @@ func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	fmt.Printf("Get commit index %d", srv.Peer.getCommitIndex())
+	fmt.Printf("Get commit index %d", srv.Peer.GetCommitIndex())
 
-	assert.GreaterOrEqual(t, srv.Peer.getCommitIndex(), uint(5),
+	assert.GreaterOrEqual(t, srv.Peer.GetCommitIndex(), uint(5),
 		"Raft invariant violated: commitIndex went below initial value of 5")
 }
 
@@ -324,7 +318,7 @@ func TestInterleaving_RequestVote_DoubleVoteRace(t *testing.T) {
 func TestInterleaving_AppendEntries_CommitIndexRollback(t *testing.T) {
 	store := db.NewMockKVStore()
 	srv := newConcurrentTestServer(store)
-	srv.Peer.commitIndex = 5
+	srv.Peer.SetCommitIndex(5)
 	ctx := context.Background()
 
 	store.SetCurrentTerm(ctx, 5)
@@ -381,7 +375,7 @@ func TestInterleaving_AppendEntries_CommitIndexRollback(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	assert.GreaterOrEqual(t, srv.Peer.getCommitIndex(), uint(5),
+	assert.GreaterOrEqual(t, srv.Peer.GetCommitIndex(), uint(5),
 		"commitIndex must never decrease below initial value")
 }
 
