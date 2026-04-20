@@ -162,8 +162,8 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	wg.Wait()
 
 	responseReceived := 0
-	var majority int = (len(p.ServerIDRpcUrlMap) / 2) + 1
-	votesReceived := 0
+	var majority int = ((len(p.ServerIDRpcUrlMap) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
+	votesReceived := 1                                          // we have already voted for ourselves so we start with 1 vote
 
 	for _ = range len(p.ServerIDRpcUrlMap) {
 		res := <-requestVoteResponses
@@ -174,6 +174,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 			continue
 		}
 
+		fmt.Printf("Received RequestVote response from peer %s: VoteGranted=%v, Term=%d, NewTerm=%d\n", res.id, res.rpcRes.VoteGranted, res.rpcRes.Term, newTerm)
 		if uint(res.rpcRes.Term) > newTerm {
 			electionRes.transitonRole = ServerRole_Follower
 			electionRes.err = nil
@@ -186,15 +187,15 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		if res.rpcRes.VoteGranted && p.GetRole() == ServerRole_Candidate {
 			votesReceived++
 		}
+	}
 
-		if votesReceived >= majority {
-			electionRes.transitonRole = ServerRole_Leader
-			electionRes.err = nil
+	if votesReceived >= majority {
+		electionRes.transitonRole = ServerRole_Leader
+		electionRes.err = nil
 
-			resCh <- electionRes
+		resCh <- electionRes
 
-			return
-		}
+		return
 	}
 
 	electionRes.transitonRole = p.GetRole()
@@ -235,8 +236,9 @@ func sendRequestVote(ctx context.Context, wg *sync.WaitGroup, candidateID, peerI
 		return
 	}
 
-	res.rpcRes.VoteGranted = rpcRes.VoteGranted
-	res.rpcRes.Term = rpcRes.Term
+	fmt.Printf("Received RequestVote response from peer %s: VoteGranted=%v, Term=%d\n", peerID, rpcRes.VoteGranted, rpcRes.Term)
+
+	res.rpcRes = rpcRes
 	res.id = peerID
 
 	responseCh <- res

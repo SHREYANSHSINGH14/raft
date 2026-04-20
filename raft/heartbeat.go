@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -110,27 +111,23 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		}
 	}
 
-	// update commit index
-	// check which log index has been replicated on majority of servers, using the match index of peers
-	matchIndexes := make(map[uint]uint, len(p.ServerIDRpcUrlMap))
-
-	for _, peer := range p.peerIndexes {
-		matchIndexes[peer.matchIndex]++
+	lastLogIndex, err := p.store.GetLastLogIndex(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+		errChan <- err
+		return
 	}
 
-	for idx, count := range matchIndexes {
-		idxLog, err := p.store.GetLogByIndex(ctx, idx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log by index %d: %s", idx, err.Error())
-			continue
-		}
+	newCommitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
+	newCommitLog, err := p.store.GetLogByIndex(ctx, newCommitIndex)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+		errChan <- err
+		return
+	}
 
-		// only update commit index if the log has been replicated on majority of servers and the log is from current term
-		// this is important to make sure that we don't commit any log from previous term which might not be present on the new leader after a leader change
-		// read 5.4.2 of raft thesis for more details
-		if count >= uint(len(p.ServerIDRpcUrlMap)/2+1) && idx > p.commitIndex && idxLog.Term == uint64(currentTerm) {
-			p.SetCommitIndex(idx)
-		}
+	if newCommitIndex > p.commitIndex && newCommitLog.Term >= uint64(currentTerm) {
+		p.commitIndex = newCommitIndex
 	}
 
 	errChan <- nil
@@ -170,9 +167,52 @@ func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID st
 		return
 	}
 
-	res.rpcRes.Term = rpcRes.Term
-	res.rpcRes.Success = rpcRes.Success
+	res.rpcRes = rpcRes
 	res.id = peerID
 
 	responseCh <- res
+}
+
+// Intution behind this function
+// We need to find the log index which is replicated on majority of servers, because we can only commit logs which are replicated on majority of servers
+// So the lowest match index would always be replicated to all so its safe to take that as the commit index, but that is sub optimal
+// Lets take an example, n2: 5, n3: 3, n4: 4, n5: 6, self: 7 (these are match index per node)
+// here replication frequency per matchIndex would look like 3: 5, 4: 4, 5: 3, 6: 2, 7: 1
+// so if we take the lowest match index which is 3, then we can only commit logs till index 3, but we can actually commit logs till index 5 because logs till index 5 are replicated on majority of servers (n2, n3, n4)
+// so we need to find the highest log index which is replicated on majority of servers and that would be our commit index
+// To do that we take all the matchIndex and sort them in descending order which would look like [7, 6, 5, 4, 3], and there replication frequency would look like 7: 1, 6: 2, 5: 3, 4: 4, 3: 5
+// lets take another example where matchIndexes are [7,6,6,5,5,5,4,3] and there replication frequency would be 7: 1, 6: 3, 5: 6, 4: 7, 3: 8
+// here we can see a pattern that a matchIndex's replication frequency is always equal to its last occurence index + 1 in descending sorted matchIndex array
+// we create a map of matchIndex to its replication frequency using this pattern and then we iterate over the matchIndexes (without duplicates) in descending order and check if its replication frequency is greater than
+// or equal to majority count, if it is then we return that matchIndex as the commit index because that would be the highest log index which is replicated on majority of servers
+func getMajorityMatchIndex(peerIndexes map[string]PeerIndexes, selfLastIndex uint) uint {
+	var matchIndexes []uint
+
+	for _, peer := range peerIndexes {
+		matchIndexes = append(matchIndexes, peer.matchIndex)
+	}
+
+	matchIndexes = append(matchIndexes, selfLastIndex)
+
+	// sort the match indexes in descending order
+	slices.Sort(matchIndexes)
+	slices.Reverse(matchIndexes)
+
+	matchIndexesFrequency := make(map[uint]int)
+
+	for i, idx := range matchIndexes {
+		matchIndexesFrequency[idx] = i + 1
+	}
+
+	matchIndexes = slices.Compact(matchIndexes)
+
+	majorutyCount := (len(peerIndexes)+1)/2 + 1 // +1 is for self
+
+	for _, idx := range matchIndexes {
+		if matchIndexesFrequency[idx] >= majorutyCount {
+			return idx
+		}
+	}
+
+	return 0
 }
