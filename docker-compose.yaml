@@ -1,0 +1,87 @@
+services:
+  peer1:
+    build: .
+    ports:
+      - "50051:50051"
+      - "8081:8080"
+    environment:
+      - ID=peer1
+      - BASE_URL=0.0.0.0
+      - PORT=50051
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - PEER_INFO=peers.yaml
+    volumes:
+      - ./peers.yaml:/app/peers.yaml  # all peers share same yaml
+      - peer1_data:/app/data
+
+  peer2:
+    build: .
+    ports:
+      - "50052:50052"
+      - "8082:8080"
+    environment:
+      - ID=peer2
+      - BASE_URL=0.0.0.0
+      - PORT=50052
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - PEER_INFO=peers.yaml
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer2_data:/app/data
+
+  peer3:
+    build: .
+    ports:
+      - "50053:50053"
+      - "8083:8080"
+    environment:
+      - ID=peer3
+      - BASE_URL=0.0.0.0
+      - PORT=50053
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - PEER_INFO=peers.yaml
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer3_data:/app/data
+
+  peer4:
+    build: .
+    ports:
+      - "50054:50054"
+      - "8084:8080"
+    environment:
+      - ID=peer4
+      - BASE_URL=0.0.0.0
+      - PORT=50054
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - PEER_INFO=peers.yaml
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer4_data:/app/data
+
+  peer5:
+    build: .
+    ports:
+      - "50055:50055"
+      - "8085:8080"
+    environment:
+      - ID=peer5
+      - BASE_URL=0.0.0.0
+      - PORT=50055
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - PEER_INFO=peers.yaml
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer5_data:/app/data
+
+volumes:
+  peer1_data:
+  peer2_data:
+  peer3_data:
+  peer4_data:
+  peer5_data:
