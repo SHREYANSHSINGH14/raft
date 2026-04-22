@@ -89,6 +89,11 @@ func (p *Peer) HandleRequestVote(ctx context.Context, args *types.RequestVoteArg
 		return nil, err
 	}
 
+	// reset election timeout because we have voted for a candidate in current term so we can be sure that there is an active candidate
+	// in current term and we can reset our election timeout to avoid unnecessary elections until we hear from the leader of this term or
+	// until election timeout happens again in which case we will start new election for next term
+	p.electionTimeoutCh <- struct{}{}
+
 	return &types.RequestVoteResponse{
 		Term:        uint64(currentTerm),
 		VoteGranted: true,

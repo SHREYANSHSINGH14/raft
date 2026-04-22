@@ -263,7 +263,9 @@ func (s *Store) GetLogByIndex(ctx context.Context, idx uint) (*types.LogEntry, e
 	key := logKey(uint64(idx))
 	val, closer, err := s.db.Get(key)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log for index: %d", idx)
+		if !errors.Is(err, pebble.ErrNotFound) {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log for index: %d", idx)
+		}
 		return nil, err
 	}
 
