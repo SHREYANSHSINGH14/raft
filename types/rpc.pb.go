@@ -20,16 +20,16 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// RequestVoteArgs is the message sent by candidates to solicit votes.
+// RequestVoteArgs is sent by a candidate to solicit a vote from a peer.
 type RequestVoteArgs struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Term         uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // candidate’s term
-	CandidateId  string `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`       // candidate requesting vote
-	LastLogIndex uint64 `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"` // index of candidate’s last log entry
-	LastLogTerm  uint64 `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`    // term of candidate’s last log entry
+	Term         uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // candidate's current term
+	CandidateId  string `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`       // ID of the candidate requesting the vote
+	LastLogIndex uint64 `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"` // index of the candidate's last log entry (for log up-to-date check)
+	LastLogTerm  uint64 `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`    // term of the candidate's last log entry (for log up-to-date check)
 }
 
 func (x *RequestVoteArgs) Reset() {
@@ -92,13 +92,14 @@ func (x *RequestVoteArgs) GetLastLogTerm() uint64 {
 	return 0
 }
 
+// RequestVoteResponse is the reply to a RequestVote RPC.
 type RequestVoteResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Term        uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                  // current term
-	VoteGranted bool   `protobuf:"varint,2,opt,name=vote_granted,json=voteGranted,proto3" json:"vote_granted,omitempty"` // whether vote was granted
+	Term        uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                  // receiver's current term (candidate updates itself if stale)
+	VoteGranted bool   `protobuf:"varint,2,opt,name=vote_granted,json=voteGranted,proto3" json:"vote_granted,omitempty"` // true if the receiver granted its vote to the candidate
 }
 
 func (x *RequestVoteResponse) Reset() {
@@ -147,18 +148,18 @@ func (x *RequestVoteResponse) GetVoteGranted() bool {
 	return false
 }
 
-// AppendEntriesArgs is the message sent by leaders to replicate log entries and as heartbeats.
+// AppendEntriesArgs is sent by the leader to replicate log entries or as a heartbeat.
 type AppendEntriesArgs struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Term         uint64      `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // leader’s term
-	LeaderId     string      `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`                // so followers can redirect clients
-	PrevLogIndex uint64      `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"` // index of log entry immediately preceding new ones
-	PrevLogTerm  uint64      `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`    // term of prev_log_index entry
-	Entries      []*LogEntry `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`                                  // log entries to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit uint64      `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`   // leader’s commit index
+	Term         uint64      `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // leader's current term
+	LeaderId     string      `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`                // leader's ID so followers can redirect clients
+	PrevLogIndex uint64      `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"` // index of the log entry immediately before the new ones
+	PrevLogTerm  uint64      `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`    // term of prev_log_index (used for log consistency check)
+	Entries      []*LogEntry `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`                                  // entries to append; empty for heartbeat
+	LeaderCommit uint64      `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`   // leader's current commitIndex (follower advances its own)
 }
 
 func (x *AppendEntriesArgs) Reset() {
@@ -235,13 +236,14 @@ func (x *AppendEntriesArgs) GetLeaderCommit() uint64 {
 	return 0
 }
 
+// AppendEntriesResponse is the reply to an AppendEntries RPC.
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Term    uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`       // current term
-	Success bool   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"` // true if follower contained entry matching prev_log_index and prev_log_term
+	Term    uint64 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`       // receiver's current term (leader steps down if stale)
+	Success bool   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"` // true if the follower's log matched prev_log_index and prev_log_term
 }
 
 func (x *AppendEntriesResponse) Reset() {
@@ -290,6 +292,238 @@ func (x *AppendEntriesResponse) GetSuccess() bool {
 	return false
 }
 
+// WriteLogRequest is sent by a client to submit new log entries to the cluster.
+type WriteLogRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Entries []*LogEntry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"` // entries to append to the leader's log
+}
+
+func (x *WriteLogRequest) Reset() {
+	*x = WriteLogRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_rpc_proto_msgTypes[4]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *WriteLogRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteLogRequest) ProtoMessage() {}
+
+func (x *WriteLogRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[4]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteLogRequest.ProtoReflect.Descriptor instead.
+func (*WriteLogRequest) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *WriteLogRequest) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+// WriteLogResponse is the reply to a WriteLog RPC.
+type WriteLogResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Success  bool   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`                  // true if entries were accepted by the leader
+	LeaderId string `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"` // current leader's ID; set when success=false so client can redirect
+	ErrorMsg string `protobuf:"bytes,3,opt,name=error_msg,json=errorMsg,proto3" json:"error_msg,omitempty"` // human-readable error if success=false
+}
+
+func (x *WriteLogResponse) Reset() {
+	*x = WriteLogResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_rpc_proto_msgTypes[5]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *WriteLogResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteLogResponse) ProtoMessage() {}
+
+func (x *WriteLogResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[5]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteLogResponse.ProtoReflect.Descriptor instead.
+func (*WriteLogResponse) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *WriteLogResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *WriteLogResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *WriteLogResponse) GetErrorMsg() string {
+	if x != nil {
+		return x.ErrorMsg
+	}
+	return ""
+}
+
+// ReadLogRequest is sent by a client to retrieve log entries by index range.
+type ReadLogRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	StartIndex uint64 `protobuf:"varint,1,opt,name=start_index,json=startIndex,proto3" json:"start_index,omitempty"` // index of the first entry to retrieve (inclusive)
+	EndIndex   uint64 `protobuf:"varint,2,opt,name=end_index,json=endIndex,proto3" json:"end_index,omitempty"`       // index of the last entry to retrieve (inclusive); 0 means fetch all from start
+}
+
+func (x *ReadLogRequest) Reset() {
+	*x = ReadLogRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_rpc_proto_msgTypes[6]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ReadLogRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadLogRequest) ProtoMessage() {}
+
+func (x *ReadLogRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[6]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadLogRequest.ProtoReflect.Descriptor instead.
+func (*ReadLogRequest) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ReadLogRequest) GetStartIndex() uint64 {
+	if x != nil {
+		return x.StartIndex
+	}
+	return 0
+}
+
+func (x *ReadLogRequest) GetEndIndex() uint64 {
+	if x != nil {
+		return x.EndIndex
+	}
+	return 0
+}
+
+// ReadLogResponse is the reply to a ReadLog RPC.
+type ReadLogResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Entries  []*LogEntry `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`                   // log entries in the requested range
+	LeaderId string      `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"` // current leader's ID
+	ErrorMsg string      `protobuf:"bytes,3,opt,name=error_msg,json=errorMsg,proto3" json:"error_msg,omitempty"` // human-readable error if retrieval failed
+}
+
+func (x *ReadLogResponse) Reset() {
+	*x = ReadLogResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_rpc_proto_msgTypes[7]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ReadLogResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadLogResponse) ProtoMessage() {}
+
+func (x *ReadLogResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[7]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadLogResponse.ProtoReflect.Descriptor instead.
+func (*ReadLogResponse) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ReadLogResponse) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ReadLogResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *ReadLogResponse) GetErrorMsg() string {
+	if x != nil {
+		return x.ErrorMsg
+	}
+	return ""
+}
+
 var File_rpc_proto protoreflect.FileDescriptor
 
 var file_rpc_proto_rawDesc = []byte{
@@ -327,21 +561,52 @@ var file_rpc_proto_rawDesc = []byte{
 	0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
 	0x12, 0x12, 0x0a, 0x04, 0x74, 0x65, 0x72, 0x6d, 0x18, 0x01, 0x20, 0x01, 0x28, 0x04, 0x52, 0x04,
 	0x74, 0x65, 0x72, 0x6d, 0x12, 0x18, 0x0a, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73, 0x18,
-	0x02, 0x20, 0x01, 0x28, 0x08, 0x52, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73, 0x32, 0xa1,
-	0x01, 0x0a, 0x07, 0x52, 0x61, 0x66, 0x74, 0x52, 0x70, 0x63, 0x12, 0x47, 0x0a, 0x0b, 0x52, 0x65,
-	0x71, 0x75, 0x65, 0x73, 0x74, 0x56, 0x6f, 0x74, 0x65, 0x12, 0x19, 0x2e, 0x72, 0x61, 0x66, 0x74,
-	0x2e, 0x72, 0x70, 0x63, 0x2e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x56, 0x6f, 0x74, 0x65,
-	0x41, 0x72, 0x67, 0x73, 0x1a, 0x1d, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x56, 0x6f, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f,
-	0x6e, 0x73, 0x65, 0x12, 0x4d, 0x0a, 0x0d, 0x41, 0x70, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x74,
-	0x72, 0x69, 0x65, 0x73, 0x12, 0x1b, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e,
-	0x41, 0x70, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x41, 0x72, 0x67,
-	0x73, 0x1a, 0x1f, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x41, 0x70, 0x70,
-	0x65, 0x6e, 0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x42, 0x28, 0x5a, 0x26, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d,
-	0x2f, 0x53, 0x48, 0x52, 0x45, 0x59, 0x41, 0x4e, 0x53, 0x48, 0x53, 0x49, 0x4e, 0x47, 0x48, 0x31,
-	0x34, 0x2f, 0x72, 0x61, 0x66, 0x74, 0x2f, 0x74, 0x79, 0x70, 0x65, 0x73, 0x62, 0x06, 0x70, 0x72,
-	0x6f, 0x74, 0x6f, 0x33,
+	0x02, 0x20, 0x01, 0x28, 0x08, 0x52, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73, 0x22, 0x3f,
+	0x0a, 0x0f, 0x57, 0x72, 0x69, 0x74, 0x65, 0x4c, 0x6f, 0x67, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
+	0x74, 0x12, 0x2c, 0x0a, 0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03,
+	0x28, 0x0b, 0x32, 0x12, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x6c, 0x6f, 0x67, 0x2e, 0x4c, 0x6f,
+	0x67, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x22,
+	0x66, 0x0a, 0x10, 0x57, 0x72, 0x69, 0x74, 0x65, 0x4c, 0x6f, 0x67, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x18, 0x0a, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x08, 0x52, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x1b, 0x0a,
+	0x09, 0x6c, 0x65, 0x61, 0x64, 0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x08, 0x6c, 0x65, 0x61, 0x64, 0x65, 0x72, 0x49, 0x64, 0x12, 0x1b, 0x0a, 0x09, 0x65, 0x72,
+	0x72, 0x6f, 0x72, 0x5f, 0x6d, 0x73, 0x67, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x65,
+	0x72, 0x72, 0x6f, 0x72, 0x4d, 0x73, 0x67, 0x22, 0x4e, 0x0a, 0x0e, 0x52, 0x65, 0x61, 0x64, 0x4c,
+	0x6f, 0x67, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1f, 0x0a, 0x0b, 0x73, 0x74, 0x61,
+	0x72, 0x74, 0x5f, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x01, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0a,
+	0x73, 0x74, 0x61, 0x72, 0x74, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x1b, 0x0a, 0x09, 0x65, 0x6e,
+	0x64, 0x5f, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x08, 0x65,
+	0x6e, 0x64, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x22, 0x79, 0x0a, 0x0f, 0x52, 0x65, 0x61, 0x64, 0x4c,
+	0x6f, 0x67, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x2c, 0x0a, 0x07, 0x65, 0x6e,
+	0x74, 0x72, 0x69, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x12, 0x2e, 0x72, 0x61,
+	0x66, 0x74, 0x2e, 0x6c, 0x6f, 0x67, 0x2e, 0x4c, 0x6f, 0x67, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52,
+	0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x12, 0x1b, 0x0a, 0x09, 0x6c, 0x65, 0x61, 0x64,
+	0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x6c, 0x65, 0x61,
+	0x64, 0x65, 0x72, 0x49, 0x64, 0x12, 0x1b, 0x0a, 0x09, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x5f, 0x6d,
+	0x73, 0x67, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x4d,
+	0x73, 0x67, 0x32, 0xa4, 0x02, 0x0a, 0x07, 0x52, 0x61, 0x66, 0x74, 0x52, 0x70, 0x63, 0x12, 0x47,
+	0x0a, 0x0b, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x56, 0x6f, 0x74, 0x65, 0x12, 0x19, 0x2e,
+	0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
+	0x56, 0x6f, 0x74, 0x65, 0x41, 0x72, 0x67, 0x73, 0x1a, 0x1d, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e,
+	0x72, 0x70, 0x63, 0x2e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x56, 0x6f, 0x74, 0x65, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4d, 0x0a, 0x0d, 0x41, 0x70, 0x70, 0x65, 0x6e,
+	0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x12, 0x1b, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e,
+	0x72, 0x70, 0x63, 0x2e, 0x41, 0x70, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65,
+	0x73, 0x41, 0x72, 0x67, 0x73, 0x1a, 0x1f, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63,
+	0x2e, 0x41, 0x70, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x41, 0x0a, 0x08, 0x57, 0x72, 0x69, 0x74, 0x65, 0x4c,
+	0x6f, 0x67, 0x12, 0x19, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x57, 0x72,
+	0x69, 0x74, 0x65, 0x4c, 0x6f, 0x67, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e,
+	0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x57, 0x72, 0x69, 0x74, 0x65, 0x4c, 0x6f,
+	0x67, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3e, 0x0a, 0x07, 0x52, 0x65, 0x61,
+	0x64, 0x4c, 0x6f, 0x67, 0x12, 0x18, 0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e,
+	0x52, 0x65, 0x61, 0x64, 0x4c, 0x6f, 0x67, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x19,
+	0x2e, 0x72, 0x61, 0x66, 0x74, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x52, 0x65, 0x61, 0x64, 0x4c, 0x6f,
+	0x67, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42, 0x28, 0x5a, 0x26, 0x67, 0x69, 0x74,
+	0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x53, 0x48, 0x52, 0x45, 0x59, 0x41, 0x4e, 0x53,
+	0x48, 0x53, 0x49, 0x4e, 0x47, 0x48, 0x31, 0x34, 0x2f, 0x72, 0x61, 0x66, 0x74, 0x2f, 0x74, 0x79,
+	0x70, 0x65, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -356,25 +621,35 @@ func file_rpc_proto_rawDescGZIP() []byte {
 	return file_rpc_proto_rawDescData
 }
 
-var file_rpc_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_rpc_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_rpc_proto_goTypes = []interface{}{
 	(*RequestVoteArgs)(nil),       // 0: raft.rpc.RequestVoteArgs
 	(*RequestVoteResponse)(nil),   // 1: raft.rpc.RequestVoteResponse
 	(*AppendEntriesArgs)(nil),     // 2: raft.rpc.AppendEntriesArgs
 	(*AppendEntriesResponse)(nil), // 3: raft.rpc.AppendEntriesResponse
-	(*LogEntry)(nil),              // 4: raft.log.LogEntry
+	(*WriteLogRequest)(nil),       // 4: raft.rpc.WriteLogRequest
+	(*WriteLogResponse)(nil),      // 5: raft.rpc.WriteLogResponse
+	(*ReadLogRequest)(nil),        // 6: raft.rpc.ReadLogRequest
+	(*ReadLogResponse)(nil),       // 7: raft.rpc.ReadLogResponse
+	(*LogEntry)(nil),              // 8: raft.log.LogEntry
 }
 var file_rpc_proto_depIdxs = []int32{
-	4, // 0: raft.rpc.AppendEntriesArgs.entries:type_name -> raft.log.LogEntry
-	0, // 1: raft.rpc.RaftRpc.RequestVote:input_type -> raft.rpc.RequestVoteArgs
-	2, // 2: raft.rpc.RaftRpc.AppendEntries:input_type -> raft.rpc.AppendEntriesArgs
-	1, // 3: raft.rpc.RaftRpc.RequestVote:output_type -> raft.rpc.RequestVoteResponse
-	3, // 4: raft.rpc.RaftRpc.AppendEntries:output_type -> raft.rpc.AppendEntriesResponse
-	3, // [3:5] is the sub-list for method output_type
-	1, // [1:3] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	8, // 0: raft.rpc.AppendEntriesArgs.entries:type_name -> raft.log.LogEntry
+	8, // 1: raft.rpc.WriteLogRequest.entries:type_name -> raft.log.LogEntry
+	8, // 2: raft.rpc.ReadLogResponse.entries:type_name -> raft.log.LogEntry
+	0, // 3: raft.rpc.RaftRpc.RequestVote:input_type -> raft.rpc.RequestVoteArgs
+	2, // 4: raft.rpc.RaftRpc.AppendEntries:input_type -> raft.rpc.AppendEntriesArgs
+	4, // 5: raft.rpc.RaftRpc.WriteLog:input_type -> raft.rpc.WriteLogRequest
+	6, // 6: raft.rpc.RaftRpc.ReadLog:input_type -> raft.rpc.ReadLogRequest
+	1, // 7: raft.rpc.RaftRpc.RequestVote:output_type -> raft.rpc.RequestVoteResponse
+	3, // 8: raft.rpc.RaftRpc.AppendEntries:output_type -> raft.rpc.AppendEntriesResponse
+	5, // 9: raft.rpc.RaftRpc.WriteLog:output_type -> raft.rpc.WriteLogResponse
+	7, // 10: raft.rpc.RaftRpc.ReadLog:output_type -> raft.rpc.ReadLogResponse
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_rpc_proto_init() }
@@ -432,6 +707,54 @@ func file_rpc_proto_init() {
 				return nil
 			}
 		}
+		file_rpc_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*WriteLogRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_rpc_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*WriteLogResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_rpc_proto_msgTypes[6].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ReadLogRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_rpc_proto_msgTypes[7].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ReadLogResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -439,7 +762,7 @@ func file_rpc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_rpc_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

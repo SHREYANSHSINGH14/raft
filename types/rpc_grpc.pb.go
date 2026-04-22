@@ -21,18 +21,36 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RaftRpc_RequestVote_FullMethodName   = "/raft.rpc.RaftRpc/RequestVote"
 	RaftRpc_AppendEntries_FullMethodName = "/raft.rpc.RaftRpc/AppendEntries"
+	RaftRpc_WriteLog_FullMethodName      = "/raft.rpc.RaftRpc/WriteLog"
+	RaftRpc_ReadLog_FullMethodName       = "/raft.rpc.RaftRpc/ReadLog"
 )
 
 // RaftRpcClient is the client API for RaftRpc service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// RaftRpc defines the RPC methods for Raft communication.
+// RaftRpc defines all RPC methods for the Raft cluster.
+// It serves two categories of callers:
+//   - Internal (Raft protocol): RequestVote, AppendEntries
+//   - External (clients): WriteLog, ReadLog
 type RaftRpcClient interface {
-	// RequestVote is called by candidates to gather votes from followers.
+	// RequestVote is called by candidates during an election to solicit votes from peers.
+	// A follower grants its vote if the candidate's log is at least as up-to-date as its own
+	// and it hasn't already voted for another candidate in the same term.
 	RequestVote(ctx context.Context, in *RequestVoteArgs, opts ...grpc.CallOption) (*RequestVoteResponse, error)
-	// AppendEntries is called by leaders to replicate log entries and as heartbeats.
+	// AppendEntries is called by the leader to replicate log entries to followers.
+	// Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
 	AppendEntries(ctx context.Context, in *AppendEntriesArgs, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// WriteLog is called by clients to submit new commands to the cluster.
+	// Only the leader can accept writes. If the receiving node is not the leader,
+	// it returns the current leader's ID so the client can redirect.
+	// NOTE: currently returns after local append. Wait-for-commit will be added
+	// once the apply loop is implemented.
+	WriteLog(ctx context.Context, in *WriteLogRequest, opts ...grpc.CallOption) (*WriteLogResponse, error)
+	// ReadLog is called by clients to retrieve log entries by index range.
+	// Reads are served by any node since this is used for debugging and
+	// verifying replication. Production linearizable reads should go to leader only.
+	ReadLog(ctx context.Context, in *ReadLogRequest, opts ...grpc.CallOption) (*ReadLogResponse, error)
 }
 
 type raftRpcClient struct {
@@ -63,16 +81,52 @@ func (c *raftRpcClient) AppendEntries(ctx context.Context, in *AppendEntriesArgs
 	return out, nil
 }
 
+func (c *raftRpcClient) WriteLog(ctx context.Context, in *WriteLogRequest, opts ...grpc.CallOption) (*WriteLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriteLogResponse)
+	err := c.cc.Invoke(ctx, RaftRpc_WriteLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *raftRpcClient) ReadLog(ctx context.Context, in *ReadLogRequest, opts ...grpc.CallOption) (*ReadLogResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadLogResponse)
+	err := c.cc.Invoke(ctx, RaftRpc_ReadLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RaftRpcServer is the server API for RaftRpc service.
 // All implementations must embed UnimplementedRaftRpcServer
 // for forward compatibility.
 //
-// RaftRpc defines the RPC methods for Raft communication.
+// RaftRpc defines all RPC methods for the Raft cluster.
+// It serves two categories of callers:
+//   - Internal (Raft protocol): RequestVote, AppendEntries
+//   - External (clients): WriteLog, ReadLog
 type RaftRpcServer interface {
-	// RequestVote is called by candidates to gather votes from followers.
+	// RequestVote is called by candidates during an election to solicit votes from peers.
+	// A follower grants its vote if the candidate's log is at least as up-to-date as its own
+	// and it hasn't already voted for another candidate in the same term.
 	RequestVote(context.Context, *RequestVoteArgs) (*RequestVoteResponse, error)
-	// AppendEntries is called by leaders to replicate log entries and as heartbeats.
+	// AppendEntries is called by the leader to replicate log entries to followers.
+	// Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
 	AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResponse, error)
+	// WriteLog is called by clients to submit new commands to the cluster.
+	// Only the leader can accept writes. If the receiving node is not the leader,
+	// it returns the current leader's ID so the client can redirect.
+	// NOTE: currently returns after local append. Wait-for-commit will be added
+	// once the apply loop is implemented.
+	WriteLog(context.Context, *WriteLogRequest) (*WriteLogResponse, error)
+	// ReadLog is called by clients to retrieve log entries by index range.
+	// Reads are served by any node since this is used for debugging and
+	// verifying replication. Production linearizable reads should go to leader only.
+	ReadLog(context.Context, *ReadLogRequest) (*ReadLogResponse, error)
 	mustEmbedUnimplementedRaftRpcServer()
 }
 
@@ -88,6 +142,12 @@ func (UnimplementedRaftRpcServer) RequestVote(context.Context, *RequestVoteArgs)
 }
 func (UnimplementedRaftRpcServer) AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftRpcServer) WriteLog(context.Context, *WriteLogRequest) (*WriteLogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WriteLog not implemented")
+}
+func (UnimplementedRaftRpcServer) ReadLog(context.Context, *ReadLogRequest) (*ReadLogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadLog not implemented")
 }
 func (UnimplementedRaftRpcServer) mustEmbedUnimplementedRaftRpcServer() {}
 func (UnimplementedRaftRpcServer) testEmbeddedByValue()                 {}
@@ -146,6 +206,42 @@ func _RaftRpc_AppendEntries_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftRpc_WriteLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftRpcServer).WriteLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftRpc_WriteLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftRpcServer).WriteLog(ctx, req.(*WriteLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RaftRpc_ReadLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftRpcServer).ReadLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftRpc_ReadLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftRpcServer).ReadLog(ctx, req.(*ReadLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RaftRpc_ServiceDesc is the grpc.ServiceDesc for RaftRpc service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -160,6 +256,14 @@ var RaftRpc_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendEntries",
 			Handler:    _RaftRpc_AppendEntries_Handler,
+		},
+		{
+			MethodName: "WriteLog",
+			Handler:    _RaftRpc_WriteLog_Handler,
+		},
+		{
+			MethodName: "ReadLog",
+			Handler:    _RaftRpc_ReadLog_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

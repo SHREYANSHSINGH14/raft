@@ -10,43 +10,92 @@ import "log.proto";
 //  Service definition
 // ─────────────────────────────────────────────
 
-// RaftRpc defines the RPC methods for Raft communication.
+// RaftRpc defines all RPC methods for the Raft cluster.
+// It serves two categories of callers:
+//   - Internal (Raft protocol): RequestVote, AppendEntries
+//   - External (clients): WriteLog, ReadLog
 service RaftRpc {
-    // RequestVote is called by candidates to gather votes from followers.
+    // RequestVote is called by candidates during an election to solicit votes from peers.
+    // A follower grants its vote if the candidate's log is at least as up-to-date as its own
+    // and it hasn't already voted for another candidate in the same term.
     rpc RequestVote (RequestVoteArgs) returns (RequestVoteResponse);
-    // AppendEntries is called by leaders to replicate log entries and as heartbeats.
+
+    // AppendEntries is called by the leader to replicate log entries to followers.
+    // Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
     rpc AppendEntries (AppendEntriesArgs) returns (AppendEntriesResponse);
+
+    // WriteLog is called by clients to submit new commands to the cluster.
+    // Only the leader can accept writes. If the receiving node is not the leader,
+    // it returns the current leader's ID so the client can redirect.
+    // NOTE: currently returns after local append. Wait-for-commit will be added
+    // once the apply loop is implemented.
+    rpc WriteLog (WriteLogRequest) returns (WriteLogResponse);
+
+    // ReadLog is called by clients to retrieve log entries by index range.
+    // Reads are served by any node since this is used for debugging and
+    // verifying replication. Production linearizable reads should go to leader only.
+    rpc ReadLog (ReadLogRequest) returns (ReadLogResponse);
 }
 
 // ─────────────────────────────────────────────
-//  RPC messages
+//  Internal Raft RPC messages
 // ─────────────────────────────────────────────
 
-// RequestVoteArgs is the message sent by candidates to solicit votes.
+// RequestVoteArgs is sent by a candidate to solicit a vote from a peer.
 message RequestVoteArgs {
-  uint64 term = 1; // candidate’s term
-  string candidate_id = 2; // candidate requesting vote
-  uint64 last_log_index = 3; // index of candidate’s last log entry
-  uint64 last_log_term = 4; // term of candidate’s last log entry
+    uint64 term          = 1; // candidate's current term
+    string candidate_id  = 2; // ID of the candidate requesting the vote
+    uint64 last_log_index = 3; // index of the candidate's last log entry (for log up-to-date check)
+    uint64 last_log_term  = 4; // term of the candidate's last log entry (for log up-to-date check)
 }
 
+// RequestVoteResponse is the reply to a RequestVote RPC.
 message RequestVoteResponse {
-  uint64 term = 1; // current term
-  bool vote_granted = 2; // whether vote was granted
+    uint64 term         = 1; // receiver's current term (candidate updates itself if stale)
+    bool   vote_granted = 2; // true if the receiver granted its vote to the candidate
 }
 
-// AppendEntriesArgs is the message sent by leaders to replicate log entries and as heartbeats.
+// AppendEntriesArgs is sent by the leader to replicate log entries or as a heartbeat.
 message AppendEntriesArgs {
-  uint64 term = 1; // leader’s term
-  string leader_id = 2; // so followers can redirect clients
-  uint64 prev_log_index = 3; // index of log entry immediately preceding new ones
-  uint64 prev_log_term = 4; // term of prev_log_index entry
-  repeated raft.log.LogEntry entries = 5; // log entries to store (empty for heartbeat; may send more than one for efficiency)
-  uint64 leader_commit = 6; // leader’s commit index
+    uint64 term           = 1; // leader's current term
+    string leader_id      = 2; // leader's ID so followers can redirect clients
+    uint64 prev_log_index = 3; // index of the log entry immediately before the new ones
+    uint64 prev_log_term  = 4; // term of prev_log_index (used for log consistency check)
+    repeated raft.log.LogEntry entries = 5; // entries to append; empty for heartbeat
+    uint64 leader_commit  = 6; // leader's current commitIndex (follower advances its own)
 }
 
+// AppendEntriesResponse is the reply to an AppendEntries RPC.
 message AppendEntriesResponse {
-  uint64 term = 1; // current term
-  bool success = 2; // true if follower contained entry matching prev_log_index and prev_log_term
+    uint64 term    = 1; // receiver's current term (leader steps down if stale)
+    bool   success = 2; // true if the follower's log matched prev_log_index and prev_log_term
 }
 
+// ─────────────────────────────────────────────
+//  Client RPC messages
+// ─────────────────────────────────────────────
+
+// WriteLogRequest is sent by a client to submit new log entries to the cluster.
+message WriteLogRequest {
+    repeated raft.log.LogEntry entries = 1; // entries to append to the leader's log
+}
+
+// WriteLogResponse is the reply to a WriteLog RPC.
+message WriteLogResponse {
+    bool   success   = 1; // true if entries were accepted by the leader
+    string leader_id = 2; // current leader's ID; set when success=false so client can redirect
+    string error_msg = 3; // human-readable error if success=false
+}
+
+// ReadLogRequest is sent by a client to retrieve log entries by index range.
+message ReadLogRequest {
+    uint64 start_index = 1; // index of the first entry to retrieve (inclusive)
+    uint64 end_index   = 2; // index of the last entry to retrieve (inclusive); 0 means fetch all from start
+}
+
+// ReadLogResponse is the reply to a ReadLog RPC.
+message ReadLogResponse {
+    repeated raft.log.LogEntry entries = 1; // log entries in the requested range
+    string leader_id                   = 2; // current leader's ID
+    string error_msg                   = 3; // human-readable error if retrieval failed
+}
