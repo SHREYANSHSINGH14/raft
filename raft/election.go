@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
@@ -17,7 +18,7 @@ type ElectionResponse struct {
 
 func (p *Peer) startElection(ctx context.Context) {
 	go func() {
-		electionTime := time.Duration(500 * time.Millisecond) // TODO: Replace with config
+		electionTime := time.Duration(config.GetConfig().ElectionDurationMs) * time.Millisecond // TODO: Replace with config
 		ticker := time.NewTicker(electionTime)
 
 		electionResChan := make(chan ElectionResponse, 1)
@@ -213,7 +214,7 @@ type ResponseRequestVote struct {
 func sendRequestVote(ctx context.Context, wg *sync.WaitGroup, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote) { // TODO: change this simple type with proto type
 	defer wg.Done()
 
-	rpcCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond) // TODO: Replace with config
+	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond) // TODO: Replace with config
 	defer cancel()
 
 	rpcReq := &types.RequestVoteArgs{

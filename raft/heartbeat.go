@@ -6,12 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
 func (p *Peer) startSendLogs(ctx context.Context) {
-	heartBeatTime := time.Duration(500 * time.Millisecond) // TODO: replace with config value
+	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond) // TODO: replace with config value
 	_ = heartBeatTime
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogCtx, cancel := context.WithCancel(ctx)
@@ -60,7 +61,7 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		if nextIdx > 1 {
 			prevLog, err = p.store.GetLogByIndex(ctx, nextIdx-1)
 			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err at index:%d : %s", nextIdx-1, err.Error())
 				errChan <- err
 				return
 			}
@@ -119,14 +120,25 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 	}
 
 	newCommitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
-	newCommitLog, err := p.store.GetLogByIndex(ctx, newCommitIndex)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
-		errChan <- err
-		return
+
+	var newCommitLog *types.LogEntry
+	if newCommitIndex != 0 {
+		newCommitLog, err = p.store.GetLogByIndex(ctx, newCommitIndex)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+			errChan <- err
+			return
+		}
+	} else {
+		newCommitLog = &types.LogEntry{
+			Index: 0,
+			Term:  0,
+			Data:  []byte{},
+			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
+		}
 	}
 
-	if newCommitIndex > p.commitIndex && newCommitLog.Term >= uint64(currentTerm) {
+	if newCommitIndex > p.commitIndex && newCommitLog.Term == uint64(currentTerm) {
 		p.commitIndex = newCommitIndex
 	}
 
@@ -143,7 +155,7 @@ type ResponseAppendLogs struct {
 func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, responseCh chan<- ResponseAppendLogs) {
 	defer wg.Done()
 
-	rpcCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond) // TODO: Replace with config
+	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond) // TODO: Replace with config
 	defer cancel()
 
 	rpcReq := types.AppendEntriesArgs{

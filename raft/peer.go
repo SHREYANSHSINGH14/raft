@@ -106,7 +106,7 @@ func NewPeer(ctx context.Context, cfg config.Config) (*Peer, error) {
 		if id == cfg.ID {
 			continue
 		}
-		conn, err := grpc.NewClient(url, dialOptions...)
+		conn, err := grpc.NewClient("dns:///"+url, dialOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("error creating grpc client for server %s: %w", id, err)
 		}
@@ -143,6 +143,9 @@ func (p *Peer) Start() {
 		}
 	}
 
+	zerolog.Ctx(p.ctx).Debug().Msg("Waiting for peers to up")
+	p.waitForQuorum(p.ctx)
+
 	p.startElectionOut(p.ctx)
 
 	// Since startElectionOut is a separate goroutine, we need to block the main goroutine to keep the server running,
@@ -164,17 +167,21 @@ func (p *Peer) Start() {
 // -------------------------------------------
 
 func (p *Peer) becomeFollower(ctx context.Context) {
+	zerolog.Ctx(ctx).Info().Msg("becoming follower")
 	p.SetRole(ServerRole_Follower)
 	p.startElectionOut(ctx)
 }
 
 func (p *Peer) becomeCandidate(ctx context.Context) {
+	zerolog.Ctx(ctx).Info().Msg("becoming candidate")
 	p.SetRole(ServerRole_Candidate)
 	p.startElection(ctx)
 }
 
 func (p *Peer) becomeLeader(ctx context.Context) {
+	zerolog.Ctx(ctx).Info().Msg("becoming leader")
 	p.SetRole(ServerRole_Leader)
+	p.SetLeaderID("")
 	p.peerIndexes = make(map[string]PeerIndexes)
 
 	lastIndex, err := p.store.GetLastLogIndex(ctx)
@@ -200,13 +207,13 @@ func (p *Peer) becomeLeader(ctx context.Context) {
 
 func (p *Peer) startElectionOut(ctx context.Context) {
 	go func() {
-		duration, err := rand.Int(rand.Reader, big.NewInt(300))
+		duration, err := rand.Int(rand.Reader, big.NewInt(int64(config.GetConfig().ElectionDurationMs)))
 		if err != nil {
 			zerolog.Ctx(context.Background()).Error().Err(err).Msg("error getting random number for duration")
 			return
 		}
 
-		timeOut := time.Duration((duration.Int64() + 150) * int64(time.Millisecond))
+		timeOut := time.Duration((duration.Int64() + int64(config.GetConfig().ElectionMinMs)) * int64(time.Millisecond))
 		ticker := time.NewTicker(timeOut)
 
 		for {
@@ -224,6 +231,64 @@ func (p *Peer) startElectionOut(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// waitForQuorum blocks until a majority of peers are reachable over gRPC.
+// It is called once at startup before the election timer begins, preventing
+// spurious elections during the window when containers are starting up and
+// gRPC connections between peers are not yet established.
+//
+// Strategy: send a RequestVote with term=0 to each peer. Term 0 is always
+// rejected by any peer (since any initialized peer has term >= 1), but a
+// rejection is still a valid gRPC response — it proves the connection is up.
+// A timeout or connection error means the peer is not yet reachable.
+//
+// The function retries every 500ms until majority responds, then returns.
+// If the context is cancelled (e.g. server shutdown), it returns immediately.
+//
+// Note: this is only meaningful on first startup. When startElectionOut is
+// called again after a role transition (becomeFollower), the cluster is already
+// running so waitForQuorum returns on the first iteration.
+
+func (p *Peer) waitForQuorum(ctx context.Context) {
+	majority := (len(p.ServerIDRpcUrlMap)+1)/2 + 1
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		reachable := 0
+		for _, client := range p.ServerIDRpcUrlMap {
+			// ping each peer with a real RequestVote — if it responds (even rejection) the connection is up
+			rpcCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			_, err := client.RequestVote(rpcCtx, &types.RequestVoteArgs{
+				CandidateId: p.ID,
+				Term:        0, // term 0 — always rejected but proves connectivity
+			})
+			cancel()
+			if err == nil {
+				reachable++
+			}
+		}
+
+		if reachable >= majority {
+			zerolog.Ctx(ctx).Info().
+				Int("reachable", reachable).
+				Int("majority", majority).
+				Msg("quorum reachable, starting election timer")
+			return
+		}
+
+		zerolog.Ctx(ctx).Debug().
+			Int("reachable", reachable).
+			Int("majority", majority).
+			Msg("waiting for quorum...")
+
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // -------------------------------------------
@@ -313,4 +378,8 @@ func (p *Peer) GetLeaderID() string {
 	defer p.mu.Unlock()
 
 	return p.LeaderID
+}
+
+func (p *Peer) GetCurrentTerm(ctx context.Context) (uint, error) {
+	return p.store.GetCurrentTerm(ctx)
 }
