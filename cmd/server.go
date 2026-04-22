@@ -15,11 +15,10 @@ var serverCmd = &cobra.Command{
 var startCmd = &cobra.Command{
 	Use: "start",
 	Run: func(cmd *cobra.Command, args []string) {
-		var config config.Config
 		var err error
-		config.LoadConfig()
+		config := config.LoadConfig()
 
-		server, err := server.NewServer(cmd.Context(), config)
+		server, err := server.NewServer(cmd.Context(), *config)
 		if err != nil {
 			panic("error creating server: " + err.Error())
 		}
