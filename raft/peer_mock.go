@@ -26,6 +26,16 @@ func (m *MockRaftRpcClient) AppendEntries(ctx context.Context, args *types.Appen
 	return ret.Get(0).(*types.AppendEntriesResponse), ret.Error(1)
 }
 
+func (m *MockRaftRpcClient) WriteLog(ctx context.Context, in *types.WriteLogRequest, opts ...grpc.CallOption) (*types.WriteLogResponse, error) {
+	ret := m.Called(ctx, in)
+	return ret.Get(0).(*types.WriteLogResponse), ret.Error(1)
+}
+
+func (m *MockRaftRpcClient) ReadLog(ctx context.Context, in *types.ReadLogRequest, opts ...grpc.CallOption) (*types.ReadLogResponse, error) {
+	ret := m.Called(ctx, in)
+	return ret.Get(0).(*types.ReadLogResponse), ret.Error(1)
+}
+
 func NewMockRaftRpcClient() *MockRaftRpcClient {
 	return &MockRaftRpcClient{}
 }

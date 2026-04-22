@@ -85,5 +85,10 @@ func (s *Server) Start() {
 
 	zerolog.Ctx(s.ctx).Debug().Str("id", s.Peer.GetID()).Str("role", string(s.Peer.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
 
+	debugServer := NewDebugServer(s)
+	debugServer.Start("8080")
+
+	zerolog.Ctx(s.ctx).Debug().Msgf("starting debug server on port %d", 8080)
+
 	s.Peer.Start()
 }
