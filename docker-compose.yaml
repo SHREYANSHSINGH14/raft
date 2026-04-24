@@ -8,9 +8,14 @@ services:
       - ID=peer1
       - BASE_URL=0.0.0.0
       - PORT=50051
+      - DEBUG_PORT=8080
       - DB_DIR=data
       - LOG_LEVEL=debug
       - PEER_INFO=peers.yaml
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
     volumes:
       - ./peers.yaml:/app/peers.yaml  # all peers share same yaml
       - peer1_data:/app/data
@@ -24,9 +29,14 @@ services:
       - ID=peer2
       - BASE_URL=0.0.0.0
       - PORT=50052
+      - DEBUG_PORT=8080
       - DB_DIR=data
       - LOG_LEVEL=debug
       - PEER_INFO=peers.yaml
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer2_data:/app/data
@@ -40,9 +50,14 @@ services:
       - ID=peer3
       - BASE_URL=0.0.0.0
       - PORT=50053
+      - DEBUG_PORT=8080
       - DB_DIR=data
       - LOG_LEVEL=debug
       - PEER_INFO=peers.yaml
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer3_data:/app/data
@@ -56,9 +71,14 @@ services:
       - ID=peer4
       - BASE_URL=0.0.0.0
       - PORT=50054
+      - DEBUG_PORT=8080
       - DB_DIR=data
       - LOG_LEVEL=debug
       - PEER_INFO=peers.yaml
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer4_data:/app/data
@@ -72,9 +92,14 @@ services:
       - ID=peer5
       - BASE_URL=0.0.0.0
       - PORT=50055
+      - DEBUG_PORT=8080
       - DB_DIR=data
       - LOG_LEVEL=debug
       - PEER_INFO=peers.yaml
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer5_data:/app/data
