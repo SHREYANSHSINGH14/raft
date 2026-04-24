@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/SHREYANSHSINGH14/raft/config"
@@ -53,6 +52,7 @@ func (p *Peer) startElection(ctx context.Context) {
 				if res.err != nil {
 					zerolog.Ctx(ctx).Error().Err(res.err).Msg("election error")
 				}
+				cancel()
 				switch res.transitonRole {
 				case ServerRole_Leader:
 					p.becomeLeader(ctx)
@@ -61,7 +61,6 @@ func (p *Peer) startElection(ctx context.Context) {
 				case ServerRole_Candidate:
 					p.becomeCandidate(ctx)
 				}
-				cancel()
 				return
 			case <-ctx.Done():
 				cancel()
@@ -151,58 +150,69 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	}
 
 	requestVoteResponses := make(chan ResponseRequestVote, len(p.ServerIDRpcUrlMap))
-	defer close(requestVoteResponses)
+	// defer close(requestVoteResponses)
+	// 1. closing is the sender's responsibility, and there are multiple senders (one goroutine
+	//    per peer) — no single goroutine can safely close without coordinating with others,
+	//    and the receiver closing it causes "send on closed channel" panic when remaining
+	//    goroutines try to send after election returns early (e.g. on majority reached)
+	// 2. the buffer is sized exactly to len(ServerIDRpcUrlMap), so every goroutine can send
+	//    without blocking even if election() has already returned and nobody is reading
+	// 3. every sendRequestVote goroutine exits within RPCTimeoutMs (50ms default) via
+	//    context timeout — there is no indefinite block, so no goroutine leak
+	// 4. once all goroutines finish sending and election() returns, the channel has no
+	//    remaining references and is garbage collected automatically
 
-	var wg sync.WaitGroup
+	// var wg sync.WaitGroup
+	// wg was used to wait for all sendRequestVote goroutines to finish before processing responses.
+	// this caused a critical bug: wg.Wait() has no awareness of context cancellation, so when startElection
+	// called cancel() and spawned a new election goroutine (on ticker fire or electionTimeoutCh), the old
+	// election goroutine was still alive — blocked at wg.Wait() until all RPCs timed out naturally.
+	// since electionResChan has a buffer of 1, when the stale goroutine eventually unblocked and tried to
+	// send its result, the channel was already full from the newer election — causing the goroutine to block
+	// permanently and leak. this happened on every election timeout cycle, leading to millions of leaked
+	// goroutines, term inflation (each stale goroutine incremented the term via SetCurrentTerm), and
+	// eventually an OOM crash.
+	// the fix is to remove wg entirely and process responses as they arrive using a select loop with
+	// ctx.Done(). this way, when cancel() is called, the goroutine exits immediately from the select
+	// without ever trying to send on resCh — so no leak, no blocking, no cascading term explosion.
 
 	for id, client := range p.ServerIDRpcUrlMap {
-		wg.Add(1)
-		go sendRequestVote(ctx, &wg, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
+		// wg.Add(1)
+		go sendRequestVote(ctx, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
 	}
 
-	wg.Wait()
+	// wg.Wait()
 
-	responseReceived := 0
+	// responseReceived := 0
+	responsesPending := len(p.ServerIDRpcUrlMap)
 	var majority int = ((len(p.ServerIDRpcUrlMap) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
 	votesReceived := 1                                          // we have already voted for ourselves so we start with 1 vote
 
-	for _ = range len(p.ServerIDRpcUrlMap) {
-		res := <-requestVoteResponses
-		responseReceived++
+	for responsesPending > 0 {
+		select {
+		case <-ctx.Done():
+			return // clean exit, no send needed — caller already moved on
 
-		if res.err != nil {
-			zerolog.Ctx(ctx).Error().Err(res.err).Msgf("error in request vote rpc response from peer %s", res.id)
-			continue
-		}
-
-		fmt.Printf("Received RequestVote response from peer %s: VoteGranted=%v, Term=%d, NewTerm=%d\n", res.id, res.rpcRes.VoteGranted, res.rpcRes.Term, newTerm)
-		if uint(res.rpcRes.Term) > newTerm {
-			electionRes.transitonRole = ServerRole_Follower
-			electionRes.err = nil
-
-			resCh <- electionRes
-
-			return
-		}
-
-		if res.rpcRes.VoteGranted && p.GetRole() == ServerRole_Candidate {
-			votesReceived++
+		case res := <-requestVoteResponses:
+			responsesPending--
+			if res.err != nil {
+				continue
+			}
+			if uint(res.rpcRes.Term) > newTerm {
+				resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
+				return
+			}
+			if res.rpcRes.VoteGranted && p.GetRole() == ServerRole_Candidate {
+				votesReceived++
+				if votesReceived >= majority {
+					resCh <- ElectionResponse{transitonRole: ServerRole_Leader}
+					return
+				}
+			}
 		}
 	}
 
-	if votesReceived >= majority {
-		electionRes.transitonRole = ServerRole_Leader
-		electionRes.err = nil
-
-		resCh <- electionRes
-
-		return
-	}
-
-	electionRes.transitonRole = p.GetRole()
-	electionRes.err = nil
-
-	resCh <- electionRes
+	resCh <- ElectionResponse{transitonRole: p.GetRole()}
 }
 
 type ResponseRequestVote struct {
@@ -211,8 +221,8 @@ type ResponseRequestVote struct {
 	err    error
 }
 
-func sendRequestVote(ctx context.Context, wg *sync.WaitGroup, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote) { // TODO: change this simple type with proto type
-	defer wg.Done()
+func sendRequestVote(ctx context.Context, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote) { // TODO: change this simple type with proto type
+	// defer wg.Done()
 
 	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond) // TODO: Replace with config
 	defer cancel()
