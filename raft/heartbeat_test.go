@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/db"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,7 @@ const (
 func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRaftRpcClient) {
 	store := db.NewMockKVStore()
 	store.SetCurrentTerm(context.Background(), 5)
+	config.LoadConfig()
 
 	peer := NewPeerMock(store)
 	peer.Role = ServerRole_Leader

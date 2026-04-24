@@ -13,7 +13,6 @@ import (
 
 func (p *Peer) startSendLogs(ctx context.Context) {
 	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond) // TODO: replace with config value
-	_ = heartBeatTime
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogCtx, cancel := context.WithCancel(ctx)
 	sendLogErrChan := make(chan error, 1)
@@ -139,7 +138,7 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 	}
 
 	if newCommitIndex > p.commitIndex && newCommitLog.Term == uint64(currentTerm) {
-		p.commitIndex = newCommitIndex
+		p.SetCommitIndex(newCommitIndex)
 	}
 
 	errChan <- nil

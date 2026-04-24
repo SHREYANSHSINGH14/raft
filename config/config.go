@@ -51,10 +51,13 @@ func GetConfig() *Config {
 
 // LoadConfig initializes the singleton Config from environment variables.
 // Safe to call multiple times — only the first call has effect.
+//
+// PEER_INFO is optional: if the env var is unset or the file is absent,
+// ServerIDS is initialized to an empty map (useful in tests and single-node
+// deployments).
 func LoadConfig() *Config {
 	once.Do(func() {
 		c := &Config{}
-
 		c.ID = os.Getenv("ID")
 		c.DBDir = os.Getenv("DB_DIR")
 		c.LogLevel = os.Getenv("LOG_LEVEL")
@@ -62,10 +65,10 @@ func LoadConfig() *Config {
 		c.Port = os.Getenv("PORT")
 		c.DebugPort = os.Getenv("DEBUG_PORT")
 
-		c.RPCTimeoutMs = getEnvInt("RPC_TIMEOUT_MS", 150)
-		c.HeartbeatMs = getEnvInt("HEARTBEAT_MS", 200)
-		c.ElectionMinMs = getEnvInt("ELECTION_MIN_MS", 1500)
-		c.ElectionMaxMs = getEnvInt("ELECTION_MAX_MS", 2000)
+		c.RPCTimeoutMs = getEnvInt("RPC_TIMEOUT_MS", 50)
+		c.HeartbeatMs = getEnvInt("HEARTBEAT_MS", 100)
+		c.ElectionMinMs = getEnvInt("ELECTION_MIN_MS", 1000)
+		c.ElectionMaxMs = getEnvInt("ELECTION_MAX_MS", 5000)
 		c.ElectionDurationMs = c.ElectionMaxMs - c.ElectionMinMs
 
 		// Validate timing relationships
@@ -84,24 +87,29 @@ func LoadConfig() *Config {
 			panic(fmt.Sprintf("invalid config: ELECTION_MIN_MS (%d) must be less than ELECTION_MAX_MS (%d)", c.ElectionMinMs, c.ElectionMaxMs))
 		}
 
-		peerInfoFile := os.Getenv("PEER_INFO")
-		f, err := os.ReadFile(peerInfoFile)
-		if err != nil {
-			panic("error reading peer info file: " + err.Error())
-		}
-
-		var peerInfo PeerClientInfo
-		err = yaml.Unmarshal(f, &peerInfo)
-		if err != nil {
-			panic("error unmarshalling peer info: " + err.Error())
-		}
-
 		c.ServerIDS = make(map[string]string)
-		for _, peer := range peerInfo.PeerClients {
-			if peer.ID == c.ID {
-				continue
+
+		// PEER_INFO is optional. An absent or empty value means "no peers", which
+		// is valid for tests and single-node setups. A non-empty value that points
+		// to a missing or malformed file is still treated as a hard error.
+		peerInfoFile := os.Getenv("PEER_INFO")
+		if peerInfoFile != "" {
+			f, err := os.ReadFile(peerInfoFile)
+			if err != nil {
+				panic("error reading peer info file: " + err.Error())
 			}
-			c.ServerIDS[peer.ID] = peer.RPCUrl
+
+			var peerInfo PeerClientInfo
+			if err = yaml.Unmarshal(f, &peerInfo); err != nil {
+				panic("error unmarshalling peer info: " + err.Error())
+			}
+
+			for _, peer := range peerInfo.PeerClients {
+				if peer.ID == c.ID {
+					continue
+				}
+				c.ServerIDS[peer.ID] = peer.RPCUrl
+			}
 		}
 
 		instance = c
@@ -110,6 +118,13 @@ func LoadConfig() *Config {
 	fmt.Printf("\n-------------------------------\nConfig: %+v\n-------------------------------\n", instance)
 
 	return instance
+}
+
+// ResetForTest clears the singleton so LoadConfig can be called again.
+// Must only be used in tests.
+func ResetForTest() {
+	instance = nil
+	once = sync.Once{}
 }
 
 func getEnvInt(key string, defaultVal int) int {
