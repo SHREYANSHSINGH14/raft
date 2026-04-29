@@ -10,13 +10,28 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// responsible for starting goroutines for each peer, those routines will heartbeats to each node
+// so each node gets it's own orchestrator and this also starts a routine that updates commitIndex
+// based on matchIndexes periodically
 func (p *Peer) startSendLogs(ctx context.Context) {
-	sendLogPerPeerCtx, cancel := context.WithCancel(ctx)
+	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	for k, _ := range p.ServerIDRpcUrlMap {
-		go p.sendLogsPerPeer(sendLogPerPeerCtx, k)
+	started := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+
+	for k := range p.ServerIDRpcUrlMap {
+		go func(id string) {
+			started <- struct{}{}
+			p.sendLogsPerPeer(heartbeatCtx, id)
+		}(k)
 	}
+
+	// drain and count — blocks until all goroutines have actually started
+	for i := 0; i < len(p.ServerIDRpcUrlMap); i++ {
+		<-started
+	}
+
+	go p.startCommitIndexUpdater(heartbeatCtx)
 
 	select {
 	case <-p.electionTimeoutCh:
@@ -29,6 +44,65 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	}
 }
 
+func (p *Peer) startCommitIndexUpdater(ctx context.Context) {
+	sleepDuration := time.Duration(config.GetConfig().CommitIndexUpdaterSleepS) * time.Second
+
+	sleep := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(sleepDuration):
+			return true
+		}
+	}
+
+	for {
+		lastLogIndex, err := p.store.GetLastLogIndex(ctx)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+			if !sleep() {
+				return
+			}
+			continue
+		}
+
+		commitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
+		if commitIndex == 0 {
+			if !sleep() {
+				return
+			}
+			continue
+		}
+
+		commitIndexLog, err := p.store.GetLogByIndex(ctx, commitIndex)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+			if !sleep() {
+				return
+			}
+			continue
+		}
+
+		currentTerm, err := p.store.GetCurrentTerm(ctx)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+			if !sleep() {
+				return
+			}
+			continue
+		}
+
+		if commitIndexLog.Term == uint64(currentTerm) {
+			p.SetCommitIndex(commitIndex)
+		}
+
+		if !sleep() {
+			return
+		}
+	}
+}
+
+// per peer heartbeat orchestrator
 func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
 	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond)
 	ticker := time.NewTicker(heartBeatTime)
@@ -42,6 +116,11 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
 				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan)
 				inFlight = true
 			}
+		case err := <-sendLogErrChan:
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs to peer %s failed, will retry on next heartbeat", peerID)
+			}
+			inFlight = false
 		case <-ctx.Done():
 			cancel()
 			return
@@ -56,7 +135,6 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		errChan <- err
 		return
 	}
-	peerLogLen := make(map[string]uint)
 
 	client := p.ServerIDRpcUrlMap[peerID]
 	nextIdx := p.GetPeerIndex(peerID).nextIndex
@@ -85,7 +163,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		return
 	}
 
-	peerLogLen[peerID] = uint(len(logs))
+	peerLogLen := uint(len(logs))
 
 	res, err := sendAppendLogs(ctx, p.GetID(), peerID, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs)
 	if err != nil {
@@ -102,8 +180,8 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 	}
 
 	if res.Success {
-		p.SetMatchPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen[peerID]-1)
-		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen[peerID])
+		p.SetMatchPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen-1)
+		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen)
 	} else {
 		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex-1)
 	}

@@ -3,7 +3,9 @@ package raft
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/db"
@@ -24,7 +26,6 @@ func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRa
 	peer := NewPeerMock(store)
 	peer.Role = ServerRole_Leader
 
-	// extract typed clients for setting expectations
 	clients := map[string]*MockRaftRpcClient{}
 	for id, client := range peer.ServerIDRpcUrlMap {
 		clients[id] = client.(*MockRaftRpcClient)
@@ -33,10 +34,32 @@ func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRa
 	return peer, store, clients
 }
 
+// runSendLogs fans out sendLogs to every peer concurrently, mirroring what
+// sendLogsPerPeer does on each ticker tick, but synchronously so tests can
+// assert state immediately after. Returns the first error across all peers.
 func runSendLogs(p *Peer) error {
-	errChan := make(chan error, 1)
-	p.sendLogs(context.Background(), errChan)
-	return <-errChan
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(p.ServerIDRpcUrlMap))
+
+	for peerID := range p.ServerIDRpcUrlMap {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			ch := make(chan error, 1)
+			p.sendLogs(context.Background(), id, ch)
+			if err := <-ch; err != nil {
+				errCh <- err
+			}
+		}(peerID)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		return err
+	}
+	return nil
 }
 
 func appendLogsHelper(store *db.MockKVStore, logs []*types.LogEntry) {
@@ -54,6 +77,14 @@ func failResponse() *types.AppendEntriesResponse {
 func higherTermResponse(term uint64) *types.AppendEntriesResponse {
 	return &types.AppendEntriesResponse{Term: term, Success: false}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// sendLogs tests
+//
+// sendLogs handles one peer at a time: it fetches the prevLog based on that
+// peer's nextIndex, fetches the logs to send, fires the AppendEntries RPC,
+// and updates nextIndex/matchIndex based on the response.
+// ════════════════════════════════════════════════════════════════════════════
 
 // ── 1. Logs sent per peer based on nextIndex ──────────────────────────────────
 
@@ -97,7 +128,6 @@ func TestSendLogs_NextIndexOne_ZeroPrevLog(t *testing.T) {
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	// all peers at nextIndex=1, prevLog should be zero
 	for _, c := range clients {
 		c.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
 			return req.PrevLogIndex == 0 && req.PrevLogTerm == 0
@@ -105,7 +135,6 @@ func TestSendLogs_NextIndexOne_ZeroPrevLog(t *testing.T) {
 	}
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -123,7 +152,6 @@ func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	// all peers at nextIndex=3, prevLog should be index=2, term=5
 	for id := range peer.peerIndexes {
 		peer.peerIndexes[id] = PeerIndexes{nextIndex: 3, matchIndex: 2}
 	}
@@ -135,7 +163,6 @@ func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
 	}
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -157,10 +184,8 @@ func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
 	}
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
-	// nextIndex should advance by number of logs sent (2)
-	// matchIndex should be nextIndex + logsLen - 1 = 1 + 2 - 1 = 2
+
 	for id := range clients {
 		assert.Equal(t, uint(3), peer.GetPeerIndex(id).nextIndex,
 			"nextIndex should advance to 3 for %s", id)
@@ -178,7 +203,6 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	// set nextIndex to 2 so decrement gives 1
 	for id := range peer.peerIndexes {
 		peer.peerIndexes[id] = PeerIndexes{nextIndex: 2, matchIndex: 0}
 	}
@@ -188,8 +212,8 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 	}
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
+
 	for id := range clients {
 		assert.Equal(t, uint(1), peer.GetPeerIndex(id).nextIndex,
 			"nextIndex should decrement to 1 for %s", id)
@@ -231,7 +255,6 @@ func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
 
 func TestSendLogs_NoLogs_HeartbeatSent(t *testing.T) {
 	peer, _, clients := setupSendLogsTest(t)
-	// no logs in store — all peers get empty entries
 
 	for _, c := range clients {
 		c.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
@@ -240,7 +263,6 @@ func TestSendLogs_NoLogs_HeartbeatSent(t *testing.T) {
 	}
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -266,9 +288,7 @@ func TestSendLogs_PeerHigherTerm_BecomesFollower(t *testing.T) {
 	assert.Equal(t, ServerRole_Follower, peer.GetRole())
 }
 
-// ── Some peers get heartbeat, some get logs ───────────────────────────────────
-// node-2 is up to date → heartbeat only
-// node-3, node-4, node-5 are behind → get actual logs
+// ── 9. Some peers get heartbeat, some get logs ───────────────────────────────
 
 func TestSendLogs_MixedHeartbeatAndLogs(t *testing.T) {
 	peer, store, clients := setupSendLogsTest(t)
@@ -279,107 +299,35 @@ func TestSendLogs_MixedHeartbeatAndLogs(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	// node-2 already has all logs — nextIndex points beyond last log
 	peer.peerIndexes["node-2"] = PeerIndexes{nextIndex: 4, matchIndex: 3}
-	// rest are behind
 	peer.peerIndexes["node-3"] = PeerIndexes{nextIndex: 1, matchIndex: 0}
 	peer.peerIndexes["node-4"] = PeerIndexes{nextIndex: 2, matchIndex: 1}
 	peer.peerIndexes["node-5"] = PeerIndexes{nextIndex: 3, matchIndex: 2}
 
-	// node-2 gets heartbeat — no entries
 	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
 		return len(req.Entries) == 0
 	})).Return(successResponse(), nil)
 
-	// node-3 gets all 3 logs
 	clients["node-3"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
 		return len(req.Entries) == 3 && req.Entries[0].Index == 1
 	})).Return(successResponse(), nil)
 
-	// node-4 gets logs from index 2
 	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
 		return len(req.Entries) == 2 && req.Entries[0].Index == 2
 	})).Return(successResponse(), nil)
 
-	// node-5 gets only the last log
 	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
 		return len(req.Entries) == 1 && req.Entries[0].Index == 3
 	})).Return(successResponse(), nil)
 
 	err := runSendLogs(peer)
-
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
 	}
 }
 
-// ── 9. commitIndex advances when majority replicated ─────────────────────────
-
-func TestSendLogs_MajorityReplicated_CommitIndexAdvances(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
-
-	appendLogsHelper(store, []*types.LogEntry{
-		{Index: 1, Term: 5, Data: []byte("cmd-1")},
-		{Index: 2, Term: 5, Data: []byte("cmd-2")},
-	})
-
-	// self + node-2 + node-3 = 3 = majority of 5
-	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	clients["node-3"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-
-	err := runSendLogs(peer)
-	assert.NoError(t, err)
-	assert.Greater(t, peer.GetCommitIndex(), uint(0),
-		"commitIndex should have advanced after majority replication")
-}
-
-// ── 10. commitIndex does NOT advance when not majority ────────────────────────
-
-func TestSendLogs_NoMajority_CommitIndexUnchanged(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
-
-	appendLogsHelper(store, []*types.LogEntry{
-		{Index: 1, Term: 5, Data: []byte("cmd-1")},
-	})
-
-	// all peers fail — no majority
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-	}
-
-	err := runSendLogs(peer)
-
-	assert.NoError(t, err)
-	assert.Equal(t, uint(0), peer.GetCommitIndex(),
-		"commitIndex must not advance without majority")
-}
-
-// ── 11. commitIndex does NOT advance for previous term logs (5.4.2) ──────────
-
-func TestSendLogs_PreviousTermLog_CommitIndexUnchanged(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
-
-	// log is from term 4, current term is 5
-	// Raft 5.4.2: leader must not commit logs from previous terms by counting replicas
-	appendLogsHelper(store, []*types.LogEntry{
-		{Index: 1, Term: 4, Data: []byte("cmd-1")}, // old term
-	})
-
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	}
-
-	err := runSendLogs(peer)
-
-	assert.NoError(t, err)
-	assert.Equal(t, uint(0), peer.GetCommitIndex(),
-		"commitIndex must not advance for logs from previous terms")
-}
-
-// ── 12. GetCurrentTerm fails ──────────────────────────────────────────────────
+// ── 10. GetCurrentTerm fails ──────────────────────────────────────────────────
 
 func TestSendLogs_DBErr_GetCurrentTerm(t *testing.T) {
 	mockStore := new(db.MockStore)
@@ -402,7 +350,7 @@ func TestSendLogs_DBErr_GetCurrentTerm(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// ── 13. GetLogByIndex fails (fetching prevLog) ────────────────────────────────
+// ── 11. GetLogByIndex fails (fetching prevLog) ────────────────────────────────
 
 func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
 	mockStore := new(db.MockStore)
@@ -415,7 +363,7 @@ func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		peerIndexes: map[string]PeerIndexes{
-			"node-2": {nextIndex: 2, matchIndex: 1}, // nextIndex > 1 triggers GetLogByIndex
+			"node-2": {nextIndex: 2, matchIndex: 1},
 		},
 		ServerIDRpcUrlMap: map[string]types.RaftRpcClient{
 			"node-2": NewMockRaftRpcClient(),
@@ -426,7 +374,7 @@ func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// ── 14. GetLogs fails ─────────────────────────────────────────────────────────
+// ── 12. GetLogs fails ─────────────────────────────────────────────────────────
 
 func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 	mockStore := new(db.MockStore)
@@ -451,4 +399,204 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 
 	err := runSendLogs(peer)
 	assert.Error(t, err)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// getMajorityMatchIndex unit tests
+//
+// Pure function — no goroutines, no sleep. Tests cover the commit index
+// calculation logic directly. startCommitIndexUpdater calls this to decide
+// what index is safe to commit.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── 13. Majority replicated → highest index with majority returned ────────────
+// n2:5, n3:3, n4:4, n5:6, self:7
+// sorted desc: [7,6,5,4,3] → freq: 7:1, 6:2, 5:3, 4:4, 3:5
+// majority count = (4+1)/2+1 = 3 → first index with freq >= 3 is 5
+
+func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
+	peerIndexes := map[string]PeerIndexes{
+		"node-2": {matchIndex: 5},
+		"node-3": {matchIndex: 3},
+		"node-4": {matchIndex: 4},
+		"node-5": {matchIndex: 6},
+	}
+
+	result := getMajorityMatchIndex(peerIndexes, 7)
+	assert.Equal(t, uint(5), result)
+}
+
+// ── 14. No majority → returns 0 ───────────────────────────────────────────────
+
+func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
+	peerIndexes := map[string]PeerIndexes{
+		"node-2": {matchIndex: 0},
+		"node-3": {matchIndex: 0},
+		"node-4": {matchIndex: 0},
+		"node-5": {matchIndex: 0},
+	}
+
+	// only self has index 1 — not a majority of 5
+	result := getMajorityMatchIndex(peerIndexes, 1)
+	assert.Equal(t, uint(0), result)
+}
+
+// ── 15. All peers at same index → that index returned ─────────────────────────
+
+func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
+	peerIndexes := map[string]PeerIndexes{
+		"node-2": {matchIndex: 3},
+		"node-3": {matchIndex: 3},
+		"node-4": {matchIndex: 3},
+		"node-5": {matchIndex: 3},
+	}
+
+	result := getMajorityMatchIndex(peerIndexes, 3)
+	assert.Equal(t, uint(3), result)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// startCommitIndexUpdater tests
+//
+// Periodically computes getMajorityMatchIndex and calls SetCommitIndex only
+// when the log at commitIndex belongs to the current term (Raft §5.4.2).
+// Skips when commitIndex == 0 (no replication yet). Continues on DB errors
+// rather than dying — transient failures just delay the next update.
+//
+// Since this runs in a goroutine with a sleep, tests use assert.Eventually
+// to poll for the expected state rather than asserting synchronously.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── 16. Majority replicated, current term log → commitIndex advances ──────────
+
+func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T) {
+	store := db.NewMockKVStore()
+	store.SetCurrentTerm(context.Background(), 5)
+	store.AppendLogs(context.Background(), []*types.LogEntry{
+		{Index: 1, Term: 5, Data: []byte("cmd-1")},
+		{Index: 2, Term: 5, Data: []byte("cmd-2")},
+	})
+
+	peer := NewPeerMock(store)
+	// self + node-2 + node-3 = 3 = majority of 5, all at index 2
+	peer.peerIndexes["node-2"] = PeerIndexes{matchIndex: 2}
+	peer.peerIndexes["node-3"] = PeerIndexes{matchIndex: 2}
+	peer.peerIndexes["node-4"] = PeerIndexes{matchIndex: 0}
+	peer.peerIndexes["node-5"] = PeerIndexes{matchIndex: 0}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go peer.startCommitIndexUpdater(ctx)
+
+	assert.Eventually(t, func() bool {
+		return peer.GetCommitIndex() == uint(2)
+	}, 2*time.Second, 10*time.Millisecond,
+		"commitIndex should advance to 2 once majority replicates current-term log")
+}
+
+// ── 17. Previous term log → commitIndex does NOT advance (Raft §5.4.2) ────────
+
+func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing.T) {
+	store := db.NewMockKVStore()
+	store.SetCurrentTerm(context.Background(), 5)
+	// log is from term 4, not current term 5
+	store.AppendLogs(context.Background(), []*types.LogEntry{
+		{Index: 1, Term: 4, Data: []byte("cmd-1")},
+	})
+
+	peer := NewPeerMock(store)
+	// all peers have replicated index 1 — majority achieved
+	for id := range peer.peerIndexes {
+		peer.peerIndexes[id] = PeerIndexes{matchIndex: 1}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	go peer.startCommitIndexUpdater(ctx)
+
+	// let it run for the full timeout — commitIndex must never move
+	<-ctx.Done()
+	assert.Equal(t, uint(0), peer.GetCommitIndex(),
+		"commitIndex must not advance for logs from previous terms (Raft §5.4.2)")
+}
+
+// ── 18. No majority → commitIndex stays 0 ────────────────────────────────────
+
+func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
+	store := db.NewMockKVStore()
+	store.SetCurrentTerm(context.Background(), 5)
+	store.AppendLogs(context.Background(), []*types.LogEntry{
+		{Index: 1, Term: 5, Data: []byte("cmd-1")},
+	})
+
+	peer := NewPeerMock(store)
+	// only self has the log — no peer has replicated it
+	for id := range peer.peerIndexes {
+		peer.peerIndexes[id] = PeerIndexes{matchIndex: 0}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	go peer.startCommitIndexUpdater(ctx)
+
+	<-ctx.Done()
+	assert.Equal(t, uint(0), peer.GetCommitIndex(),
+		"commitIndex must not advance without majority replication")
+}
+
+// ── 19. DB error on GetLastLogIndex → continues, does not die ────────────────
+
+func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
+	mockStore := new(db.MockStore)
+
+	// first call errors, all subsequent calls succeed — proves the loop continued past the error
+	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), errors.New("db error")).Once()
+	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(1), nil)
+	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(&types.LogEntry{Index: 1, Term: 5}, nil)
+	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
+
+	peer := NewPeerMock(mockStore)
+	for id := range peer.peerIndexes {
+		peer.peerIndexes[id] = PeerIndexes{matchIndex: 1}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go peer.startCommitIndexUpdater(ctx)
+
+	// if the goroutine dies on first error, commitIndex never advances
+	assert.Eventually(t, func() bool {
+		return peer.GetCommitIndex() > 0
+	}, 2*time.Second, 10*time.Millisecond,
+		"updater must continue past DB errors and eventually commit")
+}
+
+// ── 20. Context cancelled → goroutine exits cleanly ──────────────────────────
+
+func TestStartCommitIndexUpdater_ContextCancelled_Exits(t *testing.T) {
+	store := db.NewMockKVStore()
+	store.SetCurrentTerm(context.Background(), 5)
+
+	peer := NewPeerMock(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		peer.startCommitIndexUpdater(ctx)
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+		// exited cleanly
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("startCommitIndexUpdater did not exit after context cancellation")
+	}
 }
