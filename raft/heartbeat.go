@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/SHREYANSHSINGH14/raft/config"
@@ -12,27 +11,36 @@ import (
 )
 
 func (p *Peer) startSendLogs(ctx context.Context) {
-	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond) // TODO: replace with config value
+	sendLogPerPeerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for k, _ := range p.ServerIDRpcUrlMap {
+		go p.sendLogsPerPeer(sendLogPerPeerCtx, k)
+	}
+
+	select {
+	case <-p.electionTimeoutCh:
+		cancel()
+		p.becomeFollower(ctx)
+		return
+	case <-ctx.Done():
+		cancel()
+		return
+	}
+}
+
+func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
+	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond)
 	ticker := time.NewTicker(heartBeatTime)
-	sendLogCtx, cancel := context.WithCancel(ctx)
 	sendLogErrChan := make(chan error, 1)
+	sendLogCtx, cancel := context.WithCancel(ctx)
+	inFlight := false
 	for {
 		select {
-		case <-p.electionTimeoutCh:
-			cancel()
-			p.becomeFollower(ctx)
-			return
 		case <-ticker.C:
-			// this needs to be non blocking call because if it gets blocked then it won't be able to send logs to peers at regular interval
-			// and if there is a bug in sendLogs function which is causing it to get blocked then it will also block the server indefinitely
-			// and we won't be able to fix the bug because we won't be able to see the logs of sendLogs function
-
-			// it won't be able to check for electionTimeoutCh while it is blocked in sendLogs function and if there is a bug in sendLogs, then
-			// it won't become a follower and it will keep trying to send logs to peers and it will keep getting blocked in sendLogs function and it will keep getting blocked indefinitely
-			go p.sendLogs(sendLogCtx, sendLogErrChan)
-		case err := <-sendLogErrChan:
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("error sending logs to peers")
+			if !inFlight {
+				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan)
+				inFlight = true
 			}
 		case <-ctx.Done():
 			cancel()
@@ -41,95 +49,28 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	}
 }
 
-func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
+func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
 		errChan <- err
 		return
 	}
-
-	var wg sync.WaitGroup
-	responseCh := make(chan ResponseAppendLogs, len(p.ServerIDRpcUrlMap))
 	peerLogLen := make(map[string]uint)
 
-	for id, client := range p.ServerIDRpcUrlMap {
-		nextIdx := p.GetPeerIndex(id).nextIndex
+	client := p.ServerIDRpcUrlMap[peerID]
+	nextIdx := p.GetPeerIndex(peerID).nextIndex
 
-		var prevLog *types.LogEntry
-		if nextIdx > 1 {
-			prevLog, err = p.store.GetLogByIndex(ctx, nextIdx-1)
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err at index:%d : %s", nextIdx-1, err.Error())
-				errChan <- err
-				return
-			}
-		} else {
-			prevLog = &types.LogEntry{
-				Index: 0,
-				Term:  0,
-				Data:  []byte{},
-				Type:  types.EntryType_ENTRY_TYPE_NO_OP,
-			}
-		}
-
-		logs, err := p.store.GetLogs(ctx, &nextIdx, nil)
+	var prevLog *types.LogEntry
+	if nextIdx > 1 {
+		prevLog, err = p.store.GetLogByIndex(ctx, nextIdx-1)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
-			errChan <- err
-			return
-		}
-
-		peerLogLen[id] = uint(len(logs))
-
-		wg.Add(1)
-		go sendAppendLogs(ctx, &wg, p.GetID(), id, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, responseCh)
-
-	}
-
-	wg.Wait()
-
-	for _ = range len(p.ServerIDRpcUrlMap) {
-		res := <-responseCh
-
-		if res.err != nil {
-			zerolog.Ctx(ctx).Error().Err(res.err).Msgf("error in append logs rpc response from peer %s", res.id)
-			continue
-		}
-
-		if uint(res.rpcRes.Term) > currentTerm {
-			p.becomeFollower(ctx)
-			errChan <- nil
-			return
-		}
-
-		if res.rpcRes.Success {
-			p.SetMatchPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id]-1)
-			p.SetNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex+peerLogLen[res.id])
-		} else {
-			p.SetNextPeerIndex(res.id, p.peerIndexes[res.id].nextIndex-1)
-		}
-	}
-
-	lastLogIndex, err := p.store.GetLastLogIndex(ctx)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
-		errChan <- err
-		return
-	}
-
-	newCommitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
-
-	var newCommitLog *types.LogEntry
-	if newCommitIndex != 0 {
-		newCommitLog, err = p.store.GetLogByIndex(ctx, newCommitIndex)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err at index:%d : %s", nextIdx-1, err.Error())
 			errChan <- err
 			return
 		}
 	} else {
-		newCommitLog = &types.LogEntry{
+		prevLog = &types.LogEntry{
 			Index: 0,
 			Term:  0,
 			Data:  []byte{},
@@ -137,24 +78,42 @@ func (p *Peer) sendLogs(ctx context.Context, errChan chan<- error) {
 		}
 	}
 
-	if newCommitIndex > p.commitIndex && newCommitLog.Term == uint64(currentTerm) {
-		p.SetCommitIndex(newCommitIndex)
+	logs, err := p.store.GetLogs(ctx, &nextIdx, nil)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+		errChan <- err
+		return
+	}
+
+	peerLogLen[peerID] = uint(len(logs))
+
+	res, err := sendAppendLogs(ctx, p.GetID(), peerID, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in append logs rpc response from peer %s", peerID)
+		errChan <- err
+		return
+
+	}
+
+	if uint(res.Term) > currentTerm {
+		p.becomeFollower(ctx)
+		errChan <- nil
+		return
+	}
+
+	if res.Success {
+		p.SetMatchPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen[peerID]-1)
+		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen[peerID])
+	} else {
+		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex-1)
 	}
 
 	errChan <- nil
 	return
 }
 
-type ResponseAppendLogs struct {
-	rpcRes *types.AppendEntriesResponse
-	id     string
-	err    error
-}
-
-func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, responseCh chan<- ResponseAppendLogs) {
-	defer wg.Done()
-
-	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond) // TODO: Replace with config
+func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry) (*types.AppendEntriesResponse, error) {
+	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond)
 	defer cancel()
 
 	rpcReq := types.AppendEntriesArgs{
@@ -166,22 +125,7 @@ func sendAppendLogs(ctx context.Context, wg *sync.WaitGroup, leaderID, peerID st
 		LeaderCommit: uint64(leaderCommit),
 	}
 
-	var res ResponseAppendLogs
-
-	rpcRes, err := client.AppendEntries(rpcCtx, &rpcReq)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending append logs rpc to peer %s: %s", peerID, err.Error())
-		res.err = err
-		res.id = peerID
-
-		responseCh <- res
-		return
-	}
-
-	res.rpcRes = rpcRes
-	res.id = peerID
-
-	responseCh <- res
+	return client.AppendEntries(rpcCtx, &rpcReq)
 }
 
 // Intution behind this function
