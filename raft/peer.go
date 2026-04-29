@@ -355,7 +355,9 @@ func (p *Peer) SetMatchPeerIndex(id string, idx uint) {
 func (p *Peer) SetCommitIndex(idx uint) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
+	if idx < p.commitIndex {
+		return
+	}
 	p.commitIndex = idx
 }
 
