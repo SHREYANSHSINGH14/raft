@@ -19,11 +19,12 @@ type Config struct {
 	Port      string
 	DebugPort string
 
-	RPCTimeoutMs       int
-	HeartbeatMs        int
-	ElectionMinMs      int
-	ElectionMaxMs      int
-	ElectionDurationMs int
+	RPCTimeoutMs             int
+	HeartbeatMs              int
+	ElectionMinMs            int
+	ElectionMaxMs            int
+	ElectionDurationMs       int
+	CommitIndexUpdaterSleepS int
 }
 
 type PeerClient struct {
@@ -70,6 +71,7 @@ func LoadConfig() *Config {
 		c.ElectionMinMs = getEnvInt("ELECTION_MIN_MS", 1000)
 		c.ElectionMaxMs = getEnvInt("ELECTION_MAX_MS", 5000)
 		c.ElectionDurationMs = c.ElectionMaxMs - c.ElectionMinMs
+		c.CommitIndexUpdaterSleepS = getEnvInt("COMMIT_UPDATER_SLEEP_S", 1)
 
 		// Validate timing relationships
 		// RPCTimeout < HeartbeatMs < ElectionMinMs is required for Raft correctness
