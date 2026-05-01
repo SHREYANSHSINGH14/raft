@@ -31,7 +31,7 @@ func (p *Peer) startElection(ctx context.Context) {
 			// in both cases we should reset the election timeout and start waiting for next timeout
 			case <-p.electionTimeoutCh:
 				cancel() // cancel the previous election context to stop the previous election goroutine
-				p.becomeFollower(ctx)
+				p.becomeFollower()
 				return
 
 			// if duration of election elapses without reaching a decision
@@ -55,11 +55,9 @@ func (p *Peer) startElection(ctx context.Context) {
 				cancel()
 				switch res.transitonRole {
 				case ServerRole_Leader:
-					p.becomeLeader(ctx)
+					p.becomeLeader()
 				case ServerRole_Follower:
-					p.becomeFollower(ctx)
-				case ServerRole_Candidate:
-					p.becomeCandidate(ctx)
+					p.becomeFollower()
 				}
 				return
 			case <-ctx.Done():
@@ -75,7 +73,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	if p.GetRole() != ServerRole_Candidate {
 		err := fmt.Errorf("server is not a candidate cannot start election")
 		zerolog.Ctx(ctx).Error().Err(err).Msg(err.Error())
-		electionRes.transitonRole = p.GetRole()
+		electionRes.transitonRole = ServerRole_Follower
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -86,7 +84,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.GetRole()
+		electionRes.transitonRole = ServerRole_Follower
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -98,7 +96,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	err = p.store.SetCurrentTerm(ctx, newTerm)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.GetRole()
+		electionRes.transitonRole = ServerRole_Follower
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -109,7 +107,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	err = p.store.SetVotedFor(ctx, p.ID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.GetRole()
+		electionRes.transitonRole = ServerRole_Follower
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -120,7 +118,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	lastLogIndex, err := p.store.GetLastLogIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = p.GetRole()
+		electionRes.transitonRole = ServerRole_Follower
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -133,7 +131,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		lastLog, err = p.store.GetLogByIndex(ctx, lastLogIndex)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-			electionRes.transitonRole = p.GetRole()
+			electionRes.transitonRole = ServerRole_Follower
 			electionRes.err = err
 
 			resCh <- electionRes
