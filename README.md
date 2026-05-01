@@ -107,9 +107,39 @@ The same structural mistake appeared in two different places, and understanding 
 
 **The shared pattern:** `wg.Wait()` creates a synchronization point that doesn't respect external signals — whether that's a context cancellation or a ticker firing. The goroutine is stuck waiting for the *slowest* thing to finish while the rest of the system has moved on.
 
-**The fix in both cases:** eliminate `wg.Wait()` as the coordination mechanism. For election, a buffered channel sized exactly to the number of peers lets every goroutine send its result without blocking, regardless of whether the caller is still listening. For heartbeats, one independent goroutine loop per peer means there's no "wait for all 4" synchronization point at all — each peer loop runs on its own ticker with its own `inFlight` guard. A slow peer only affects its own pipeline, not the others.
+**The fix in both cases:** eliminate `wg.Wait()` as the coordination mechanism. For election, a buffered channel sized exactly to the number of peers lets every goroutine send its result without blocking, regardless of whether the caller is still listening. For heartbeats, one independent goroutine loop per peer (`sendLogsPerPeer`) means there's no "wait for all 4" synchronization point at all — each peer loop runs on its own ticker with its own `inFlight` guard. A slow peer only affects its own pipeline, not the others.
 
 This is also why per-peer goroutines are the correct design, not just a performance optimization. `wg.Wait()` couples all peers together — one slow follower holds up heartbeats to everyone else. Independent loops isolate the failure. This is how etcd, TiKV, and CockroachDB implement replication.
+
+### Follower as the Safe Default — Fixing Term Inflation
+
+A subtler election bug: when a candidate failed to win (no majority reached, or all peers rejected the vote), the original code returned `ServerRole_Candidate` from `election()` and immediately called `becomeCandidate()` again — bypassing `startElectionOut` and its randomized timeout entirely.
+
+The failure mode was visible when two nodes with stale logs rejoined the cluster simultaneously. Both kept getting rejected by the log-up-to-date check on every attempt. Each election attempt takes ~50ms (one RPC timeout). With two nodes each trying ~20 times per second, terms inflated by ~40/second — reaching 783 terms in under 12 seconds with no stable leader.
+
+The Raft paper is explicit: a candidate that fails to win should wait for a new randomized timeout before trying again. `startElectionOut` implements exactly that wait — but `becomeCandidate()` was bypassing it by jumping straight to `startElection`.
+
+**The fix:** on a `Candidate` result from `election()`, call `becomeFollower()` instead of `becomeCandidate()`. This puts the node back into the randomized timeout wait in `startElectionOut`. When a leader's heartbeat arrives, the timer resets and the node stays follower. If no heartbeat arrives, the timeout fires and it tries again — with proper spacing.
+
+The deeper principle: **follower is the safe default**. Any role that fails to fulfill its responsibility should retreat to follower, not retry immediately:
+
+- Candidate fails to win → follower. Let the randomized timer decide when to try again.
+- Leader can't initialize state → follower. Let someone healthier lead.
+- Leader sees a higher term → follower. Acknowledge the legitimate authority.
+
+A zombie leader sends conflicting `AppendEntries`. A runaway candidate inflates terms and disrupts stable leaders. A follower just waits — the only role that can't cause harm to the cluster.
+
+### Child Goroutines Never Drive Role Transitions
+
+After fixing the `wg.Wait()` issue in heartbeats, a second bug surfaced: `sendLogs` was calling `p.becomeFollower()` directly when it saw a higher term in an `AppendEntries` response. This created a three-part failure chain:
+
+1. `sendLogs` called `becomeFollower()`, which started a new election timer — but `heartbeatCtx` was never cancelled, so all `sendLogsPerPeer` goroutines kept running as zombies. The node was simultaneously follower *and* leader.
+2. When the node won the next election and called `becomeLeader()`, it spawned a *second* set of heartbeat goroutines on top of the existing ones. Every leadership cycle added another layer of goroutines that never stopped.
+3. These zombie goroutines kept sending `AppendEntries` RPCs with stale leader state, corrupting follower logs and causing spurious step-downs in an unbounded loop.
+
+**The fix — same pattern as election.go:** child goroutines never drive role transitions directly. `sendLogs` signals a `stepDownCh` channel and returns. `startSendLogs` (the orchestrator) reads that signal, calls `cancel()` to stop all `sendLogsPerPeer` goroutines via context, *then* calls `becomeFollower()` exactly once. One owner, clean shutdown.
+
+The `stepDownCh` buffer is sized to the number of peers. Context cancellation doesn't preempt running code — it only fires at the next `select` or ctx check. So after `startSendLogs` reads the first signal and cancels, other `sendLogs` goroutines that are already past the RPC call can still reach the `stepDownCh <- struct{}{}` line before noticing cancellation. Worst case: all peers respond with a higher term simultaneously — `len(peers)` senders. Buffering all of them means no sender ever blocks. The unread signals are GC'd when `startSendLogs` returns and the channel goes out of scope.
 
 ### Startup Quorum Wait
 Before starting the election timer, a node waits for a majority of peers to be reachable. This avoids a window where containers start at slightly different times and trigger spurious elections before the cluster is healthy.
@@ -159,24 +189,49 @@ make run
 
 Each node exposes a debug HTTP server for manual inspection and testing.
 
-### Check node status
+### Check all nodes at once
 ```bash
-curl http://localhost:8081/status
+for i in 1 2 3 4 5; do curl -s http://localhost:808${i}/status; echo; done
+```
+```json
+{"id":"peer1","role":"LEADER","term":1,"commit_index":2,"leader_id":""}
+{"id":"peer2","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
+{"id":"peer3","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
+{"id":"peer4","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
+{"id":"peer5","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
 ```
 
-### Write a log entry (must hit the leader)
+### Write a log entry
 ```bash
-curl -X POST http://localhost:8081/logs/append \
+curl -s -X POST http://localhost:8081/logs/append \
   -H "Content-Type: application/json" \
   -d '{"data": "set x=5"}'
 ```
+```json
+{"success":true,"error_msg":"","leader_id":""}
+```
 
-If the node is not the leader, the response includes a `leader_id` field for redirect.
+If you hit a follower, it won't accept the write — redirect to the returned `leader_id`:
+```bash
+curl -s -X POST http://localhost:8082/logs/append \
+  -H "Content-Type: application/json" \
+  -d '{"data": "set x=5"}'
+```
+```json
+{"success":false,"error_msg":"not the leader","leader_id":"peer1"}
+```
 
 ### Read log entries
 ```bash
-# Entries from index 1 to 10
-curl "http://localhost:8081/logs/get?start=1&end=10"
+curl -s "http://localhost:8081/logs/get?start=1&end=5"
+```
+```json
+{"entries":[{"index":1,"term":1,"data":"set x=5"},{"index":2,"term":1,"data":"set y=10"}],"error_msg":"","leader_id":""}
+```
+
+Omit `end` to fetch everything from `start` to the latest:
+```bash
+curl -s "http://localhost:8081/logs/get?start=1"
 ```
 
 ---
