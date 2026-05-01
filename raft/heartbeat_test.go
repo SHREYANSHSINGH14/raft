@@ -41,12 +41,15 @@ func runSendLogs(p *Peer) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(p.ServerIDRpcUrlMap))
 
+	// mirror the production buffer size — all peers could signal step-down simultaneously
+	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+
 	for peerID := range p.ServerIDRpcUrlMap {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			ch := make(chan error, 1)
-			p.sendLogs(context.Background(), id, ch)
+			p.sendLogs(context.Background(), id, ch, stepDownCh)
 			if err := <-ch; err != nil {
 				errCh <- err
 			}

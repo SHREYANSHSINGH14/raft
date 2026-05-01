@@ -17,12 +17,40 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// BUG (fixed): previously, sendLogs called p.becomeFollower() directly when it saw a higher
+	// term in an AppendEntries response. that caused two problems:
+	//   1. startSendLogs never got the signal to exit — heartbeatCtx was never cancelled,
+	//      so all sendLogsPerPeer goroutines kept running as zombies even after the node
+	//      transitioned to follower.
+	//   2. becomeFollower started a new election timer, but the heartbeat goroutines were
+	//      still alive, still sending RPCs as leader. the node was simultaneously follower
+	//      and leader.
+	//   3. next election win called becomeLeader again, spawning a second set of heartbeat
+	//      goroutines on top of the existing ones. goroutines accumulated every leadership
+	//      cycle — a leak that grew unboundedly.
+	//
+	// FIX: same pattern used in election.go — child goroutines never drive role transitions
+	// directly. instead, sendLogs signals stepDownCh and returns. startSendLogs (the
+	// orchestrator) reads that signal, cancels heartbeatCtx (which stops all sendLogsPerPeer
+	// goroutines via ctx.Done()), then calls becomeFollower exactly once. clean shutdown,
+	// single owner of the transition.
+	//
+	// why buffer size = len(peers)?
+	// context cancellation doesn't preempt running code — it only fires on the next select
+	// or ctx check. so after startSendLogs reads the first signal and cancels heartbeatCtx,
+	// other sendLogs goroutines that are already past sendAppendLogs and sitting at the
+	// higher-term check can still reach the stepDownCh send before noticing cancellation.
+	// worst case: all peers respond with higher term simultaneously — len(peers) senders.
+	// buffering all of them means no sender ever blocks. the unread signals are GC'd when
+	// startSendLogs returns and the channel goes out of scope.
+	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+
 	started := make(chan struct{}, len(p.ServerIDRpcUrlMap))
 
 	for k := range p.ServerIDRpcUrlMap {
 		go func(id string) {
 			started <- struct{}{}
-			p.sendLogsPerPeer(heartbeatCtx, id)
+			p.sendLogsPerPeer(heartbeatCtx, id, stepDownCh)
 		}(k)
 	}
 
@@ -34,9 +62,17 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	go p.startCommitIndexUpdater(heartbeatCtx)
 
 	select {
+	case <-stepDownCh:
+		// a peer responded with a higher term — we are no longer the legitimate leader.
+		// cancel heartbeatCtx first so all sendLogsPerPeer goroutines stop, then
+		// transition. order matters: cancel before becomeFollower so no zombie heartbeats
+		// race against the new follower state.
+		cancel()
+		p.becomeFollower()
+		return
 	case <-p.electionTimeoutCh:
 		cancel()
-		p.becomeFollower(ctx)
+		p.becomeFollower()
 		return
 	case <-ctx.Done():
 		cancel()
@@ -103,7 +139,7 @@ func (p *Peer) startCommitIndexUpdater(ctx context.Context) {
 }
 
 // per peer heartbeat orchestrator
-func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
+func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh chan<- struct{}) {
 	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond)
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogErrChan := make(chan error, 1)
@@ -113,7 +149,7 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan)
+				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh)
 				inFlight = true
 			}
 		case err := <-sendLogErrChan:
@@ -128,7 +164,7 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string) {
 	}
 }
 
-func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error) {
+func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error, stepDownCh chan<- struct{}) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
@@ -170,20 +206,33 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in append logs rpc response from peer %s", peerID)
 		errChan <- err
 		return
-
 	}
 
 	if uint(res.Term) > currentTerm {
-		p.becomeFollower(ctx)
+		// BUG (fixed): we used to call p.becomeFollower() directly here.
+		// that meant a child goroutine was driving the role transition, bypassing
+		// the orchestrator entirely. heartbeatCtx was never cancelled, leaving all
+		// sendLogsPerPeer goroutines running as zombies. see startSendLogs comment
+		// for the full failure chain.
+		//
+		// now we just signal and return. startSendLogs owns the transition.
+		stepDownCh <- struct{}{}
 		errChan <- nil
 		return
 	}
 
 	if res.Success {
-		p.SetMatchPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen-1)
-		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex+peerLogLen)
+		if peerLogLen > 0 {
+			currentNext := p.GetPeerIndex(peerID).nextIndex
+			p.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
+			p.SetNextPeerIndex(peerID, currentNext+peerLogLen)
+		}
+		// peerLogLen == 0 means pure heartbeat — follower is consistent, nothing to advance
 	} else {
-		p.SetNextPeerIndex(peerID, p.peerIndexes[peerID].nextIndex-1)
+		currentNext := p.GetPeerIndex(peerID).nextIndex
+		if currentNext > 1 {
+			p.SetNextPeerIndex(peerID, currentNext-1)
+		}
 	}
 
 	errChan <- nil
