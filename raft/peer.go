@@ -166,27 +166,28 @@ func (p *Peer) Start() {
 // They also starts the necessary goroutines for that role like election timeout for follower and send logs for leader
 // -------------------------------------------
 
-func (p *Peer) becomeFollower(ctx context.Context) {
-	zerolog.Ctx(ctx).Info().Msg("becoming follower")
+func (p *Peer) becomeFollower() {
+	zerolog.Ctx(p.ctx).Info().Msg("becoming follower")
 	p.SetRole(ServerRole_Follower)
-	p.startElectionOut(ctx)
+	p.startElectionOut(p.ctx)
 }
 
-func (p *Peer) becomeCandidate(ctx context.Context) {
-	zerolog.Ctx(ctx).Info().Msg("becoming candidate")
+func (p *Peer) becomeCandidate() {
+	zerolog.Ctx(p.ctx).Info().Msg("becoming candidate")
 	p.SetRole(ServerRole_Candidate)
-	p.startElection(ctx)
+	p.startElection(p.ctx)
 }
 
-func (p *Peer) becomeLeader(ctx context.Context) {
-	zerolog.Ctx(ctx).Info().Msg("becoming leader")
+func (p *Peer) becomeLeader() {
+	zerolog.Ctx(p.ctx).Info().Msg("becoming leader")
 	p.SetRole(ServerRole_Leader)
 	p.SetLeaderID("")
 	p.peerIndexes = make(map[string]PeerIndexes)
 
-	lastIndex, err := p.store.GetLastLogIndex(ctx)
+	lastIndex, err := p.store.GetLastLogIndex(p.ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("error getting latest log index")
+		zerolog.Ctx(p.ctx).Error().Err(err).Msg("error getting latest log index")
+		p.becomeFollower()
 		return
 	}
 
@@ -196,7 +197,7 @@ func (p *Peer) becomeLeader(ctx context.Context) {
 			matchIndex: 0,
 		}
 	}
-	p.startSendLogs(ctx)
+	p.startSendLogs(p.ctx)
 }
 
 // -------------------------------------------
@@ -223,7 +224,7 @@ func (p *Peer) startElectionOut(ctx context.Context) {
 				continue
 			case <-ticker.C:
 				ticker.Stop()
-				p.becomeCandidate(ctx)
+				p.becomeCandidate()
 				return
 			case <-ctx.Done():
 				ticker.Stop()
