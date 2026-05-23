@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -44,13 +45,14 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	// buffering all of them means no sender ever blocks. the unread signals are GC'd when
 	// startSendLogs returns and the channel goes out of scope.
 	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+	updateCommitIndexCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
 
 	started := make(chan struct{}, len(p.ServerIDRpcUrlMap))
 
 	for k := range p.ServerIDRpcUrlMap {
 		go func(id string) {
 			started <- struct{}{}
-			p.sendLogsPerPeer(heartbeatCtx, id, stepDownCh)
+			p.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
 		}(k)
 	}
 
@@ -59,7 +61,7 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 		<-started
 	}
 
-	go p.startCommitIndexUpdater(heartbeatCtx)
+	go p.startCommitIndexUpdater(heartbeatCtx, updateCommitIndexCh)
 
 	select {
 	case <-stepDownCh:
@@ -80,66 +82,51 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	}
 }
 
-func (p *Peer) startCommitIndexUpdater(ctx context.Context) {
-	sleepDuration := time.Duration(config.GetConfig().CommitIndexUpdaterSleepS) * time.Second
-
-	sleep := func() bool {
+func (p *Peer) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-chan struct{}) {
+	for {
 		select {
 		case <-ctx.Done():
-			return false
-		case <-time.After(sleepDuration):
-			return true
-		}
-	}
-
-	for {
-		lastLogIndex, err := p.store.GetLastLogIndex(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-			if !sleep() {
-				return
-			}
-			continue
-		}
-
-		commitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
-		if commitIndex == 0 {
-			if !sleep() {
-				return
-			}
-			continue
-		}
-
-		commitIndexLog, err := p.store.GetLogByIndex(ctx, commitIndex)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-			if !sleep() {
-				return
-			}
-			continue
-		}
-
-		currentTerm, err := p.store.GetCurrentTerm(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-			if !sleep() {
-				return
-			}
-			continue
-		}
-
-		if commitIndexLog.Term == uint64(currentTerm) {
-			p.SetCommitIndex(commitIndex)
-		}
-
-		if !sleep() {
 			return
+		case <-updateCommitCh:
+			for len(updateCommitCh) > 0 {
+				<-updateCommitCh
+			}
+			lastLogIndex, err := p.store.GetLastLogIndex(ctx)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+
+				continue
+			}
+
+			commitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
+			if commitIndex == 0 {
+
+				continue
+			}
+
+			commitIndexLog, err := p.store.GetLogByIndex(ctx, commitIndex)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+
+				continue
+			}
+
+			currentTerm, err := p.store.GetCurrentTerm(ctx)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
+
+				continue
+			}
+
+			if commitIndexLog.Term == uint64(currentTerm) {
+				p.SetCommitIndex(commitIndex)
+			}
 		}
 	}
 }
 
 // per peer heartbeat orchestrator
-func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh chan<- struct{}) {
+func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}) {
 	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond)
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogErrChan := make(chan error, 1)
@@ -149,7 +136,7 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh ch
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh)
+				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
 				inFlight = true
 			}
 		case err := <-sendLogErrChan:
@@ -164,7 +151,7 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh ch
 	}
 }
 
-func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error, stepDownCh chan<- struct{}) {
+func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error, stepDownCh, updateCommitIndexCh chan<- struct{}) {
 	currentTerm, err := p.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
@@ -208,6 +195,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		return
 	}
 
+	fmt.Printf("\nCurrentTerm: %d\nRes Term: %d", currentTerm, res.Term)
 	if uint(res.Term) > currentTerm {
 		// BUG (fixed): we used to call p.becomeFollower() directly here.
 		// that meant a child goroutine was driving the role transition, bypassing
@@ -226,6 +214,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 			currentNext := p.GetPeerIndex(peerID).nextIndex
 			p.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
 			p.SetNextPeerIndex(peerID, currentNext+peerLogLen)
+			updateCommitIndexCh <- struct{}{}
 		}
 		// peerLogLen == 0 means pure heartbeat — follower is consistent, nothing to advance
 	} else {
@@ -255,18 +244,12 @@ func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.R
 	return client.AppendEntries(rpcCtx, &rpcReq)
 }
 
-// Intution behind this function
-// We need to find the log index which is replicated on majority of servers, because we can only commit logs which are replicated on majority of servers
-// So the lowest match index would always be replicated to all so its safe to take that as the commit index, but that is sub optimal
-// Lets take an example, n2: 5, n3: 3, n4: 4, n5: 6, self: 7 (these are match index per node)
-// here replication frequency per matchIndex would look like 3: 5, 4: 4, 5: 3, 6: 2, 7: 1
-// so if we take the lowest match index which is 3, then we can only commit logs till index 3, but we can actually commit logs till index 5 because logs till index 5 are replicated on majority of servers (n2, n3, n4)
-// so we need to find the highest log index which is replicated on majority of servers and that would be our commit index
-// To do that we take all the matchIndex and sort them in descending order which would look like [7, 6, 5, 4, 3], and there replication frequency would look like 7: 1, 6: 2, 5: 3, 4: 4, 3: 5
-// lets take another example where matchIndexes are [7,6,6,5,5,5,4,3] and there replication frequency would be 7: 1, 6: 3, 5: 6, 4: 7, 3: 8
-// here we can see a pattern that a matchIndex's replication frequency is always equal to its last occurence index + 1 in descending sorted matchIndex array
-// we create a map of matchIndex to its replication frequency using this pattern and then we iterate over the matchIndexes (without duplicates) in descending order and check if its replication frequency is greater than
-// or equal to majority count, if it is then we return that matchIndex as the commit index because that would be the highest log index which is replicated on majority of servers
+// Sort all matchIndexes (peers + self) in descending order.
+// In the sorted array, matchIndexes[i] means at least i+1 servers have replicated up to that index,
+// because all servers at positions 0..i have matchIndex >= matchIndexes[i].
+// So matchIndexes[majorityCount-1] is the highest index replicated on a majority of servers.
+// Example 1 (no duplicates): n2:5, n3:3, n4:4, n5:6, self:7 → sorted [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
+// Example 2 (with duplicates): n2:6, n3:5, n4:6, n5:5, self:7 → sorted [7,6,6,5,5], majorityCount=3 → matchIndexes[2]=6
 func getMajorityMatchIndex(peerIndexes map[string]PeerIndexes, selfLastIndex uint) uint {
 	var matchIndexes []uint
 
@@ -276,25 +259,15 @@ func getMajorityMatchIndex(peerIndexes map[string]PeerIndexes, selfLastIndex uin
 
 	matchIndexes = append(matchIndexes, selfLastIndex)
 
-	// sort the match indexes in descending order
-	slices.Sort(matchIndexes)
-	slices.Reverse(matchIndexes)
-
-	matchIndexesFrequency := make(map[uint]int)
-
-	for i, idx := range matchIndexes {
-		matchIndexesFrequency[idx] = i + 1
-	}
-
-	matchIndexes = slices.Compact(matchIndexes)
-
-	majorutyCount := (len(peerIndexes)+1)/2 + 1 // +1 is for self
-
-	for _, idx := range matchIndexes {
-		if matchIndexesFrequency[idx] >= majorutyCount {
-			return idx
+	slices.SortFunc(matchIndexes, func(a, b uint) int {
+		if a > b {
+			return -1
+		} else if a < b {
+			return 1
 		}
-	}
+		return 0
+	})
 
-	return 0
+	majorityCount := (len(peerIndexes)+1)/2 + 1 // +1 is for self
+	return matchIndexes[majorityCount-1]
 }

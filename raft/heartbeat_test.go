@@ -36,20 +36,23 @@ func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRa
 
 // runSendLogs fans out sendLogs to every peer concurrently, mirroring what
 // sendLogsPerPeer does on each ticker tick, but synchronously so tests can
-// assert state immediately after. Returns the first error across all peers.
-func runSendLogs(p *Peer) error {
+// assert state immediately after. Returns (stepDown, error): stepDown is true
+// if any peer signalled a higher term (the orchestrator would normally handle
+// the role transition, but that path is not exercised here).
+func runSendLogs(p *Peer) (bool, error) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(p.ServerIDRpcUrlMap))
 
 	// mirror the production buffer size — all peers could signal step-down simultaneously
 	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+	updateCommitIndexCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
 
 	for peerID := range p.ServerIDRpcUrlMap {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			ch := make(chan error, 1)
-			p.sendLogs(context.Background(), id, ch, stepDownCh)
+			p.sendLogs(context.Background(), id, ch, stepDownCh, updateCommitIndexCh)
 			if err := <-ch; err != nil {
 				errCh <- err
 			}
@@ -60,9 +63,15 @@ func runSendLogs(p *Peer) error {
 	close(errCh)
 
 	for err := range errCh {
-		return err
+		return false, err
 	}
-	return nil
+
+	select {
+	case <-stepDownCh:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func appendLogsHelper(store *db.MockKVStore, logs []*types.LogEntry) {
@@ -115,7 +124,7 @@ func TestSendLogs_LogsSentBasedOnNextIndex(t *testing.T) {
 		})).Return(successResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -137,7 +146,7 @@ func TestSendLogs_NextIndexOne_ZeroPrevLog(t *testing.T) {
 		})).Return(successResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -165,7 +174,7 @@ func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
 		})).Return(successResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -186,7 +195,7 @@ func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
 		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 
 	for id := range clients {
@@ -214,7 +223,7 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 
 	for id := range clients {
@@ -244,7 +253,7 @@ func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
 	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
 	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 
 	assert.Equal(t, uint(3), peer.GetPeerIndex("node-2").nextIndex)
@@ -265,16 +274,18 @@ func TestSendLogs_NoLogs_HeartbeatSent(t *testing.T) {
 		})).Return(successResponse(), nil)
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
 	}
 }
 
-// ── 8. Peer responds with higher term → becomeFollower ────────────────────────
+// ── 8. Peer responds with higher term → step-down signalled ──────────────────
+// Role transition is owned by the orchestrator (startSendLogs), not sendLogs.
+// sendLogs only sends on stepDownCh and returns; runSendLogs exposes that signal.
 
-func TestSendLogs_PeerHigherTerm_BecomesFollower(t *testing.T) {
+func TestSendLogs_PeerHigherTerm_StepDownSignalled(t *testing.T) {
 	peer, store, clients := setupSendLogsTest(t)
 
 	appendLogsHelper(store, []*types.LogEntry{
@@ -286,9 +297,9 @@ func TestSendLogs_PeerHigherTerm_BecomesFollower(t *testing.T) {
 	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
 	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
 
-	err := runSendLogs(peer)
+	stepDown, err := runSendLogs(peer)
 	assert.NoError(t, err)
-	assert.Equal(t, ServerRole_Follower, peer.GetRole())
+	assert.True(t, stepDown, "sendLogs should signal step-down when a peer returns a higher term")
 }
 
 // ── 9. Some peers get heartbeat, some get logs ───────────────────────────────
@@ -323,7 +334,7 @@ func TestSendLogs_MixedHeartbeatAndLogs(t *testing.T) {
 		return len(req.Entries) == 1 && req.Entries[0].Index == 3
 	})).Return(successResponse(), nil)
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.NoError(t, err)
 	for _, c := range clients {
 		c.AssertExpectations(t)
@@ -349,7 +360,7 @@ func TestSendLogs_DBErr_GetCurrentTerm(t *testing.T) {
 		},
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.Error(t, err)
 }
 
@@ -373,7 +384,7 @@ func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
 		},
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.Error(t, err)
 }
 
@@ -400,7 +411,7 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 		},
 	}
 
-	err := runSendLogs(peer)
+	_, err := runSendLogs(peer)
 	assert.Error(t, err)
 }
 
@@ -414,8 +425,7 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 
 // ── 13. Majority replicated → highest index with majority returned ────────────
 // n2:5, n3:3, n4:4, n5:6, self:7
-// sorted desc: [7,6,5,4,3] → freq: 7:1, 6:2, 5:3, 4:4, 3:5
-// majority count = (4+1)/2+1 = 3 → first index with freq >= 3 is 5
+// sorted desc: [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 
 func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
 	peerIndexes := map[string]PeerIndexes{
@@ -490,7 +500,9 @@ func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go peer.startCommitIndexUpdater(ctx)
+	updateCommitCh := make(chan struct{}, 1)
+	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{}
 
 	assert.Eventually(t, func() bool {
 		return peer.GetCommitIndex() == uint(2)
@@ -517,7 +529,9 @@ func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	go peer.startCommitIndexUpdater(ctx)
+	updateCommitCh := make(chan struct{}, 1)
+	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{}
 
 	// let it run for the full timeout — commitIndex must never move
 	<-ctx.Done()
@@ -543,7 +557,9 @@ func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	go peer.startCommitIndexUpdater(ctx)
+	updateCommitCh := make(chan struct{}, 1)
+	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{}
 
 	<-ctx.Done()
 	assert.Equal(t, uint(0), peer.GetCommitIndex(),
@@ -569,10 +585,17 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go peer.startCommitIndexUpdater(ctx)
+	updateCommitCh := make(chan struct{}, 1)
+	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{} // first signal → GetLastLogIndex errors, loop continues
 
-	// if the goroutine dies on first error, commitIndex never advances
+	// if the goroutine dies on first error, commitIndex never advances.
+	// each Eventually poll tries to send another signal so the goroutine gets a retry.
 	assert.Eventually(t, func() bool {
+		select {
+		case updateCommitCh <- struct{}{}:
+		default:
+		}
 		return peer.GetCommitIndex() > 0
 	}, 2*time.Second, 10*time.Millisecond,
 		"updater must continue past DB errors and eventually commit")
@@ -588,9 +611,10 @@ func TestStartCommitIndexUpdater_ContextCancelled_Exits(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	updateCommitCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		peer.startCommitIndexUpdater(ctx)
+		peer.startCommitIndexUpdater(ctx, updateCommitCh)
 		close(done)
 	}()
 
