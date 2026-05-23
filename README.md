@@ -250,7 +250,6 @@ All configuration is loaded from environment variables. Key parameters:
 | `HEARTBEAT_MS`        | 100     | Leader heartbeat interval                       |
 | `ELECTION_MIN_MS`     | 1000    | Minimum election timeout                        |
 | `ELECTION_MAX_MS`     | 5000    | Maximum election timeout (randomized within range) |
-| `COMMIT_UPDATER_SLEEP_S` | 1   | How often the leader recalculates commit index  |
 | `LOG_LEVEL`           | debug   | Zerolog level: debug/info/warn/error            |
 
 Peer discovery uses a shared `peers.yaml`:

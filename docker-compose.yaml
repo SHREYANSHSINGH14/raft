@@ -16,7 +16,6 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
-      - COMMIT_UPDATER_SLEEP_S=5
     volumes:
       - ./peers.yaml:/app/peers.yaml  # all peers share same yaml
       - peer1_data:/app/data
@@ -38,7 +37,6 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
-      - COMMIT_UPDATER_SLEEP_S=5
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer2_data:/app/data
@@ -60,7 +58,6 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
-      - COMMIT_UPDATER_SLEEP_S=5
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer3_data:/app/data
@@ -82,7 +79,6 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
-      - COMMIT_UPDATER_SLEEP_S=5
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer4_data:/app/data
@@ -104,7 +100,6 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
-      - COMMIT_UPDATER_SLEEP_S=5
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer5_data:/app/data
