@@ -55,17 +55,17 @@ Each node runs as an independent process with three concurrent concerns:
 ┌─────────────────────────────────────────────────────┐
 │                        Node                         │
 │                                                     │
-│  ┌──────────────┐   ┌──────────────────────────┐   │
-│  │  gRPC Server │   │       Raft Peer           │   │
-│  │  :50051      │──▶│  Role: Follower /         │   │
-│  │              │   │        Candidate / Leader  │   │
-│  └──────────────┘   └──────────┬───────────────┘   │
+│  ┌──────────────┐   ┌──────────────────────────┐    │
+│  │  gRPC Server │   │       Raft Peer          │    │
+│  │  :50051      │──▶│  Role: Follower /        │    │
+│  │              │   │        Candidate / Leader│    │
+│  └──────────────┘   └──────────┬───────────────┘    │
 │                                │                    │
-│  ┌──────────────┐   ┌──────────▼───────────────┐   │
-│  │  Debug HTTP  │   │       PebbleDB            │   │
-│  │  :8080       │   │  currentTerm, votedFor,   │   │
-│  └──────────────┘   │  log entries              │   │
-│                     └──────────────────────────┘   │
+│  ┌──────────────┐   ┌──────────▼───────────────┐    │
+│  │  Debug HTTP  │   │       PebbleDB           │    │
+│  │  :8080       │   │  currentTerm, votedFor,  │    │
+│  └──────────────┘   │  log entries             │    │
+│                     └──────────────────────────┘    │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -76,7 +76,7 @@ Each node runs as an independent process with three concurrent concerns:
 Follower ─────────────────▶ Candidate ──── majority votes ──▶ Leader
    ▲                            │                                 │
    └────────────────────────────┘                                 │
-          higher term seen / vote granted        higher term seen  │
+          higher term seen / vote granted        higher term seen │
    ▲─────────────────────────────────────────────────────────────┘
 ```
 
