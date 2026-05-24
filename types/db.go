@@ -1,6 +1,13 @@
 package types
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotFound is returned by RaftDBInterface implementations when a key does not exist.
+// Callers check for this sentinel to distinguish "not found" from other DB errors.
+var ErrNotFound = errors.New("not found")
 
 type RaftDBInterface interface {
 	// Current Term

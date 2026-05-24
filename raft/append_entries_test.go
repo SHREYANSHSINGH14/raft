@@ -7,7 +7,6 @@ import (
 
 	"github.com/SHREYANSHSINGH14/raft/db"
 	"github.com/SHREYANSHSINGH14/raft/types"
-	"github.com/cockroachdb/pebble"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -524,7 +523,7 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(nil, pebble.ErrNotFound)
+	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(nil, types.ErrNotFound)
 	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
@@ -555,7 +554,7 @@ func TestAppendEntries_PrevLogIndexNonZero_NotFound_ReturnsFalse(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(5)).Return(nil, pebble.ErrNotFound)
+	store.On(methodGetLogByIndex, mock.Anything, uint(5)).Return(nil, types.ErrNotFound)
 	// TruncateLogs, AppendLogs, electionTimeoutCh must NOT be touched
 
 	resp, err := peer.HandleAppendEntries(ctx, &types.AppendEntriesArgs{

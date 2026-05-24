@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/SHREYANSHSINGH14/raft/types"
-	"github.com/cockroachdb/pebble"
 	"github.com/rs/zerolog"
 )
 
@@ -48,7 +47,7 @@ func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntrie
 
 	prevLog, err := p.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
 	if err != nil {
-		if !errors.Is(err, pebble.ErrNotFound) {
+		if !errors.Is(err, types.ErrNotFound) {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return nil, err
 		}

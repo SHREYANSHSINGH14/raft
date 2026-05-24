@@ -52,6 +52,9 @@ func (s *Store) GetCurrentTerm(ctx context.Context) (uint, error) {
 
 	data, closer, err := s.db.Get(key)
 	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return 0, types.ErrNotFound
+		}
 		zerolog.Ctx(ctx).Error().Err(err).Msg("error while getting current term")
 		return 0, err
 	}
@@ -89,7 +92,10 @@ func (s *Store) GetVotedFor(ctx context.Context) (string, error) {
 
 	data, closer, err := s.db.Get(key)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("error while getting current term")
+		if errors.Is(err, pebble.ErrNotFound) {
+			return "", types.ErrNotFound
+		}
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while getting voted for")
 		return "", err
 	}
 
@@ -263,9 +269,10 @@ func (s *Store) GetLogByIndex(ctx context.Context, idx uint) (*types.LogEntry, e
 	key := logKey(uint64(idx))
 	val, closer, err := s.db.Get(key)
 	if err != nil {
-		if !errors.Is(err, pebble.ErrNotFound) {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log for index: %d", idx)
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, types.ErrNotFound
 		}
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error getting log for index: %d", idx)
 		return nil, err
 	}
 
