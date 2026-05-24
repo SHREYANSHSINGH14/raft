@@ -6,7 +6,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
@@ -127,7 +126,7 @@ func (p *Peer) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 
 // per peer heartbeat orchestrator
 func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}) {
-	heartBeatTime := time.Duration(time.Duration(config.GetConfig().HeartbeatMs) * time.Millisecond)
+	heartBeatTime := time.Duration(p.cfg.HeartbeatMs) * time.Millisecond
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogErrChan := make(chan error, 1)
 	sendLogCtx, cancel := context.WithCancel(ctx)
@@ -188,7 +187,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	peerLogLen := uint(len(logs))
 
-	res, err := sendAppendLogs(ctx, p.GetID(), peerID, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs)
+	res, err := sendAppendLogs(ctx, p.GetID(), peerID, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, p.cfg.RPCTimeoutMs)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in append logs rpc response from peer %s", peerID)
 		errChan <- err
@@ -228,8 +227,8 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 	return
 }
 
-func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry) (*types.AppendEntriesResponse, error) {
-	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond)
+func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, rpcTimeoutMs int) (*types.AppendEntriesResponse, error) {
+	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutMs)*time.Millisecond)
 	defer cancel()
 
 	rpcReq := types.AppendEntriesArgs{

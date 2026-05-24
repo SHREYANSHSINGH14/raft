@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/SHREYANSHSINGH14/raft/config"
+	"github.com/SHREYANSHSINGH14/raft/db"
 	"github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
@@ -18,8 +19,9 @@ import (
 type Server struct {
 	Peer *raft.Peer
 
-	baseUrl string
-	port    string
+	baseUrl   string
+	port      string
+	debugPort string
 
 	mu sync.Mutex
 
@@ -43,8 +45,23 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	zerolog.SetGlobalLevel(logLevel)
 	server.ctx = logger.WithContext(server.ctx)
 
+	store, err := db.NewStore(ctx, cfg.DBDir)
+	if err != nil {
+		fmt.Println("error while initializing db store")
+		return nil, err
+	}
+
+	raftCfg := raft.RaftConfig{
+		ID:                 cfg.ID,
+		Peers:              cfg.ServerIDS,
+		RPCTimeoutMs:       cfg.RPCTimeoutMs,
+		HeartbeatMs:        cfg.HeartbeatMs,
+		ElectionMinMs:      cfg.ElectionMinMs,
+		ElectionDurationMs: cfg.ElectionDurationMs,
+	}
+
 	// pass server.ctx down to Peer — same context, same lifecycle
-	peer, err := raft.NewPeer(server.ctx, cfg)
+	peer, err := raft.NewPeer(server.ctx, raftCfg, store)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +69,7 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	server.Peer = peer
 	server.baseUrl = cfg.BaseURL
 	server.port = cfg.Port
+	server.debugPort = cfg.DebugPort
 
 	return &server, nil
 }
@@ -86,7 +104,7 @@ func (s *Server) Start() {
 	zerolog.Ctx(s.ctx).Debug().Str("id", s.Peer.GetID()).Str("role", string(s.Peer.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
 
 	debugServer := NewDebugServer(s)
-	debugServer.Start(config.GetConfig().DebugPort)
+	debugServer.Start(s.debugPort)
 
 	zerolog.Ctx(s.ctx).Debug().Msgf("starting debug server on port %d", 8080)
 

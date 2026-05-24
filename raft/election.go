@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
@@ -17,7 +16,7 @@ type ElectionResponse struct {
 
 func (p *Peer) startElection(ctx context.Context) {
 	go func() {
-		electionTime := time.Duration(config.GetConfig().ElectionDurationMs) * time.Millisecond // TODO: Replace with config
+		electionTime := time.Duration(p.cfg.ElectionDurationMs) * time.Millisecond
 		ticker := time.NewTicker(electionTime)
 
 		electionResChan := make(chan ElectionResponse, 1)
@@ -176,7 +175,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 
 	for id, client := range p.ServerIDRpcUrlMap {
 		// wg.Add(1)
-		go sendRequestVote(ctx, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses)
+		go sendRequestVote(ctx, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses, p.cfg.RPCTimeoutMs)
 	}
 
 	// wg.Wait()
@@ -219,10 +218,10 @@ type ResponseRequestVote struct {
 	err    error
 }
 
-func sendRequestVote(ctx context.Context, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote) { // TODO: change this simple type with proto type
+func sendRequestVote(ctx context.Context, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote, rpcTimeoutMs int) {
 	// defer wg.Done()
 
-	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetConfig().RPCTimeoutMs)*time.Millisecond) // TODO: Replace with config
+	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutMs)*time.Millisecond)
 	defer cancel()
 
 	rpcReq := &types.RequestVoteArgs{

@@ -54,6 +54,13 @@ func NewPeerMock(store types.RaftDBInterface) *Peer {
 		ID:                "node-1",
 		Role:              ServerRole_Follower,
 		store:             store,
+		cfg: RaftConfig{
+			ID:                 "node-1",
+			RPCTimeoutMs:       50,
+			HeartbeatMs:        100,
+			ElectionMinMs:      1000,
+			ElectionDurationMs: 4000,
+		},
 		electionTimeoutCh: make(chan struct{}, 10),
 		LeaderID:          "",
 		commitIndex:       0,
