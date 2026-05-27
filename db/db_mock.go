@@ -7,29 +7,22 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
+	raft "github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/stretchr/testify/mock"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/SHREYANSHSINGH14/raft/types"
 )
 
-// MockStore is a mock implementation of the RaftDBInterface for testing purposes.
-// This was used to test rpc calls and their conditional checks in raft package without worrying about the actual db implementation and its correctness.
-// But this was a bit narrow visioned to be honest because we only tested the rpc calls and their conditional checks, now when thinks come to testing
-// the behaviour in an actual cluster with multiple goroutines mimicing different nodes then we need a stateful mock which can actually store the current term,
-// votedFor and logs in memory and return them when asked, otherwise we would have to set expectations for every single rpc call which would be a nightmare to maintain
-
-// So now we'll create a new mock store which will be stateful
-
-// Not removing this since the tests written using this are still useful to test the rpc calls and their conditional checks in isolation without worrying about the actual db
-// implementation and its correctness, also this is first time working with testify mock and it was a good learning experience to understand how it works and how to use it effectively in our tests
-// so we can keep this as a reference for future when we need to write tests for rpc calls in isolation without worrying about the actual db implementation and its correctness
-
+// MockStore is a mock implementation of raft.Storage for testing purposes.
+// Use it to test rpc calls and their conditional checks in isolation without
+// worrying about actual db implementation correctness.
 type MockStore struct {
 	mock.Mock
 	mu sync.Mutex
 }
 
-var _ types.RaftDBInterface = &MockStore{}
+var _ raft.Storage = &MockStore{}
 
 // ── Current Term ─────────────────────────────────────────────────────────────
 
@@ -65,14 +58,14 @@ func (m *MockStore) GetVotedFor(ctx context.Context) (string, error) {
 
 // ── Logs ─────────────────────────────────────────────────────────────────────
 
-func (m *MockStore) AppendLogs(ctx context.Context, logs []*types.LogEntry) error {
+func (m *MockStore) AppendLogs(ctx context.Context, logs []raft.LogEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx, logs)
 	return args.Error(0)
 }
 
-func (m *MockStore) GetLogs(ctx context.Context, startIdx, endIdx *uint) ([]*types.LogEntry, error) {
+func (m *MockStore) GetLogs(ctx context.Context, startIdx, endIdx *uint) ([]raft.LogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx, startIdx, endIdx)
@@ -80,29 +73,14 @@ func (m *MockStore) GetLogs(ctx context.Context, startIdx, endIdx *uint) ([]*typ
 	if val == nil {
 		return nil, args.Error(1)
 	}
-	return val.([]*types.LogEntry), args.Error(1)
+	return val.([]raft.LogEntry), args.Error(1)
 }
 
-func (m *MockStore) GetLogByIndex(ctx context.Context, idx uint) (*types.LogEntry, error) {
+func (m *MockStore) GetLogByIndex(ctx context.Context, idx uint) (raft.LogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx, idx)
-	val := args.Get(0)
-	if val == nil {
-		return nil, args.Error(1)
-	}
-	return val.(*types.LogEntry), args.Error(1)
-}
-
-func (m *MockStore) GetLogsByTerm(ctx context.Context, term uint) ([]*types.LogEntry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	args := m.Called(ctx, term)
-	val := args.Get(0)
-	if val == nil {
-		return nil, args.Error(1)
-	}
-	return val.([]*types.LogEntry), args.Error(1)
+	return args.Get(0).(raft.LogEntry), args.Error(1)
 }
 
 func (m *MockStore) TruncateLogs(ctx context.Context, startIdx uint) error {
@@ -128,18 +106,14 @@ func (m *MockStore) GetLastLogIndex(ctx context.Context) (uint, error) {
 	return args.Get(0).(uint), args.Error(1)
 }
 
-func (m *MockStore) GetLastLogEntry(ctx context.Context) (*types.LogEntry, error) {
+func (m *MockStore) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx)
-	val := args.Get(0)
-	if val == nil {
-		return nil, args.Error(1)
-	}
-	return val.(*types.LogEntry), args.Error(1)
+	return args.Get(0).(raft.LogEntry), args.Error(1)
 }
 
-// MockStore is an in-memory implementation of types.RaftDBInterface.
+// MockKVStore is a stateful in-memory implementation of raft.Storage.
 // Keys are stored in the same raw byte encoding as the real pebble Store,
 // so sort.Strings() on log keys produces the same order as pebble's
 // lexicographic comparator (big-endian guarantees this).
@@ -148,7 +122,7 @@ type MockKVStore struct {
 	data map[string][]byte // raw key → raw value
 }
 
-var _ types.RaftDBInterface = &MockKVStore{}
+var _ raft.Storage = &MockKVStore{}
 
 func NewMockKVStore() *MockKVStore {
 	return &MockKVStore{
@@ -243,29 +217,29 @@ func (m *MockKVStore) GetLastLogIndex(_ context.Context) (uint, error) {
 
 func (m *MockKVStore) GetLastLogTerm(ctx context.Context) (uint, error) {
 	entry, err := m.GetLastLogEntry(ctx)
-	if err != nil || entry == nil {
+	if err != nil {
 		return 0, err
 	}
 	return uint(entry.Term), nil
 }
 
-func (m *MockKVStore) GetLastLogEntry(_ context.Context) (*types.LogEntry, error) {
+func (m *MockKVStore) GetLastLogEntry(_ context.Context) (raft.LogEntry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	keys := m.sortedLogKeys()
 	if len(keys) == 0 {
-		return nil, nil
+		return raft.LogEntry{}, nil
 	}
 	return m.unmarshalEntry([]byte(keys[len(keys)-1]))
 }
 
 // ── Log CRUD ──────────────────────────────────────────────────────────────────
 
-func (m *MockKVStore) AppendLogs(_ context.Context, logs []*types.LogEntry) error {
+func (m *MockKVStore) AppendLogs(_ context.Context, logs []raft.LogEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, l := range logs {
-		val, err := proto.Marshal(l)
+		val, err := proto.Marshal(toProto(l))
 		if err != nil {
 			return err
 		}
@@ -274,29 +248,20 @@ func (m *MockKVStore) AppendLogs(_ context.Context, logs []*types.LogEntry) erro
 	return nil
 }
 
-func (m *MockKVStore) GetLogByIndex(_ context.Context, idx uint) (*types.LogEntry, error) {
+func (m *MockKVStore) GetLogByIndex(_ context.Context, idx uint) (raft.LogEntry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	key := logKey(uint64(idx))
-	v, ok := m.get(key)
+	_, ok := m.get(key)
 	if !ok {
-		return &types.LogEntry{
-			Index: 0,
-			Term:  0,
-			Data:  []byte{},
-			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
-		}, nil
+		return raft.LogEntry{}, raft.ErrNotFound
 	}
-	var entry types.LogEntry
-	if err := proto.Unmarshal(v, &entry); err != nil {
-		return nil, err
-	}
-	return &entry, nil
+	return m.unmarshalEntry(key)
 }
 
 // GetLogs returns entries in [startIdx, endIdx).
 // endIdx == nil means "to the end".
-func (m *MockKVStore) GetLogs(_ context.Context, startIdx, endIdx *uint) ([]*types.LogEntry, error) {
+func (m *MockKVStore) GetLogs(_ context.Context, startIdx, endIdx *uint) ([]raft.LogEntry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -309,10 +274,10 @@ func (m *MockKVStore) GetLogs(_ context.Context, startIdx, endIdx *uint) ([]*typ
 	}
 
 	keys := m.sortedLogKeys()
-	var logs []*types.LogEntry
+	var logs []raft.LogEntry
 
 	for _, k := range keys {
-		if k < startKey || k >= endKey { // mirrors pebble's [lower, upper) range
+		if k < startKey || k >= endKey {
 			continue
 		}
 		entry, err := m.unmarshalEntry([]byte(k))
@@ -320,25 +285,6 @@ func (m *MockKVStore) GetLogs(_ context.Context, startIdx, endIdx *uint) ([]*typ
 			return nil, err
 		}
 		logs = append(logs, entry)
-	}
-	return logs, nil
-}
-
-func (m *MockKVStore) GetLogsByTerm(_ context.Context, term uint) ([]*types.LogEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	keys := m.sortedLogKeys()
-	var logs []*types.LogEntry
-
-	for _, k := range keys {
-		entry, err := m.unmarshalEntry([]byte(k))
-		if err != nil {
-			return nil, err
-		}
-		if uint(entry.Term) == term {
-			logs = append(logs, entry)
-		}
 	}
 	return logs, nil
 }
@@ -360,14 +306,14 @@ func (m *MockKVStore) TruncateLogs(_ context.Context, startIdx uint) error {
 
 // ── internal ─────────────────────────────────────────────────────────────────
 
-func (m *MockKVStore) unmarshalEntry(key []byte) (*types.LogEntry, error) {
+func (m *MockKVStore) unmarshalEntry(key []byte) (raft.LogEntry, error) {
 	v, ok := m.get(key)
 	if !ok {
-		return nil, fmt.Errorf("key not found: %q", key)
+		return raft.LogEntry{}, fmt.Errorf("key not found: %q", key)
 	}
 	var entry types.LogEntry
 	if err := proto.Unmarshal(v, &entry); err != nil {
-		return nil, err
+		return raft.LogEntry{}, err
 	}
-	return &entry, nil
+	return fromProto(&entry), nil
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
+	raft "github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -85,10 +85,10 @@ func TestAppendLogs_ThenGetLogs(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
-		{Index: 1, Term: 1, Data: []byte("cmd-1"), ClientRequestId: "c:1"},
-		{Index: 2, Term: 1, Data: []byte("cmd-2"), ClientRequestId: "c:2"},
-		{Index: 3, Term: 2, Data: []byte("cmd-3"), ClientRequestId: "c:3"},
+	logs := []raft.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("cmd-1")},
+		{Index: 2, Term: 1, Data: []byte("cmd-2")},
+		{Index: 3, Term: 2, Data: []byte("cmd-3")},
 	}
 
 	err := store.AppendLogs(ctx, logs)
@@ -102,7 +102,6 @@ func TestAppendLogs_ThenGetLogs(t *testing.T) {
 		assert.Equal(t, logs[i].Index, entry.Index)
 		assert.Equal(t, logs[i].Term, entry.Term)
 		assert.Equal(t, logs[i].Data, entry.Data)
-		assert.Equal(t, logs[i].ClientRequestId, entry.ClientRequestId)
 	}
 }
 
@@ -110,14 +109,14 @@ func TestAppendLogs_MultipleAppends_AllPersisted(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	firstBatch := []*types.LogEntry{
+	firstBatch := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 	}
 	err := store.AppendLogs(ctx, firstBatch)
 	assert.NoError(t, err)
 
-	secondBatch := []*types.LogEntry{
+	secondBatch := []raft.LogEntry{
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
 		{Index: 4, Term: 2, Data: []byte("cmd-4")},
 	}
@@ -133,7 +132,7 @@ func TestAppendLogs_EmptySlice(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	err := store.AppendLogs(ctx, []*types.LogEntry{})
+	err := store.AppendLogs(ctx, []raft.LogEntry{})
 	assert.NoError(t, err)
 
 	idx, err := store.GetLastLogIndex(ctx)
@@ -156,7 +155,7 @@ func TestGetLogs_PartialRange(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -178,7 +177,7 @@ func TestGetLogs_ExclusiveUpperBound(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 1, Data: []byte("cmd-3")},
@@ -199,7 +198,7 @@ func TestGetLogs_NilEndIdx_ReturnsAllFromStart(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -217,7 +216,7 @@ func TestGetLogs_NilEndIdx_FromMiddle(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -248,28 +247,26 @@ func TestGetLogByIndex_ReturnsCorrectEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
-		{Index: 1, Term: 1, Data: []byte("cmd-1"), ClientRequestId: "c:1"},
-		{Index: 2, Term: 1, Data: []byte("cmd-2"), ClientRequestId: "c:2"},
-		{Index: 3, Term: 2, Data: []byte("cmd-3"), ClientRequestId: "c:3"},
+	logs := []raft.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("cmd-1")},
+		{Index: 2, Term: 1, Data: []byte("cmd-2")},
+		{Index: 3, Term: 2, Data: []byte("cmd-3")},
 	}
 	err := store.AppendLogs(ctx, logs)
 	assert.NoError(t, err)
 
 	entry, err := store.GetLogByIndex(ctx, 2)
 	assert.NoError(t, err)
-	assert.NotNil(t, entry)
 	assert.Equal(t, uint64(2), entry.Index)
 	assert.Equal(t, uint64(1), entry.Term)
 	assert.Equal(t, []byte("cmd-2"), entry.Data)
-	assert.Equal(t, "c:2", entry.ClientRequestId)
 }
 
 func TestGetLogByIndex_FirstEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 3, Data: []byte("cmd-1")},
 		{Index: 2, Term: 3, Data: []byte("cmd-2")},
 	}
@@ -278,7 +275,6 @@ func TestGetLogByIndex_FirstEntry(t *testing.T) {
 
 	entry, err := store.GetLogByIndex(ctx, 1)
 	assert.NoError(t, err)
-	assert.NotNil(t, entry)
 	assert.Equal(t, uint64(1), entry.Index)
 	assert.Equal(t, uint64(3), entry.Term)
 }
@@ -287,7 +283,7 @@ func TestGetLogByIndex_LastEntry(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 2, Data: []byte("cmd-2")},
 		{Index: 3, Term: 3, Data: []byte("cmd-3")},
@@ -297,7 +293,6 @@ func TestGetLogByIndex_LastEntry(t *testing.T) {
 
 	entry, err := store.GetLogByIndex(ctx, 3)
 	assert.NoError(t, err)
-	assert.NotNil(t, entry)
 	assert.Equal(t, uint64(3), entry.Index)
 	assert.Equal(t, uint64(3), entry.Term)
 	assert.Equal(t, []byte("cmd-3"), entry.Data)
@@ -309,7 +304,7 @@ func TestGetLogByIndex_NotPresent(t *testing.T) {
 
 	entry, err := store.GetLogByIndex(ctx, 99)
 	assert.Error(t, err, "expected error for missing index")
-	assert.Nil(t, entry)
+	assert.Equal(t, raft.LogEntry{}, entry)
 }
 
 func TestGetLogByIndex_EmptyStore(t *testing.T) {
@@ -318,7 +313,7 @@ func TestGetLogByIndex_EmptyStore(t *testing.T) {
 
 	entry, err := store.GetLogByIndex(ctx, 1)
 	assert.Error(t, err)
-	assert.Nil(t, entry)
+	assert.Equal(t, raft.LogEntry{}, entry)
 }
 
 // ── GetLogsByTerm ─────────────────────────────────────────────────────────────
@@ -327,7 +322,7 @@ func TestGetLogsByTerm_SingleTerm(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -347,7 +342,7 @@ func TestGetLogsByTerm_MultipleTerms(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -377,7 +372,7 @@ func TestGetLogsByTerm_TermNotPresent(t *testing.T) {
 
 	// terms 1 and 3 exist, term 2 does not
 	// since we do a full scan with no early break, this must still return empty
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 3, Data: []byte("cmd-2")},
 	}
@@ -404,7 +399,7 @@ func TestTruncateLogs_RemovesFromIndexOnwards(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -426,18 +421,18 @@ func TestTruncateLogs_RemovesFromIndexOnwards(t *testing.T) {
 	// point lookups confirm 3 and 4 are actually deleted
 	entry, err := store.GetLogByIndex(ctx, 3)
 	assert.Error(t, err, "index 3 should be deleted")
-	assert.Nil(t, entry)
+	assert.Equal(t, raft.LogEntry{}, entry)
 
 	entry, err = store.GetLogByIndex(ctx, 4)
 	assert.Error(t, err, "index 4 should be deleted")
-	assert.Nil(t, entry)
+	assert.Equal(t, raft.LogEntry{}, entry)
 }
 
 func TestTruncateLogs_FromFirstIndex_RemovesAll(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -461,7 +456,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	logs := []*types.LogEntry{
+	logs := []raft.LogEntry{
 		{Index: 1, Term: 1, Data: []byte("cmd-1")},
 		{Index: 2, Term: 1, Data: []byte("cmd-2")},
 		{Index: 3, Term: 2, Data: []byte("cmd-3")},
@@ -477,7 +472,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	assert.Equal(t, uint(1), idx, "last index should reflect truncation")
 
 	// re-append from where truncation left off
-	newLogs := []*types.LogEntry{
+	newLogs := []raft.LogEntry{
 		{Index: 2, Term: 3, Data: []byte("cmd-new-2")},
 		{Index: 3, Term: 3, Data: []byte("cmd-new-3")},
 	}
