@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func newConcurrentTestServer(store types.RaftDBInterface) *Server {
+func newConcurrentTestServer(store raft.Storage) *Server {
 	return &Server{
-		Peer: raft.NewPeerMock(store),
+		Node: raft.NewNodeMock(store),
 	}
 }
 
@@ -129,14 +129,14 @@ func TestInvariant_RequestVote_IdempotentVote(t *testing.T) {
 func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 	store := db.NewMockKVStore()
 	srv := newConcurrentTestServer(store)
-	srv.Peer.SetCommitIndex(5)
+	srv.Node.SetCommitIndex(5)
 	ctx := context.Background()
 
 	store.SetCurrentTerm(ctx, 5)
 
 	// Only pre-populate what comes before PrevLogIndex
 	// AppendEntries will truncate from PrevLogIndex+1 and append entries itself
-	store.AppendLogs(ctx, []*types.LogEntry{
+	store.AppendLogs(ctx, []raft.LogEntry{
 		{Index: 1, Term: 4},
 		{Index: 2, Term: 4},
 		{Index: 3, Term: 4},
@@ -145,7 +145,7 @@ func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 	leaderCommits := []uint64{8, 3, 10, 6, 4}
 
 	// entries to append — these rebuild logs 4-10 after truncation
-	newEntries := []*types.LogEntry{
+	newEntries := []raft.LogEntry{
 		{Index: 4, Term: 5},
 		{Index: 5, Term: 5},
 		{Index: 6, Term: 5},
@@ -153,6 +153,11 @@ func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 		{Index: 8, Term: 5},
 		{Index: 9, Term: 5},
 		{Index: 10, Term: 5},
+	}
+
+	protoEntries := make([]*types.LogEntry, len(newEntries))
+	for i, e := range newEntries {
+		protoEntries[i] = &types.LogEntry{Index: e.Index, Term: e.Term}
 	}
 
 	var wg sync.WaitGroup
@@ -169,7 +174,7 @@ func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 				Term:         5,
 				PrevLogIndex: 3,
 				PrevLogTerm:  4,
-				Entries:      newEntries, // ← send entries so logs 4-10 exist
+				Entries:      protoEntries,
 				LeaderCommit: leaderCommit,
 			})
 		}(leaderCommits[i])
@@ -177,9 +182,9 @@ func TestInvariant_AppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	fmt.Printf("Get commit index %d", srv.Peer.GetCommitIndex())
+	fmt.Printf("Get commit index %d", srv.Node.GetCommitIndex())
 
-	assert.GreaterOrEqual(t, srv.Peer.GetCommitIndex(), uint(5),
+	assert.GreaterOrEqual(t, srv.Node.GetCommitIndex(), uint(5),
 		"Raft invariant violated: commitIndex went below initial value of 5")
 }
 
@@ -191,7 +196,7 @@ func TestInvariant_TermOnlyMovesForward(t *testing.T) {
 	ctx := context.Background()
 
 	store.SetCurrentTerm(ctx, 5)
-	store.AppendLogs(ctx, []*types.LogEntry{
+	store.AppendLogs(ctx, []raft.LogEntry{
 		{Index: 1, Term: 4},
 		{Index: 2, Term: 4},
 		{Index: 3, Term: 4},
@@ -257,14 +262,8 @@ func TestInterleaving_RequestVote_DoubleVoteRace(t *testing.T) {
 	// Wrap store to pause G1 at a critical point
 	// With raftMu this pause happens inside the lock so G2 can't enter
 	var g1Once sync.Once
-	originalStore := store
 
-	// Use a wrapper that pauses on first GetVotedFor call
-	type pausingStore struct {
-		*db.MockKVStore
-	}
-
-	_ = originalStore // used below via closure
+	_ = resumeG1 // used below via closure
 
 	var g1Resp, g2Resp *types.RequestVoteResponse
 
@@ -318,11 +317,11 @@ func TestInterleaving_RequestVote_DoubleVoteRace(t *testing.T) {
 func TestInterleaving_AppendEntries_CommitIndexRollback(t *testing.T) {
 	store := db.NewMockKVStore()
 	srv := newConcurrentTestServer(store)
-	srv.Peer.SetCommitIndex(5)
+	srv.Node.SetCommitIndex(5)
 	ctx := context.Background()
 
 	store.SetCurrentTerm(ctx, 5)
-	store.AppendLogs(ctx, []*types.LogEntry{
+	store.AppendLogs(ctx, []raft.LogEntry{
 		{Index: 1, Term: 4},
 		{Index: 2, Term: 4},
 		{Index: 3, Term: 4},
@@ -375,7 +374,7 @@ func TestInterleaving_AppendEntries_CommitIndexRollback(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	assert.GreaterOrEqual(t, srv.Peer.GetCommitIndex(), uint(5),
+	assert.GreaterOrEqual(t, srv.Node.GetCommitIndex(), uint(5),
 		"commitIndex must never decrease below initial value")
 }
 

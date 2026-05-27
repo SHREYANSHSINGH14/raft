@@ -1,6 +1,6 @@
 package server
 
-import "github.com/SHREYANSHSINGH14/raft/types"
+import "github.com/SHREYANSHSINGH14/raft/raft"
 
 type AppendLogsDebugRequest struct {
 	Data string `json:"data"`
@@ -32,12 +32,12 @@ type StatusDebugResponse struct {
 	LeaderID    string `json:"leader_id"`
 }
 
-func toDebugEntries(entries []*types.LogEntry) []*LogEntryDebug {
+func toDebugEntries(entries []raft.LogEntry) []*LogEntryDebug {
 	result := make([]*LogEntryDebug, 0, len(entries))
 	for _, e := range entries {
 		result = append(result, &LogEntryDebug{
 			Index: e.Index,
-			Term:  uint64(e.Term),
+			Term:  e.Term,
 			Data:  string(e.Data),
 		})
 	}

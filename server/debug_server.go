@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
@@ -50,26 +49,17 @@ func (d *DebugServer) handleAppendLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := d.server.Peer.HandleWriteLogs(context.Background(), &types.WriteLogRequest{
-		Entries: []*types.LogEntry{
-			{
-				Data: []byte(req.Data),
-			},
-		},
-	})
+	err := d.server.Node.Propose(context.Background(), []byte(req.Data))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, AppendLogsDebugResponse{
 			Success:  false,
 			ErrorMsg: err.Error(),
+			LeaderID: d.server.Node.GetLeaderID(),
 		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, AppendLogsDebugResponse{
-		Success:  resp.Success,
-		ErrorMsg: resp.ErrorMsg,
-		LeaderID: resp.LeaderId,
-	})
+	writeJSON(w, http.StatusOK, AppendLogsDebugResponse{Success: true})
 }
 
 // GET /logs/get?start=1&end=10
@@ -80,19 +70,13 @@ func (d *DebugServer) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startStr := r.URL.Query().Get("start")
-	endStr := r.URL.Query().Get("end")
 
 	start, err := strconv.ParseUint(startStr, 10, 64)
 	if err != nil {
 		start = 1
 	}
 
-	end, _ := strconv.ParseUint(endStr, 10, 64) // 0 means fetch all from start
-
-	resp, err := d.server.Peer.HandleReadLogs(context.Background(), &types.ReadLogRequest{
-		StartIndex: start,
-		EndIndex:   end,
-	})
+	logs, err := d.server.Node.GetLogs(context.Background(), start)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, GetLogsDebugResponse{
 			ErrorMsg: err.Error(),
@@ -101,9 +85,7 @@ func (d *DebugServer) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, GetLogsDebugResponse{
-		Entries:  toDebugEntries(resp.Entries),
-		ErrorMsg: resp.ErrorMsg,
-		LeaderID: resp.LeaderId,
+		Entries: toDebugEntries(logs),
 	})
 }
 
@@ -114,14 +96,14 @@ func (d *DebugServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentTerm, _ := d.server.Peer.GetCurrentTerm(context.Background())
+	currentTerm, _ := d.server.Node.GetCurrentTerm(context.Background())
 
 	writeJSON(w, http.StatusOK, StatusDebugResponse{
-		ID:          d.server.Peer.GetID(),
-		Role:        string(d.server.Peer.GetRole()),
+		ID:          d.server.Node.GetID(),
+		Role:        string(d.server.Node.GetRole()),
 		Term:        currentTerm,
-		CommitIndex: d.server.Peer.GetCommitIndex(),
-		LeaderID:    d.server.Peer.GetLeaderID(),
+		CommitIndex: d.server.Node.GetCommitIndex(),
+		LeaderID:    d.server.Node.GetLeaderID(),
 	})
 }
 

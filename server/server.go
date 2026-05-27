@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/SHREYANSHSINGH14/raft/config"
 	"github.com/SHREYANSHSINGH14/raft/db"
@@ -14,10 +15,11 @@ import (
 	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Server struct {
-	Peer *raft.Peer
+	Node *raft.Node
 
 	baseUrl   string
 	port      string
@@ -51,22 +53,28 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	raftCfg := raft.RaftConfig{
-		ID:                 cfg.ID,
-		Peers:              cfg.ServerIDS,
-		RPCTimeoutMs:       cfg.RPCTimeoutMs,
-		HeartbeatMs:        cfg.HeartbeatMs,
-		ElectionMinMs:      cfg.ElectionMinMs,
-		ElectionDurationMs: cfg.ElectionDurationMs,
-	}
-
-	// pass server.ctx down to Peer — same context, same lifecycle
-	peer, err := raft.NewPeer(server.ctx, raftCfg, store)
+	transport, err := newGRPCTransport(cfg.ServerIDS, cfg.RPCTimeoutMs)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error creating transport: %w", err)
 	}
 
-	server.Peer = peer
+	peers := make([]string, 0, len(cfg.ServerIDS))
+	for id := range cfg.ServerIDS {
+		peers = append(peers, id)
+	}
+
+	raftCfg := raft.Config{
+		ID:            cfg.ID,
+		Peers:         peers,
+		RPCTimeoutMs:  cfg.RPCTimeoutMs,
+		HeartbeatMs:   cfg.HeartbeatMs,
+		ElectionMinMs: cfg.ElectionMinMs,
+		ElectionMaxMs: cfg.ElectionMaxMs,
+	}
+
+	node := raft.NewNode(raftCfg, store, transport, nil)
+
+	server.Node = node
 	server.baseUrl = cfg.BaseURL
 	server.port = cfg.Port
 	server.debugPort = cfg.DebugPort
@@ -93,20 +101,95 @@ func (s *Server) Start() {
 	// IMPORTANT to gracefully stop the grpc server to avoid any panics in case of any ongoing rpc calls when the server is stopped
 	// Also canceling the server context will stop all other goroutines like election timeout and send logs goroutine to avoid any
 	// unwanted role transitions or rpc calls when the server is stopped
-
-	// This is an important concept to remeber that whenever we have some long running goroutines in our server then we should always have a way to stop those goroutines gracefully when
-	// the server is stopped to avoid any unwanted behavior and also to free up the resources used by those goroutines
 	go func() {
 		<-s.ctx.Done()
 		grpcServer.GracefulStop()
 	}()
 
-	zerolog.Ctx(s.ctx).Debug().Str("id", s.Peer.GetID()).Str("role", string(s.Peer.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
+	zerolog.Ctx(s.ctx).Debug().Str("id", s.Node.GetID()).Str("role", string(s.Node.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
 
 	debugServer := NewDebugServer(s)
 	debugServer.Start(s.debugPort)
 
 	zerolog.Ctx(s.ctx).Debug().Msgf("starting debug server on port %d", 8080)
 
-	s.Peer.Start()
+	s.Node.Start(s.ctx)
+}
+
+// grpcTransport implements raft.Transport using gRPC connections to peers.
+type grpcTransport struct {
+	clients map[string]types.RaftRpcClient
+	timeout time.Duration
+}
+
+func newGRPCTransport(peerURLs map[string]string, timeoutMs int) (*grpcTransport, error) {
+	clients := make(map[string]types.RaftRpcClient, len(peerURLs))
+	for id, url := range peerURLs {
+		conn, err := grpc.NewClient(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to peer %s at %s: %w", id, url, err)
+		}
+		clients[id] = types.NewRaftRpcClient(conn)
+	}
+	return &grpcTransport{
+		clients: clients,
+		timeout: time.Duration(timeoutMs) * time.Millisecond,
+	}, nil
+}
+
+func (t *grpcTransport) RequestVote(peerID string, args raft.RequestVoteArgs) (raft.RequestVoteResponse, error) {
+	client, ok := t.clients[peerID]
+	if !ok {
+		return raft.RequestVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	defer cancel()
+
+	resp, err := client.RequestVote(ctx, &types.RequestVoteArgs{
+		CandidateId:  args.CandidateID,
+		Term:         args.Term,
+		LastLogTerm:  args.LastLogTerm,
+		LastLogIndex: args.LastLogIndex,
+	})
+	if err != nil {
+		return raft.RequestVoteResponse{}, err
+	}
+	return raft.RequestVoteResponse{
+		Term:        resp.Term,
+		VoteGranted: resp.VoteGranted,
+	}, nil
+}
+
+func (t *grpcTransport) AppendEntries(peerID string, args raft.AppendEntriesArgs) (raft.AppendEntriesResponse, error) {
+	client, ok := t.clients[peerID]
+	if !ok {
+		return raft.AppendEntriesResponse{}, fmt.Errorf("unknown peer: %s", peerID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	defer cancel()
+
+	entries := make([]*types.LogEntry, len(args.Entries))
+	for i, e := range args.Entries {
+		entries[i] = &types.LogEntry{
+			Index: e.Index,
+			Term:  e.Term,
+			Data:  e.Data,
+		}
+	}
+
+	resp, err := client.AppendEntries(ctx, &types.AppendEntriesArgs{
+		Term:         args.Term,
+		LeaderId:     args.LeaderID,
+		PrevLogIndex: args.PrevLogIndex,
+		PrevLogTerm:  args.PrevLogTerm,
+		Entries:      entries,
+		LeaderCommit: args.LeaderCommit,
+	})
+	if err != nil {
+		return raft.AppendEntriesResponse{}, err
+	}
+	return raft.AppendEntriesResponse{
+		Term:    resp.Term,
+		Success: resp.Success,
+	}, nil
 }
