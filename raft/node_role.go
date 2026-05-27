@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
@@ -16,38 +15,38 @@ import (
 // They also starts the necessary goroutines for that role like election timeout for follower and send logs for leader
 // -------------------------------------------
 
-func (p *Peer) becomeFollower() {
-	zerolog.Ctx(p.ctx).Info().Msg("becoming follower")
-	p.SetRole(ServerRole_Follower)
-	p.startElectionOut(p.ctx)
+func (n *Node) becomeFollower() {
+	zerolog.Ctx(n.ctx).Info().Msg("becoming follower")
+	n.SetRole(ServerRole_Follower)
+	n.startElectionOut(n.ctx)
 }
 
-func (p *Peer) becomeCandidate() {
-	zerolog.Ctx(p.ctx).Info().Msg("becoming candidate")
-	p.SetRole(ServerRole_Candidate)
-	p.startElection(p.ctx)
+func (n *Node) becomeCandidate() {
+	zerolog.Ctx(n.ctx).Info().Msg("becoming candidate")
+	n.SetRole(ServerRole_Candidate)
+	n.startElection(n.ctx)
 }
 
-func (p *Peer) becomeLeader() {
-	zerolog.Ctx(p.ctx).Info().Msg("becoming leader")
-	p.SetRole(ServerRole_Leader)
-	p.SetLeaderID("")
-	p.peerIndexes = make(map[string]PeerIndexes)
+func (n *Node) becomeLeader() {
+	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
+	n.SetRole(ServerRole_Leader)
+	n.SetLeaderID("")
+	n.nodeIdxs = make(map[string]nodeIndexes)
 
-	lastIndex, err := p.store.GetLastLogIndex(p.ctx)
+	lastIndex, err := n.store.GetLastLogIndex(n.ctx)
 	if err != nil {
-		zerolog.Ctx(p.ctx).Error().Err(err).Msg("error getting latest log index")
-		p.becomeFollower()
+		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error getting latest log index")
+		n.becomeFollower()
 		return
 	}
 
-	for id := range p.ServerIDRpcUrlMap {
-		p.peerIndexes[id] = PeerIndexes{
+	for _, id := range n.cfg.Peers {
+		n.nodeIdxs[id] = nodeIndexes{
 			nextIndex:  lastIndex + 1,
 			matchIndex: 0,
 		}
 	}
-	p.startSendLogs(p.ctx)
+	n.startSendLogs(n.ctx)
 }
 
 // -------------------------------------------
@@ -56,25 +55,25 @@ func (p *Peer) becomeLeader() {
 // find functions for candidate and leader in respective files
 // -------------------------------------------
 
-func (p *Peer) startElectionOut(ctx context.Context) {
+func (n *Node) startElectionOut(ctx context.Context) {
 	go func() {
-		duration, err := rand.Int(rand.Reader, big.NewInt(int64(p.cfg.ElectionDurationMs)))
+		duration, err := rand.Int(rand.Reader, big.NewInt(int64(n.cfg.ElectionMaxMs-n.cfg.ElectionMinMs)))
 		if err != nil {
 			zerolog.Ctx(context.Background()).Error().Err(err).Msg("error getting random number for duration")
 			return
 		}
 
-		timeOut := time.Duration((duration.Int64() + int64(p.cfg.ElectionMinMs)) * int64(time.Millisecond))
+		timeOut := time.Duration((duration.Int64() + int64(n.cfg.ElectionMinMs)) * int64(time.Millisecond))
 		ticker := time.NewTicker(timeOut)
 
 		for {
 			select {
-			case <-p.electionTimeoutCh:
+			case <-n.electionTimeoutCh:
 				ticker.Reset(timeOut)
 				continue
 			case <-ticker.C:
 				ticker.Stop()
-				p.becomeCandidate()
+				n.becomeCandidate()
 				return
 			case <-ctx.Done():
 				ticker.Stop()
@@ -84,15 +83,15 @@ func (p *Peer) startElectionOut(ctx context.Context) {
 	}()
 }
 
-// waitForQuorum blocks until a majority of peers are reachable over gRPC.
+// waitForQuorum blocks until a majority of peers are reachable via the Transport.
 // It is called once at startup before the election timer begins, preventing
 // spurious elections during the window when containers are starting up and
-// gRPC connections between peers are not yet established.
+// connections between peers are not yet established.
 //
 // Strategy: send a RequestVote with term=0 to each peer. Term 0 is always
 // rejected by any peer (since any initialized peer has term >= 1), but a
-// rejection is still a valid gRPC response — it proves the connection is up.
-// A timeout or connection error means the peer is not yet reachable.
+// rejection is still a valid response — it proves the connection is up.
+// A transport error means the peer is not yet reachable.
 //
 // The function retries every 500ms until majority responds, then returns.
 // If the context is cancelled (e.g. server shutdown), it returns immediately.
@@ -101,8 +100,8 @@ func (p *Peer) startElectionOut(ctx context.Context) {
 // called again after a role transition (becomeFollower), the cluster is already
 // running so waitForQuorum returns on the first iteration.
 
-func (p *Peer) waitForQuorum(ctx context.Context) {
-	majority := (len(p.ServerIDRpcUrlMap)+1)/2 + 1
+func (n *Node) waitForQuorum(ctx context.Context) {
+	majority := (len(n.cfg.Peers)+1)/2 + 1
 
 	for {
 		select {
@@ -112,14 +111,12 @@ func (p *Peer) waitForQuorum(ctx context.Context) {
 		}
 
 		reachable := 0
-		for _, client := range p.ServerIDRpcUrlMap {
+		for _, peerID := range n.cfg.Peers {
 			// ping each peer with a real RequestVote — if it responds (even rejection) the connection is up
-			rpcCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
-			_, err := client.RequestVote(rpcCtx, &types.RequestVoteArgs{
-				CandidateId: p.ID,
+			_, err := n.transport.RequestVote(peerID, RequestVoteArgs{
+				CandidateID: n.ID,
 				Term:        0, // term 0 — always rejected but proves connectivity
 			})
-			cancel()
 			if err == nil {
 				reachable++
 			}

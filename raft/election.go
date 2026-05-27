@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
@@ -14,36 +13,30 @@ type ElectionResponse struct {
 	err           error
 }
 
-func (p *Peer) startElection(ctx context.Context) {
+func (n *Node) startElection(ctx context.Context) {
 	go func() {
-		electionTime := time.Duration(p.cfg.ElectionDurationMs) * time.Millisecond
+		electionTime := time.Duration(n.cfg.ElectionMaxMs-n.cfg.ElectionMinMs) * time.Millisecond
 		ticker := time.NewTicker(electionTime)
 
 		electionResChan := make(chan ElectionResponse, 1)
 
 		electionContext, cancel := context.WithCancel(ctx)
-		go p.election(electionContext, electionResChan)
+		go n.election(electionContext, electionResChan)
 		for {
 			select {
 			// if we receive any message on election timeout channel then that means
 			// either we received a log from leader or we received a vote response from peer
 			// in both cases we should reset the election timeout and start waiting for next timeout
-			case <-p.electionTimeoutCh:
+			case <-n.electionTimeoutCh:
 				cancel() // cancel the previous election context to stop the previous election goroutine
-				p.becomeFollower()
+				n.becomeFollower()
 				return
 
-			// if duration of election elapses without reaching a decision
-			// then we cancel the previous election goroutine and start a new election
-			// this can happen when there is a network partition and we are not able to reach majority of servers to win the election
-			// or when there is a bug in election code and we are not able to reach a decision
-			// in both cases we should start a new election to try to reach a decision
-			// if there is a bug in election code then starting a new election will not solve the problem but at least it will not block the server indefinitely
-			// and we can fix the bug by looking at the logs of multiple election attempts
+			// if duration of election elapses without reaching a decision then we turn back to follower
 			case <-ticker.C:
 				cancel()
-				electionContext, cancel = context.WithCancel(ctx)
-				go p.election(electionContext, electionResChan)
+				n.becomeFollower()
+				return
 
 			// if we receive a message on election result channel then that means we have reached a decision in current election
 			// and we should transition to the role which is decided by election result
@@ -54,9 +47,9 @@ func (p *Peer) startElection(ctx context.Context) {
 				cancel()
 				switch res.transitonRole {
 				case ServerRole_Leader:
-					p.becomeLeader()
+					n.becomeLeader()
 				case ServerRole_Follower:
-					p.becomeFollower()
+					n.becomeFollower()
 				}
 				return
 			case <-ctx.Done():
@@ -67,9 +60,9 @@ func (p *Peer) startElection(ctx context.Context) {
 	}()
 }
 
-func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
+func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	var electionRes ElectionResponse
-	if p.GetRole() != ServerRole_Candidate {
+	if n.GetRole() != ServerRole_Candidate {
 		err := fmt.Errorf("server is not a candidate cannot start election")
 		zerolog.Ctx(ctx).Error().Err(err).Msg(err.Error())
 		electionRes.transitonRole = ServerRole_Follower
@@ -80,7 +73,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	currentTerm, err := p.store.GetCurrentTerm(ctx)
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
@@ -92,7 +85,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	}
 
 	newTerm := currentTerm + 1
-	err = p.store.SetCurrentTerm(ctx, newTerm)
+	err = n.store.SetCurrentTerm(ctx, newTerm)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
@@ -103,7 +96,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	err = p.store.SetVotedFor(ctx, p.ID)
+	err = n.store.SetVotedFor(ctx, n.ID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
@@ -114,7 +107,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	lastLogIndex, err := p.store.GetLastLogIndex(ctx)
+	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
@@ -125,9 +118,9 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	var lastLog *types.LogEntry
+	var lastLogTerm uint64
 	if lastLogIndex > 0 {
-		lastLog, err = p.store.GetLogByIndex(ctx, lastLogIndex)
+		lastLog, err := n.store.GetLogByIndex(ctx, lastLogIndex)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 			electionRes.transitonRole = ServerRole_Follower
@@ -137,25 +130,19 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 
 			return
 		}
-	} else {
-		lastLog = &types.LogEntry{
-			Index: 0,
-			Term:  0,
-			Data:  []byte{},
-			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
-		}
+		lastLogTerm = lastLog.Term
 	}
 
-	requestVoteResponses := make(chan ResponseRequestVote, len(p.ServerIDRpcUrlMap))
+	requestVoteResponses := make(chan responseRequestVote, len(n.cfg.Peers))
 	// defer close(requestVoteResponses)
 	// 1. closing is the sender's responsibility, and there are multiple senders (one goroutine
 	//    per peer) — no single goroutine can safely close without coordinating with others,
 	//    and the receiver closing it causes "send on closed channel" panic when remaining
 	//    goroutines try to send after election returns early (e.g. on majority reached)
-	// 2. the buffer is sized exactly to len(ServerIDRpcUrlMap), so every goroutine can send
+	// 2. the buffer is sized exactly to len(Peers), so every goroutine can send
 	//    without blocking even if election() has already returned and nobody is reading
-	// 3. every sendRequestVote goroutine exits within RPCTimeoutMs (50ms default) via
-	//    context timeout — there is no indefinite block, so no goroutine leak
+	// 3. every sendRequestVote goroutine exits when the transport returns — there is no
+	//    indefinite block, so no goroutine leak
 	// 4. once all goroutines finish sending and election() returns, the channel has no
 	//    remaining references and is garbage collected automatically
 
@@ -173,17 +160,17 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 	// ctx.Done(). this way, when cancel() is called, the goroutine exits immediately from the select
 	// without ever trying to send on resCh — so no leak, no blocking, no cascading term explosion.
 
-	for id, client := range p.ServerIDRpcUrlMap {
+	for _, id := range n.cfg.Peers {
 		// wg.Add(1)
-		go sendRequestVote(ctx, p.GetID(), id, client, uint64(newTerm), lastLog.Index, lastLog.Term, requestVoteResponses, p.cfg.RPCTimeoutMs)
+		go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
 	}
 
 	// wg.Wait()
 
 	// responseReceived := 0
-	responsesPending := len(p.ServerIDRpcUrlMap)
-	var majority int = ((len(p.ServerIDRpcUrlMap) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
-	votesReceived := 1                                          // we have already voted for ourselves so we start with 1 vote
+	responsesPending := len(n.cfg.Peers)
+	var majority int = ((len(n.cfg.Peers) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
+	votesReceived := 1                                    // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {
 		select {
@@ -199,7 +186,7 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 				resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
 				return
 			}
-			if res.rpcRes.VoteGranted && p.GetRole() == ServerRole_Candidate {
+			if res.rpcRes.VoteGranted && n.GetRole() == ServerRole_Candidate {
 				votesReceived++
 				if votesReceived >= majority {
 					resCh <- ElectionResponse{transitonRole: ServerRole_Leader}
@@ -209,31 +196,26 @@ func (p *Peer) election(ctx context.Context, resCh chan ElectionResponse) {
 		}
 	}
 
-	resCh <- ElectionResponse{transitonRole: p.GetRole()}
+	resCh <- ElectionResponse{transitonRole: n.GetRole()}
 }
 
-type ResponseRequestVote struct {
-	rpcRes *types.RequestVoteResponse
+type responseRequestVote struct {
+	rpcRes RequestVoteResponse
 	id     string
 	err    error
 }
 
-func sendRequestVote(ctx context.Context, candidateID, peerID string, client types.RaftRpcClient, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- ResponseRequestVote, rpcTimeoutMs int) {
-	// defer wg.Done()
-
-	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutMs)*time.Millisecond)
-	defer cancel()
-
-	rpcReq := &types.RequestVoteArgs{
+func (n *Node) sendRequestVote(ctx context.Context, peerID string, newTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- responseRequestVote) {
+	rpcReq := RequestVoteArgs{
 		Term:         newTerm,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
-		CandidateId:  candidateID,
+		CandidateID:  n.ID,
 	}
 
-	var res ResponseRequestVote
+	var res responseRequestVote
 
-	rpcRes, err := client.RequestVote(rpcCtx, rpcReq)
+	rpcRes, err := n.transport.RequestVote(peerID, rpcReq)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending request vote rpc to peer %s: %s", peerID, err.Error())
 		res.err = err
@@ -243,8 +225,6 @@ func sendRequestVote(ctx context.Context, candidateID, peerID string, client typ
 
 		return
 	}
-
-	fmt.Printf("Received RequestVote response from peer %s: VoteGranted=%v, Term=%d\n", peerID, rpcRes.VoteGranted, rpcRes.Term)
 
 	res.rpcRes = rpcRes
 	res.id = peerID

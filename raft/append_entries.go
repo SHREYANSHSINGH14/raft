@@ -6,64 +6,64 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
-func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
-	if strings.TrimSpace(args.LeaderId) == "" {
+func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) (AppendEntriesResponse, error) {
+	if strings.TrimSpace(args.LeaderID) == "" {
 		err := fmt.Errorf("leader id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("leader id is empty")
-		return nil, err
+		return AppendEntriesResponse{}, err
 	}
 
-	currentTerm, err := p.store.GetCurrentTerm(ctx)
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-		return nil, err
+		return AppendEntriesResponse{}, err
 	}
 
 	if args.Term < uint64(currentTerm) {
-		return &types.AppendEntriesResponse{
+		return AppendEntriesResponse{
 			Term:    uint64(currentTerm),
 			Success: false,
 		}, nil
 	}
 
 	if args.Term > uint64(currentTerm) {
-		err := p.store.SetCurrentTerm(ctx, uint(args.Term))
+		err := n.store.SetCurrentTerm(ctx, uint(args.Term))
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return nil, err
+			return AppendEntriesResponse{}, err
 		}
 		currentTerm = uint(args.Term)
 
-		err = p.store.SetVotedFor(ctx, "")
+		err = n.store.SetVotedFor(ctx, "")
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return nil, err
+			return AppendEntriesResponse{}, err
 		}
 	}
 
-	prevLog, err := p.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
+	prevLog, err := n.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
 	if err != nil {
-		if !errors.Is(err, types.ErrNotFound) {
+		if !errors.Is(err, ErrNotFound) {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return nil, err
+			return AppendEntriesResponse{}, err
 		}
 		if args.PrevLogIndex != 0 {
 			// If prevLogIndex is not 0 and we are getting ErrNotFound then it means there is log inconsistency because it means leader is expecting some log at prevLogIndex but follower doesn't have that log
 			// This can happen when there is a new leader and it is trying to replicate its logs to the followers but some followers are lagging behind and they don't have the logs that leader has,
 			// in that case we should just return false and let the leader handle the log inconsistency in next append entries call by sending the logs from nextIndex to end of log to that follower
-			return &types.AppendEntriesResponse{
+			return AppendEntriesResponse{
 				Term:    uint64(currentTerm),
 				Success: false,
 			}, nil
 		}
+		// prevLogIndex == 0 and ErrNotFound — fresh follower, no prior log to check, skip term check
 	}
 
-	if prevLog != nil && prevLog.Term != args.PrevLogTerm {
-		return &types.AppendEntriesResponse{
+	if prevLog.Term != args.PrevLogTerm {
+		return AppendEntriesResponse{
 			Term:    uint64(currentTerm),
 			Success: false,
 		}, nil
@@ -89,39 +89,39 @@ func (p *Peer) HandleAppendEntries(ctx context.Context, args *types.AppendEntrie
 	// This is because if there is any inconsistency then it will be in the logs after prevLogIndex and prevLogTerm, so we can just truncate the logs from there and append the new logs from leader which are correct
 	// This is simple way to resolve log inconsistency without having to find the exact conflicting log index and it is also efficient because in real world scenario we won't have many inconsistent logs and even if
 	// we have many inconsistent logs then it means there is some issue with the leader and in that case we can just truncate all the logs after prevLogIndex and append the new logs from leader which are correct
-	err = p.store.TruncateLogs(ctx, uint(args.PrevLogIndex)+1)
+	err = n.store.TruncateLogs(ctx, uint(args.PrevLogIndex)+1)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-		return nil, err
+		return AppendEntriesResponse{}, err
 	}
 
 	// Append the new logs to the log store
 	if len(args.Entries) > 0 {
-		err = p.store.AppendLogs(ctx, args.Entries)
+		err = n.store.AppendLogs(ctx, args.Entries)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return nil, err
+			return AppendEntriesResponse{}, err
 		}
 	}
 
-	if args.LeaderCommit >= uint64(p.GetCommitIndex()) {
-		lastLogIdx, err := p.store.GetLastLogIndex(ctx)
+	if args.LeaderCommit >= uint64(n.GetCommitIndex()) {
+		lastLogIdx, err := n.store.GetLastLogIndex(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return nil, err
+			return AppendEntriesResponse{}, err
 		}
 
 		minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))
-		p.SetCommitIndex(uint(minCommitIndex))
+		n.SetCommitIndex(uint(minCommitIndex))
 	}
 
-	if p.GetLeaderID() != args.LeaderId {
-		p.SetLeaderID(args.LeaderId)
+	if n.GetLeaderID() != args.LeaderID {
+		n.SetLeaderID(args.LeaderID)
 	}
 
-	p.electionTimeoutCh <- struct{}{} // reset election timeout
+	n.electionTimeoutCh <- struct{}{} // reset election timeout
 
-	return &types.AppendEntriesResponse{
+	return AppendEntriesResponse{
 		Term:    uint64(currentTerm),
 		Success: true,
 	}, nil

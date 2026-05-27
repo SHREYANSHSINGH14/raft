@@ -6,18 +6,17 @@ import (
 	"slices"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
 // responsible for starting goroutines for each peer, those routines will heartbeats to each node
 // so each node gets it's own orchestrator and this also starts a routine that updates commitIndex
 // based on matchIndexes periodically
-func (p *Peer) startSendLogs(ctx context.Context) {
+func (n *Node) startSendLogs(ctx context.Context) {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// BUG (fixed): previously, sendLogs called p.becomeFollower() directly when it saw a higher
+	// BUG (fixed): previously, sendLogs called n.becomeFollower() directly when it saw a higher
 	// term in an AppendEntries response. that caused two problems:
 	//   1. startSendLogs never got the signal to exit — heartbeatCtx was never cancelled,
 	//      so all sendLogsPerPeer goroutines kept running as zombies even after the node
@@ -43,24 +42,24 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	// worst case: all peers respond with higher term simultaneously — len(peers) senders.
 	// buffering all of them means no sender ever blocks. the unread signals are GC'd when
 	// startSendLogs returns and the channel goes out of scope.
-	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
-	updateCommitIndexCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+	stepDownCh := make(chan struct{}, len(n.cfg.Peers))
+	updateCommitIndexCh := make(chan struct{}, len(n.cfg.Peers))
 
-	started := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+	started := make(chan struct{}, len(n.cfg.Peers))
 
-	for k := range p.ServerIDRpcUrlMap {
+	for _, k := range n.cfg.Peers {
 		go func(id string) {
 			started <- struct{}{}
-			p.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
+			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
 		}(k)
 	}
 
 	// drain and count — blocks until all goroutines have actually started
-	for i := 0; i < len(p.ServerIDRpcUrlMap); i++ {
+	for i := 0; i < len(n.cfg.Peers); i++ {
 		<-started
 	}
 
-	go p.startCommitIndexUpdater(heartbeatCtx, updateCommitIndexCh)
+	go n.startCommitIndexUpdater(heartbeatCtx, updateCommitIndexCh)
 
 	select {
 	case <-stepDownCh:
@@ -69,11 +68,11 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 		// transition. order matters: cancel before becomeFollower so no zombie heartbeats
 		// race against the new follower state.
 		cancel()
-		p.becomeFollower()
+		n.becomeFollower()
 		return
-	case <-p.electionTimeoutCh:
+	case <-n.electionTimeoutCh:
 		cancel()
-		p.becomeFollower()
+		n.becomeFollower()
 		return
 	case <-ctx.Done():
 		cancel()
@@ -81,7 +80,7 @@ func (p *Peer) startSendLogs(ctx context.Context) {
 	}
 }
 
-func (p *Peer) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-chan struct{}) {
+func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -90,27 +89,27 @@ func (p *Peer) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			for len(updateCommitCh) > 0 {
 				<-updateCommitCh
 			}
-			lastLogIndex, err := p.store.GetLastLogIndex(ctx)
+			lastLogIndex, err := n.store.GetLastLogIndex(ctx)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
 
 				continue
 			}
 
-			commitIndex := getMajorityMatchIndex(p.peerIndexes, lastLogIndex)
+			commitIndex := getMajorityMatchIndex(n.nodeIdxs, lastLogIndex)
 			if commitIndex == 0 {
 
 				continue
 			}
 
-			commitIndexLog, err := p.store.GetLogByIndex(ctx, commitIndex)
+			commitIndexLog, err := n.store.GetLogByIndex(ctx, commitIndex)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
 
 				continue
 			}
 
-			currentTerm, err := p.store.GetCurrentTerm(ctx)
+			currentTerm, err := n.store.GetCurrentTerm(ctx)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
 
@@ -118,15 +117,15 @@ func (p *Peer) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			}
 
 			if commitIndexLog.Term == uint64(currentTerm) {
-				p.SetCommitIndex(commitIndex)
+				n.SetCommitIndex(commitIndex)
 			}
 		}
 	}
 }
 
 // per peer heartbeat orchestrator
-func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}) {
-	heartBeatTime := time.Duration(p.cfg.HeartbeatMs) * time.Millisecond
+func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}) {
+	heartBeatTime := time.Duration(n.cfg.HeartbeatMs) * time.Millisecond
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogErrChan := make(chan error, 1)
 	sendLogCtx, cancel := context.WithCancel(ctx)
@@ -135,7 +134,7 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				go p.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
+				go n.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
 				inFlight = true
 			}
 		case err := <-sendLogErrChan:
@@ -150,35 +149,28 @@ func (p *Peer) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 	}
 }
 
-func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error, stepDownCh, updateCommitIndexCh chan<- struct{}) {
-	currentTerm, err := p.store.GetCurrentTerm(ctx)
+func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error, stepDownCh, updateCommitIndexCh chan<- struct{}) {
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
 		errChan <- err
 		return
 	}
 
-	client := p.ServerIDRpcUrlMap[peerID]
-	nextIdx := p.GetPeerIndex(peerID).nextIndex
+	nextIdx := n.GetPeerIndex(peerID).nextIndex
 
-	var prevLog *types.LogEntry
+	var prevLog LogEntry
 	if nextIdx > 1 {
-		prevLog, err = p.store.GetLogByIndex(ctx, nextIdx-1)
+		prevLog, err = n.store.GetLogByIndex(ctx, nextIdx-1)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err at index:%d : %s", nextIdx-1, err.Error())
 			errChan <- err
 			return
 		}
-	} else {
-		prevLog = &types.LogEntry{
-			Index: 0,
-			Term:  0,
-			Data:  []byte{},
-			Type:  types.EntryType_ENTRY_TYPE_NO_OP,
-		}
 	}
+	// nextIdx <= 1: prevLog is zero value {Index:0, Term:0} — correct for the first entry
 
-	logs, err := p.store.GetLogs(ctx, &nextIdx, nil)
+	logs, err := n.store.GetLogs(ctx, &nextIdx, nil)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
 		errChan <- err
@@ -187,7 +179,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	peerLogLen := uint(len(logs))
 
-	res, err := sendAppendLogs(ctx, p.GetID(), peerID, client, currentTerm, uint(prevLog.Term), uint(prevLog.Index), p.commitIndex, logs, p.cfg.RPCTimeoutMs)
+	res, err := n.sendAppendLogs(ctx, peerID, currentTerm, uint(prevLog.Term), uint(prevLog.Index), n.commitIndex, logs)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in append logs rpc response from peer %s", peerID)
 		errChan <- err
@@ -196,7 +188,7 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	fmt.Printf("\nCurrentTerm: %d\nRes Term: %d", currentTerm, res.Term)
 	if uint(res.Term) > currentTerm {
-		// BUG (fixed): we used to call p.becomeFollower() directly here.
+		// BUG (fixed): we used to call n.becomeFollower() directly here.
 		// that meant a child goroutine was driving the role transition, bypassing
 		// the orchestrator entirely. heartbeatCtx was never cancelled, leaving all
 		// sendLogsPerPeer goroutines running as zombies. see startSendLogs comment
@@ -210,16 +202,16 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	if res.Success {
 		if peerLogLen > 0 {
-			currentNext := p.GetPeerIndex(peerID).nextIndex
-			p.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
-			p.SetNextPeerIndex(peerID, currentNext+peerLogLen)
+			currentNext := n.GetPeerIndex(peerID).nextIndex
+			n.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
+			n.SetNextPeerIndex(peerID, currentNext+peerLogLen)
 			updateCommitIndexCh <- struct{}{}
 		}
 		// peerLogLen == 0 means pure heartbeat — follower is consistent, nothing to advance
 	} else {
-		currentNext := p.GetPeerIndex(peerID).nextIndex
+		currentNext := n.GetPeerIndex(peerID).nextIndex
 		if currentNext > 1 {
-			p.SetNextPeerIndex(peerID, currentNext-1)
+			n.SetNextPeerIndex(peerID, currentNext-1)
 		}
 	}
 
@@ -227,20 +219,17 @@ func (p *Peer) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 	return
 }
 
-func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.RaftRpcClient, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []*types.LogEntry, rpcTimeoutMs int) (*types.AppendEntriesResponse, error) {
-	rpcCtx, cancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutMs)*time.Millisecond)
-	defer cancel()
-
-	rpcReq := types.AppendEntriesArgs{
+func (n *Node) sendAppendLogs(ctx context.Context, peerID string, currentTerm, prevLogTerm, prevLogIndex, leaderCommit uint, logs []LogEntry) (AppendEntriesResponse, error) {
+	rpcReq := AppendEntriesArgs{
 		Term:         uint64(currentTerm),
-		LeaderId:     leaderID,
+		LeaderID:     n.ID,
 		PrevLogIndex: uint64(prevLogIndex),
 		PrevLogTerm:  uint64(prevLogTerm),
 		Entries:      logs,
 		LeaderCommit: uint64(leaderCommit),
 	}
 
-	return client.AppendEntries(rpcCtx, &rpcReq)
+	return n.transport.AppendEntries(peerID, rpcReq)
 }
 
 // Sort all matchIndexes (peers + self) in descending order.
@@ -249,10 +238,10 @@ func sendAppendLogs(ctx context.Context, leaderID, peerID string, client types.R
 // So matchIndexes[majorityCount-1] is the highest index replicated on a majority of servers.
 // Example 1 (no duplicates): n2:5, n3:3, n4:4, n5:6, self:7 → sorted [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 // Example 2 (with duplicates): n2:6, n3:5, n4:6, n5:5, self:7 → sorted [7,6,6,5,5], majorityCount=3 → matchIndexes[2]=6
-func getMajorityMatchIndex(peerIndexes map[string]PeerIndexes, selfLastIndex uint) uint {
+func getMajorityMatchIndex(nodeIdxs map[string]nodeIndexes, selfLastIndex uint) uint {
 	var matchIndexes []uint
 
-	for _, peer := range peerIndexes {
+	for _, peer := range nodeIdxs {
 		matchIndexes = append(matchIndexes, peer.matchIndex)
 	}
 
@@ -267,6 +256,6 @@ func getMajorityMatchIndex(peerIndexes map[string]PeerIndexes, selfLastIndex uin
 		return 0
 	})
 
-	majorityCount := (len(peerIndexes)+1)/2 + 1 // +1 is for self
+	majorityCount := (len(nodeIdxs)+1)/2 + 1 // +1 is for self
 	return matchIndexes[majorityCount-1]
 }

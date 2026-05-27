@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SHREYANSHSINGH14/raft/db"
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -17,19 +15,16 @@ const (
 	methodAppendEntries = "AppendEntries"
 )
 
-func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRaftRpcClient) {
-	store := db.NewMockKVStore()
+func setupSendLogsTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
+	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
 
-	peer := NewPeerMock(store)
-	peer.Role = ServerRole_Leader
+	transport := NewMockTransport()
+	node := NewNodeMock(store)
+	node.transport = transport
+	node.Role = ServerRole_Leader
 
-	clients := map[string]*MockRaftRpcClient{}
-	for id, client := range peer.ServerIDRpcUrlMap {
-		clients[id] = client.(*MockRaftRpcClient)
-	}
-
-	return peer, store, clients
+	return node, store, transport
 }
 
 // runSendLogs fans out sendLogs to every peer concurrently, mirroring what
@@ -37,20 +32,20 @@ func setupSendLogsTest(t *testing.T) (*Peer, *db.MockKVStore, map[string]*MockRa
 // assert state immediately after. Returns (stepDown, error): stepDown is true
 // if any peer signalled a higher term (the orchestrator would normally handle
 // the role transition, but that path is not exercised here).
-func runSendLogs(p *Peer) (bool, error) {
+func runSendLogs(n *Node) (bool, error) {
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(p.ServerIDRpcUrlMap))
+	errCh := make(chan error, len(n.cfg.Peers))
 
 	// mirror the production buffer size — all peers could signal step-down simultaneously
-	stepDownCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
-	updateCommitIndexCh := make(chan struct{}, len(p.ServerIDRpcUrlMap))
+	stepDownCh := make(chan struct{}, len(n.cfg.Peers))
+	updateCommitIndexCh := make(chan struct{}, len(n.cfg.Peers))
 
-	for peerID := range p.ServerIDRpcUrlMap {
+	for _, peerID := range n.cfg.Peers {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			ch := make(chan error, 1)
-			p.sendLogs(context.Background(), id, ch, stepDownCh, updateCommitIndexCh)
+			n.sendLogs(context.Background(), id, ch, stepDownCh, updateCommitIndexCh)
 			if err := <-ch; err != nil {
 				errCh <- err
 			}
@@ -72,20 +67,20 @@ func runSendLogs(p *Peer) (bool, error) {
 	}
 }
 
-func appendLogsHelper(store *db.MockKVStore, logs []*types.LogEntry) {
+func appendLogsHelper(store *MemStorage, logs []LogEntry) {
 	store.AppendLogs(context.Background(), logs)
 }
 
-func successResponse() *types.AppendEntriesResponse {
-	return &types.AppendEntriesResponse{Term: 5, Success: true}
+func successResponse() AppendEntriesResponse {
+	return AppendEntriesResponse{Term: 5, Success: true}
 }
 
-func failResponse() *types.AppendEntriesResponse {
-	return &types.AppendEntriesResponse{Term: 5, Success: false}
+func failResponse() AppendEntriesResponse {
+	return AppendEntriesResponse{Term: 5, Success: false}
 }
 
-func higherTermResponse(term uint64) *types.AppendEntriesResponse {
-	return &types.AppendEntriesResponse{Term: term, Success: false}
+func higherTermResponse(term uint64) AppendEntriesResponse {
+	return AppendEntriesResponse{Term: term, Success: false}
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -99,107 +94,95 @@ func higherTermResponse(term uint64) *types.AppendEntriesResponse {
 // ── 1. Logs sent per peer based on nextIndex ──────────────────────────────────
 
 func TestSendLogs_LogsSentBasedOnNextIndex(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	peer.peerIndexes["node-2"] = PeerIndexes{nextIndex: 2, matchIndex: 1}
-	peer.peerIndexes["node-3"] = PeerIndexes{nextIndex: 1, matchIndex: 0}
-	peer.peerIndexes["node-4"] = PeerIndexes{nextIndex: 1, matchIndex: 0}
-	peer.peerIndexes["node-5"] = PeerIndexes{nextIndex: 1, matchIndex: 0}
+	node.nodeIdxs["node-2"] = nodeIndexes{nextIndex: 2, matchIndex: 1}
+	node.nodeIdxs["node-3"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
+	node.nodeIdxs["node-4"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
+	node.nodeIdxs["node-5"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
 
-	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-		return len(req.Entries) == 2 && req.Entries[0].Index == 2
+	transport.On(methodAppendEntries, "node-2", mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 2 && args.Entries[0].Index == 2
 	})).Return(successResponse(), nil)
 
 	for _, id := range []string{"node-3", "node-4", "node-5"} {
-		clients[id].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-			return len(req.Entries) == 3 && req.Entries[0].Index == 1
+		transport.On(methodAppendEntries, id, mock.MatchedBy(func(args AppendEntriesArgs) bool {
+			return len(args.Entries) == 3 && args.Entries[0].Index == 1
 		})).Return(successResponse(), nil)
 	}
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
-	for _, c := range clients {
-		c.AssertExpectations(t)
-	}
+	transport.AssertExpectations(t)
 }
 
 // ── 2. nextIndex == 1 → prevLog is zero value ─────────────────────────────────
 
 func TestSendLogs_NextIndexOne_ZeroPrevLog(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-			return req.PrevLogIndex == 0 && req.PrevLogTerm == 0
-		})).Return(successResponse(), nil)
-	}
+	transport.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return args.PrevLogIndex == 0 && args.PrevLogTerm == 0
+	})).Return(successResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
-	for _, c := range clients {
-		c.AssertExpectations(t)
-	}
+	transport.AssertExpectations(t)
 }
 
 // ── 3. nextIndex > 1 → fetches correct prevLog ────────────────────────────────
 
 func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 4, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{nextIndex: 3, matchIndex: 2}
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{nextIndex: 3, matchIndex: 2}
 	}
 
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-			return req.PrevLogIndex == 2 && req.PrevLogTerm == 5
-		})).Return(successResponse(), nil)
-	}
+	transport.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return args.PrevLogIndex == 2 && args.PrevLogTerm == 5
+	})).Return(successResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
-	for _, c := range clients {
-		c.AssertExpectations(t)
-	}
+	transport.AssertExpectations(t)
 }
 
 // ── 4. All peers succeed → nextIndex and matchIndex advance ───────────────────
 
 func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	}
+	transport.On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for id := range clients {
-		assert.Equal(t, uint(3), peer.GetPeerIndex(id).nextIndex,
+	for _, id := range node.cfg.Peers {
+		assert.Equal(t, uint(3), node.GetPeerIndex(id).nextIndex,
 			"nextIndex should advance to 3 for %s", id)
-		assert.Equal(t, uint(2), peer.GetPeerIndex(id).matchIndex,
+		assert.Equal(t, uint(2), node.GetPeerIndex(id).matchIndex,
 			"matchIndex should be 2 for %s", id)
 	}
 }
@@ -207,27 +190,25 @@ func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
 // ── 5. All peers fail → nextIndex decrements, matchIndex unchanged ────────────
 
 func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{nextIndex: 2, matchIndex: 0}
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{nextIndex: 2, matchIndex: 0}
 	}
 
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-	}
+	transport.On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for id := range clients {
-		assert.Equal(t, uint(1), peer.GetPeerIndex(id).nextIndex,
+	for _, id := range node.cfg.Peers {
+		assert.Equal(t, uint(1), node.GetPeerIndex(id).nextIndex,
 			"nextIndex should decrement to 1 for %s", id)
-		assert.Equal(t, uint(0), peer.GetPeerIndex(id).matchIndex,
+		assert.Equal(t, uint(0), node.GetPeerIndex(id).matchIndex,
 			"matchIndex should stay 0 for %s", id)
 	}
 }
@@ -235,48 +216,44 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 // ── 6. Some succeed some fail → correct per-peer index updates ───────────────
 
 func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{nextIndex: 2, matchIndex: 1}
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{nextIndex: 2, matchIndex: 1}
 	}
 
-	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	clients["node-3"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
-	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
+	transport.On(methodAppendEntries, "node-2", mock.Anything).Return(successResponse(), nil)
+	transport.On(methodAppendEntries, "node-3", mock.Anything).Return(failResponse(), nil)
+	transport.On(methodAppendEntries, "node-4", mock.Anything).Return(failResponse(), nil)
+	transport.On(methodAppendEntries, "node-5", mock.Anything).Return(failResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	assert.Equal(t, uint(3), peer.GetPeerIndex("node-2").nextIndex)
-	assert.Equal(t, uint(2), peer.GetPeerIndex("node-2").matchIndex)
-	assert.Equal(t, uint(1), peer.GetPeerIndex("node-3").nextIndex)
-	assert.Equal(t, uint(1), peer.GetPeerIndex("node-4").nextIndex)
-	assert.Equal(t, uint(1), peer.GetPeerIndex("node-5").nextIndex)
+	assert.Equal(t, uint(3), node.GetPeerIndex("node-2").nextIndex)
+	assert.Equal(t, uint(2), node.GetPeerIndex("node-2").matchIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-3").nextIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-4").nextIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-5").nextIndex)
 }
 
 // ── 7. Heartbeat — no logs to send ───────────────────────────────────────────
 
 func TestSendLogs_NoLogs_HeartbeatSent(t *testing.T) {
-	peer, _, clients := setupSendLogsTest(t)
+	node, _, transport := setupSendLogsTest(t)
 
-	for _, c := range clients {
-		c.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-			return len(req.Entries) == 0
-		})).Return(successResponse(), nil)
-	}
+	transport.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 0
+	})).Return(successResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
-	for _, c := range clients {
-		c.AssertExpectations(t)
-	}
+	transport.AssertExpectations(t)
 }
 
 // ── 8. Peer responds with higher term → step-down signalled ──────────────────
@@ -284,18 +261,18 @@ func TestSendLogs_NoLogs_HeartbeatSent(t *testing.T) {
 // sendLogs only sends on stepDownCh and returns; runSendLogs exposes that signal.
 
 func TestSendLogs_PeerHigherTerm_StepDownSignalled(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(higherTermResponse(10), nil)
-	clients["node-3"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
-	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.Anything).Return(successResponse(), nil)
+	transport.On(methodAppendEntries, "node-2", mock.Anything).Return(higherTermResponse(10), nil)
+	transport.On(methodAppendEntries, "node-3", mock.Anything).Return(successResponse(), nil)
+	transport.On(methodAppendEntries, "node-4", mock.Anything).Return(successResponse(), nil)
+	transport.On(methodAppendEntries, "node-5", mock.Anything).Return(successResponse(), nil)
 
-	stepDown, err := runSendLogs(peer)
+	stepDown, err := runSendLogs(node)
 	assert.NoError(t, err)
 	assert.True(t, stepDown, "sendLogs should signal step-down when a peer returns a higher term")
 }
@@ -303,113 +280,110 @@ func TestSendLogs_PeerHigherTerm_StepDownSignalled(t *testing.T) {
 // ── 9. Some peers get heartbeat, some get logs ───────────────────────────────
 
 func TestSendLogs_MixedHeartbeatAndLogs(t *testing.T) {
-	peer, store, clients := setupSendLogsTest(t)
+	node, store, transport := setupSendLogsTest(t)
 
-	appendLogsHelper(store, []*types.LogEntry{
+	appendLogsHelper(store, []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	peer.peerIndexes["node-2"] = PeerIndexes{nextIndex: 4, matchIndex: 3}
-	peer.peerIndexes["node-3"] = PeerIndexes{nextIndex: 1, matchIndex: 0}
-	peer.peerIndexes["node-4"] = PeerIndexes{nextIndex: 2, matchIndex: 1}
-	peer.peerIndexes["node-5"] = PeerIndexes{nextIndex: 3, matchIndex: 2}
+	node.nodeIdxs["node-2"] = nodeIndexes{nextIndex: 4, matchIndex: 3}
+	node.nodeIdxs["node-3"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
+	node.nodeIdxs["node-4"] = nodeIndexes{nextIndex: 2, matchIndex: 1}
+	node.nodeIdxs["node-5"] = nodeIndexes{nextIndex: 3, matchIndex: 2}
 
-	clients["node-2"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-		return len(req.Entries) == 0
+	transport.On(methodAppendEntries, "node-2", mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 0
 	})).Return(successResponse(), nil)
 
-	clients["node-3"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-		return len(req.Entries) == 3 && req.Entries[0].Index == 1
+	transport.On(methodAppendEntries, "node-3", mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 3 && args.Entries[0].Index == 1
 	})).Return(successResponse(), nil)
 
-	clients["node-4"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-		return len(req.Entries) == 2 && req.Entries[0].Index == 2
+	transport.On(methodAppendEntries, "node-4", mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 2 && args.Entries[0].Index == 2
 	})).Return(successResponse(), nil)
 
-	clients["node-5"].On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(req *types.AppendEntriesArgs) bool {
-		return len(req.Entries) == 1 && req.Entries[0].Index == 3
+	transport.On(methodAppendEntries, "node-5", mock.MatchedBy(func(args AppendEntriesArgs) bool {
+		return len(args.Entries) == 1 && args.Entries[0].Index == 3
 	})).Return(successResponse(), nil)
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.NoError(t, err)
-	for _, c := range clients {
-		c.AssertExpectations(t)
-	}
+	transport.AssertExpectations(t)
 }
 
 // ── 10. GetCurrentTerm fails ──────────────────────────────────────────────────
 
 func TestSendLogs_DBErr_GetCurrentTerm(t *testing.T) {
-	mockStore := new(db.MockStore)
+	mockStore := new(MockStorage)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(0), errors.New("db error"))
 
-	peer := &Peer{
-		ID:                "node-1",
-		Role:              ServerRole_Leader,
-		store:             mockStore,
-		electionTimeoutCh: make(chan struct{}, 10),
-		peerIndexes: map[string]PeerIndexes{
-			"node-2": {nextIndex: 1, matchIndex: 0},
+	node := &Node{
+		ID:    "node-1",
+		Role:  ServerRole_Leader,
+		store: mockStore,
+		cfg: Config{
+			Peers: []string{"node-2"},
 		},
-		ServerIDRpcUrlMap: map[string]types.RaftRpcClient{
-			"node-2": NewMockRaftRpcClient(),
+		electionTimeoutCh: make(chan struct{}, 10),
+		nodeIdxs: map[string]nodeIndexes{
+			"node-2": {nextIndex: 1, matchIndex: 0},
 		},
 	}
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.Error(t, err)
 }
 
 // ── 11. GetLogByIndex fails (fetching prevLog) ────────────────────────────────
 
 func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
-	mockStore := new(db.MockStore)
+	mockStore := new(MockStorage)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
-	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(nil, errors.New("db error"))
+	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(LogEntry{}, errors.New("db error"))
 
-	peer := &Peer{
-		ID:                "node-1",
-		Role:              ServerRole_Leader,
-		store:             mockStore,
-		electionTimeoutCh: make(chan struct{}, 10),
-		peerIndexes: map[string]PeerIndexes{
-			"node-2": {nextIndex: 2, matchIndex: 1},
+	node := &Node{
+		ID:    "node-1",
+		Role:  ServerRole_Leader,
+		store: mockStore,
+		cfg: Config{
+			Peers: []string{"node-2"},
 		},
-		ServerIDRpcUrlMap: map[string]types.RaftRpcClient{
-			"node-2": NewMockRaftRpcClient(),
+		electionTimeoutCh: make(chan struct{}, 10),
+		nodeIdxs: map[string]nodeIndexes{
+			"node-2": {nextIndex: 2, matchIndex: 1},
 		},
 	}
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.Error(t, err)
 }
 
 // ── 12. GetLogs fails ─────────────────────────────────────────────────────────
 
 func TestSendLogs_DBErr_GetLogs(t *testing.T) {
-	mockStore := new(db.MockStore)
+	mockStore := new(MockStorage)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 	mockStore.On("GetLogs", mock.Anything, mock.Anything, mock.Anything).Return(
-		([]*types.LogEntry)(nil), errors.New("db error"),
+		([]LogEntry)(nil), errors.New("db error"),
 	)
 
-	nextIdx := uint(1)
-	peer := &Peer{
-		ID:                "node-1",
-		Role:              ServerRole_Leader,
-		store:             mockStore,
-		electionTimeoutCh: make(chan struct{}, 10),
-		peerIndexes: map[string]PeerIndexes{
-			"node-2": {nextIndex: nextIdx, matchIndex: 0},
+	node := &Node{
+		ID:    "node-1",
+		Role:  ServerRole_Leader,
+		store: mockStore,
+		cfg: Config{
+			Peers: []string{"node-2"},
 		},
-		ServerIDRpcUrlMap: map[string]types.RaftRpcClient{
-			"node-2": NewMockRaftRpcClient(),
+		electionTimeoutCh: make(chan struct{}, 10),
+		nodeIdxs: map[string]nodeIndexes{
+			"node-2": {nextIndex: 1, matchIndex: 0},
 		},
 	}
 
-	_, err := runSendLogs(peer)
+	_, err := runSendLogs(node)
 	assert.Error(t, err)
 }
 
@@ -426,21 +400,21 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 // sorted desc: [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 
 func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
-	peerIndexes := map[string]PeerIndexes{
+	nodeIdxs := map[string]nodeIndexes{
 		"node-2": {matchIndex: 5},
 		"node-3": {matchIndex: 3},
 		"node-4": {matchIndex: 4},
 		"node-5": {matchIndex: 6},
 	}
 
-	result := getMajorityMatchIndex(peerIndexes, 7)
+	result := getMajorityMatchIndex(nodeIdxs, 7)
 	assert.Equal(t, uint(5), result)
 }
 
 // ── 14. No majority → returns 0 ───────────────────────────────────────────────
 
 func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
-	peerIndexes := map[string]PeerIndexes{
+	nodeIdxs := map[string]nodeIndexes{
 		"node-2": {matchIndex: 0},
 		"node-3": {matchIndex: 0},
 		"node-4": {matchIndex: 0},
@@ -448,21 +422,21 @@ func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
 	}
 
 	// only self has index 1 — not a majority of 5
-	result := getMajorityMatchIndex(peerIndexes, 1)
+	result := getMajorityMatchIndex(nodeIdxs, 1)
 	assert.Equal(t, uint(0), result)
 }
 
 // ── 15. All peers at same index → that index returned ─────────────────────────
 
 func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
-	peerIndexes := map[string]PeerIndexes{
+	nodeIdxs := map[string]nodeIndexes{
 		"node-2": {matchIndex: 3},
 		"node-3": {matchIndex: 3},
 		"node-4": {matchIndex: 3},
 		"node-5": {matchIndex: 3},
 	}
 
-	result := getMajorityMatchIndex(peerIndexes, 3)
+	result := getMajorityMatchIndex(nodeIdxs, 3)
 	assert.Equal(t, uint(3), result)
 }
 
@@ -481,29 +455,29 @@ func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
 // ── 16. Majority replicated, current term log → commitIndex advances ──────────
 
 func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T) {
-	store := db.NewMockKVStore()
+	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
-	store.AppendLogs(context.Background(), []*types.LogEntry{
+	store.AppendLogs(context.Background(), []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	peer := NewPeerMock(store)
+	node := NewNodeMock(store)
 	// self + node-2 + node-3 = 3 = majority of 5, all at index 2
-	peer.peerIndexes["node-2"] = PeerIndexes{matchIndex: 2}
-	peer.peerIndexes["node-3"] = PeerIndexes{matchIndex: 2}
-	peer.peerIndexes["node-4"] = PeerIndexes{matchIndex: 0}
-	peer.peerIndexes["node-5"] = PeerIndexes{matchIndex: 0}
+	node.nodeIdxs["node-2"] = nodeIndexes{matchIndex: 2}
+	node.nodeIdxs["node-3"] = nodeIndexes{matchIndex: 2}
+	node.nodeIdxs["node-4"] = nodeIndexes{matchIndex: 0}
+	node.nodeIdxs["node-5"] = nodeIndexes{matchIndex: 0}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	updateCommitCh := make(chan struct{}, 1)
-	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
 	updateCommitCh <- struct{}{}
 
 	assert.Eventually(t, func() bool {
-		return peer.GetCommitIndex() == uint(2)
+		return node.GetCommitIndex() == uint(2)
 	}, 2*time.Second, 10*time.Millisecond,
 		"commitIndex should advance to 2 once majority replicates current-term log")
 }
@@ -511,80 +485,80 @@ func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T
 // ── 17. Previous term log → commitIndex does NOT advance (Raft §5.4.2) ────────
 
 func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing.T) {
-	store := db.NewMockKVStore()
+	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
 	// log is from term 4, not current term 5
-	store.AppendLogs(context.Background(), []*types.LogEntry{
+	store.AppendLogs(context.Background(), []LogEntry{
 		{Index: 1, Term: 4, Data: []byte("cmd-1")},
 	})
 
-	peer := NewPeerMock(store)
+	node := NewNodeMock(store)
 	// all peers have replicated index 1 — majority achieved
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{matchIndex: 1}
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	updateCommitCh := make(chan struct{}, 1)
-	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
 	updateCommitCh <- struct{}{}
 
 	// let it run for the full timeout — commitIndex must never move
 	<-ctx.Done()
-	assert.Equal(t, uint(0), peer.GetCommitIndex(),
+	assert.Equal(t, uint(0), node.GetCommitIndex(),
 		"commitIndex must not advance for logs from previous terms (Raft §5.4.2)")
 }
 
 // ── 18. No majority → commitIndex stays 0 ────────────────────────────────────
 
 func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
-	store := db.NewMockKVStore()
+	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
-	store.AppendLogs(context.Background(), []*types.LogEntry{
+	store.AppendLogs(context.Background(), []LogEntry{
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	peer := NewPeerMock(store)
+	node := NewNodeMock(store)
 	// only self has the log — no peer has replicated it
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{matchIndex: 0}
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{matchIndex: 0}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	updateCommitCh := make(chan struct{}, 1)
-	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
 	updateCommitCh <- struct{}{}
 
 	<-ctx.Done()
-	assert.Equal(t, uint(0), peer.GetCommitIndex(),
+	assert.Equal(t, uint(0), node.GetCommitIndex(),
 		"commitIndex must not advance without majority replication")
 }
 
 // ── 19. DB error on GetLastLogIndex → continues, does not die ────────────────
 
 func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
-	mockStore := new(db.MockStore)
+	mockStore := new(MockStorage)
 
 	// first call errors, all subsequent calls succeed — proves the loop continued past the error
 	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), errors.New("db error")).Once()
 	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(1), nil)
-	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(&types.LogEntry{Index: 1, Term: 5}, nil)
+	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 
-	peer := NewPeerMock(mockStore)
-	for id := range peer.peerIndexes {
-		peer.peerIndexes[id] = PeerIndexes{matchIndex: 1}
+	node := NewNodeMock(mockStore)
+	for _, id := range node.cfg.Peers {
+		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	updateCommitCh := make(chan struct{}, 1)
-	go peer.startCommitIndexUpdater(ctx, updateCommitCh)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
 	updateCommitCh <- struct{}{} // first signal → GetLastLogIndex errors, loop continues
 
 	// if the goroutine dies on first error, commitIndex never advances.
@@ -594,7 +568,7 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 		case updateCommitCh <- struct{}{}:
 		default:
 		}
-		return peer.GetCommitIndex() > 0
+		return node.GetCommitIndex() > 0
 	}, 2*time.Second, 10*time.Millisecond,
 		"updater must continue past DB errors and eventually commit")
 }
@@ -602,17 +576,17 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 // ── 20. Context cancelled → goroutine exits cleanly ──────────────────────────
 
 func TestStartCommitIndexUpdater_ContextCancelled_Exits(t *testing.T) {
-	store := db.NewMockKVStore()
+	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
 
-	peer := NewPeerMock(store)
+	node := NewNodeMock(store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	updateCommitCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		peer.startCommitIndexUpdater(ctx, updateCommitCh)
+		node.startCommitIndexUpdater(ctx, updateCommitCh)
 		close(done)
 	}()
 

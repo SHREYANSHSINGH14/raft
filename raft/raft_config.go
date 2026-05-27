@@ -1,11 +1,11 @@
 package raft
 
-type RaftConfig struct {
+type Config struct {
 	ID    string
-	Peers map[string]string // peer id -> rpc url
+	Peers []string // peer IDs only; addresses are the Transport's concern
 
-	RPCTimeoutMs       int
-	HeartbeatMs        int
-	ElectionMinMs      int
-	ElectionDurationMs int // ElectionMaxMs - ElectionMinMs
+	RPCTimeoutMs  int
+	HeartbeatMs   int
+	ElectionMinMs int
+	ElectionMaxMs int
 }

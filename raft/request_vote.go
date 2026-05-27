@@ -5,25 +5,24 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
 	"github.com/rs/zerolog"
 )
 
-func (p *Peer) HandleRequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
-	if strings.TrimSpace(args.CandidateId) == "" {
+func (n *Node) HandleRequestVote(ctx context.Context, args RequestVoteArgs) (RequestVoteResponse, error) {
+	if strings.TrimSpace(args.CandidateID) == "" {
 		err := fmt.Errorf("candidate id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("candidate id is empty")
-		return nil, err
+		return RequestVoteResponse{}, err
 	}
 
-	currentTerm, err := p.store.GetCurrentTerm(ctx)
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-		return nil, err
+		return RequestVoteResponse{}, err
 	}
 
 	if args.Term < uint64(currentTerm) {
-		return &types.RequestVoteResponse{
+		return RequestVoteResponse{
 			Term:        uint64(currentTerm),
 			VoteGranted: false,
 		}, nil
@@ -34,38 +33,38 @@ func (p *Peer) HandleRequestVote(ctx context.Context, args *types.RequestVoteArg
 	// In both cases we can just ignore the request and return false because we have already voted for some candidate in this term
 	// that happens at voteFor check below where we check if votedFor is empty or candidateId
 	if args.Term > uint64(currentTerm) {
-		err := p.store.SetCurrentTerm(ctx, uint(args.Term))
+		err := n.store.SetCurrentTerm(ctx, uint(args.Term))
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-			return nil, err
+			return RequestVoteResponse{}, err
 		}
 
 		currentTerm = uint(args.Term)
 
-		err = p.store.SetVotedFor(ctx, "")
+		err = n.store.SetVotedFor(ctx, "")
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-			return nil, err
+			return RequestVoteResponse{}, err
 		}
 	}
 
-	votedFor, err := p.store.GetVotedFor(ctx)
+	votedFor, err := n.store.GetVotedFor(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-		return nil, err
+		return RequestVoteResponse{}, err
 	}
 
-	if votedFor != "" && votedFor != args.CandidateId {
-		return &types.RequestVoteResponse{
+	if votedFor != "" && votedFor != args.CandidateID {
+		return RequestVoteResponse{
 			Term:        uint64(currentTerm),
 			VoteGranted: false,
 		}, nil
 	}
 
-	lastLog, err := p.store.GetLastLogEntry(ctx)
+	lastLog, err := n.store.GetLastLogEntry(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-		return nil, err
+		return RequestVoteResponse{}, err
 	}
 
 	// Raft determines which of two logs is more up-to-date
@@ -74,27 +73,27 @@ func (p *Peer) HandleRequestVote(ctx context.Context, args *types.RequestVoteArg
 	// the log with the later term is more up-to-date. If the logs
 	// end with the same term, then whichever log is longer is
 	// more up-to-date.
-	if lastLog != nil {
-		if args.LastLogTerm < uint64(lastLog.Term) || (args.LastLogTerm == uint64(lastLog.Term) && args.LastLogIndex < lastLog.Index) {
-			return &types.RequestVoteResponse{
+	if lastLog.Index > 0 {
+		if args.LastLogTerm < lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex < lastLog.Index) {
+			return RequestVoteResponse{
 				Term:        uint64(currentTerm),
 				VoteGranted: false,
 			}, nil
 		}
 	}
 
-	err = p.store.SetVotedFor(ctx, args.CandidateId)
+	err = n.store.SetVotedFor(ctx, args.CandidateID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-		return nil, err
+		return RequestVoteResponse{}, err
 	}
 
 	// reset election timeout because we have voted for a candidate in current term so we can be sure that there is an active candidate
 	// in current term and we can reset our election timeout to avoid unnecessary elections until we hear from the leader of this term or
 	// until election timeout happens again in which case we will start new election for next term
-	p.electionTimeoutCh <- struct{}{}
+	n.electionTimeoutCh <- struct{}{}
 
-	return &types.RequestVoteResponse{
+	return RequestVoteResponse{
 		Term:        uint64(currentTerm),
 		VoteGranted: true,
 	}, nil
