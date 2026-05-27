@@ -1,7 +1,9 @@
 # Raft Consensus — Learning Implementation
 
-A from-scratch implementation of the [Raft consensus algorithm](https://raft.github.io/raft.pdf) in Go.
-The goal is not just to make it work, but to deeply understand *why* each design decision exists — from goroutine lifecycle management to the subtle timing constraints that make distributed consensus correct.
+A from-scratch implementation of the [Raft consensus algorithm](https://raft.github.io/raft.pdf) in Go,
+refactored into an importable library. The `raft/` package exposes three interfaces — `Transport`,
+`Storage`, and `StateMachine` — that the caller implements. The library owns consensus; the caller
+owns networking, persistence, and application state.
 
 ---
 
@@ -25,16 +27,18 @@ The three core problems Raft solves:
 │   └── server.go
 ├── config/               # Config loading from env vars + peers.yaml
 │   └── config.go
-├── raft/                 # Core Raft logic
-│   ├── peer.go           # Peer struct, role transitions, startup
+├── raft/                 # Core Raft library (import this)
+│   ├── node.go           # Node struct, NewNode, Start/Stop
+│   ├── interfaces.go     # Transport, Storage, StateMachine interfaces
+│   ├── types.go          # Plain Go structs (LogEntry, RequestVoteArgs, …)
 │   ├── election.go       # Candidate election loop
 │   ├── heartbeat.go      # Leader heartbeat / log replication
 │   ├── request_vote.go   # RequestVote RPC handler
 │   └── append_entries.go # AppendEntries RPC handler
 ├── server/               # gRPC server + HTTP debug server
-│   ├── server.go
+│   ├── server.go         # grpcTransport adapter wires gRPC → raft.Transport
 │   └── debug_server.go
-├── db/                   # PebbleDB-backed persistent storage
+├── db/                   # PebbleDB-backed raft.Storage implementation
 │   └── db.go
 ├── proto/                # Protobuf definitions
 │   ├── rpc.proto
@@ -79,70 +83,6 @@ Follower ─────────────────▶ Candidate ──
           higher term seen / vote granted        higher term seen │
    ▲─────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Key Design Decisions (and the intuitions behind them)
-
-### Timing Constraints
-Raft correctness depends on a strict timing relationship:
-
-```
-RPC_TIMEOUT_MS < HEARTBEAT_MS < ELECTION_MIN_MS < ELECTION_MAX_MS
-      50       <     100      <      1000        <     5000
-```
-
-If heartbeats are slower than election timeouts, followers would constantly trigger spurious elections. If RPCs are slower than heartbeats, the leader would pile up goroutines. The config layer validates these relationships at startup and panics early rather than silently misbehaving.
-
-### Context Propagation
-Every goroutine receives a `context.Context`. The server creates a root context; cancelling it stops the gRPC server *and* all Raft goroutines (election timer, heartbeat senders) in a single operation. This prevents the class of bugs where a stopped server's goroutines continue making RPCs or triggering elections.
-
-### `wg.Wait()` as a Synchronization Boundary — and Why It Breaks
-
-The same structural mistake appeared in two different places, and understanding the connection is the core concurrency lesson of this project.
-
-**In the election loop:** `wg.Wait()` collected `RequestVote` responses from all peers before processing results. When `startElection` cancelled the context and spawned a new election goroutine (on ticker fire or `electionTimeoutCh`), the old goroutine was still blocked at `wg.Wait()`. When it eventually unblocked, it tried to send to `electionResChan` — but the buffer was already full from the newer election. Permanent block. Goroutine leak. On every election timeout cycle, leaking goroutines incremented the term via `SetCurrentTerm`, eventually causing term inflation into the hundreds of thousands and OOM.
-
-**In the heartbeat loop:** `sendLogs` used `wg.Wait()` to wait for *all* peers before returning. Total execution time (db reads + RPC timeout + response processing + scheduling overhead) consistently exceeded the heartbeat interval on a loaded machine. Every tick spawned a new goroutine while the previous one was still inside `wg.Wait()`. Goroutines accumulated, all hammering the same peers concurrently, latency spiked, RPCs started hitting deadlines more aggressively — a feedback loop that made things progressively worse until the leader lost authority entirely.
-
-**The shared pattern:** `wg.Wait()` creates a synchronization point that doesn't respect external signals — whether that's a context cancellation or a ticker firing. The goroutine is stuck waiting for the *slowest* thing to finish while the rest of the system has moved on.
-
-**The fix in both cases:** eliminate `wg.Wait()` as the coordination mechanism. For election, a buffered channel sized exactly to the number of peers lets every goroutine send its result without blocking, regardless of whether the caller is still listening. For heartbeats, one independent goroutine loop per peer (`sendLogsPerPeer`) means there's no "wait for all 4" synchronization point at all — each peer loop runs on its own ticker with its own `inFlight` guard. A slow peer only affects its own pipeline, not the others.
-
-This is also why per-peer goroutines are the correct design, not just a performance optimization. `wg.Wait()` couples all peers together — one slow follower holds up heartbeats to everyone else. Independent loops isolate the failure. This is how etcd, TiKV, and CockroachDB implement replication.
-
-### Follower as the Safe Default — Fixing Term Inflation
-
-A subtler election bug: when a candidate failed to win (no majority reached, or all peers rejected the vote), the original code returned `ServerRole_Candidate` from `election()` and immediately called `becomeCandidate()` again — bypassing `startElectionOut` and its randomized timeout entirely.
-
-The failure mode was visible when two nodes with stale logs rejoined the cluster simultaneously. Both kept getting rejected by the log-up-to-date check on every attempt. Each election attempt takes ~50ms (one RPC timeout). With two nodes each trying ~20 times per second, terms inflated by ~40/second — reaching 783 terms in under 12 seconds with no stable leader.
-
-The Raft paper is explicit: a candidate that fails to win should wait for a new randomized timeout before trying again. `startElectionOut` implements exactly that wait — but `becomeCandidate()` was bypassing it by jumping straight to `startElection`.
-
-**The fix:** on a `Candidate` result from `election()`, call `becomeFollower()` instead of `becomeCandidate()`. This puts the node back into the randomized timeout wait in `startElectionOut`. When a leader's heartbeat arrives, the timer resets and the node stays follower. If no heartbeat arrives, the timeout fires and it tries again — with proper spacing.
-
-The deeper principle: **follower is the safe default**. Any role that fails to fulfill its responsibility should retreat to follower, not retry immediately:
-
-- Candidate fails to win → follower. Let the randomized timer decide when to try again.
-- Leader can't initialize state → follower. Let someone healthier lead.
-- Leader sees a higher term → follower. Acknowledge the legitimate authority.
-
-A zombie leader sends conflicting `AppendEntries`. A runaway candidate inflates terms and disrupts stable leaders. A follower just waits — the only role that can't cause harm to the cluster.
-
-### Child Goroutines Never Drive Role Transitions
-
-After fixing the `wg.Wait()` issue in heartbeats, a second bug surfaced: `sendLogs` was calling `p.becomeFollower()` directly when it saw a higher term in an `AppendEntries` response. This created a three-part failure chain:
-
-1. `sendLogs` called `becomeFollower()`, which started a new election timer — but `heartbeatCtx` was never cancelled, so all `sendLogsPerPeer` goroutines kept running as zombies. The node was simultaneously follower *and* leader.
-2. When the node won the next election and called `becomeLeader()`, it spawned a *second* set of heartbeat goroutines on top of the existing ones. Every leadership cycle added another layer of goroutines that never stopped.
-3. These zombie goroutines kept sending `AppendEntries` RPCs with stale leader state, corrupting follower logs and causing spurious step-downs in an unbounded loop.
-
-**The fix — same pattern as election.go:** child goroutines never drive role transitions directly. `sendLogs` signals a `stepDownCh` channel and returns. `startSendLogs` (the orchestrator) reads that signal, calls `cancel()` to stop all `sendLogsPerPeer` goroutines via context, *then* calls `becomeFollower()` exactly once. One owner, clean shutdown.
-
-The `stepDownCh` buffer is sized to the number of peers. Context cancellation doesn't preempt running code — it only fires at the next `select` or ctx check. So after `startSendLogs` reads the first signal and cancels, other `sendLogs` goroutines that are already past the RPC call can still reach the `stepDownCh <- struct{}{}` line before noticing cancellation. Worst case: all peers respond with a higher term simultaneously — `len(peers)` senders. Buffering all of them means no sender ever blocks. The unread signals are GC'd when `startSendLogs` returns and the channel goes out of scope.
-
-### Startup Quorum Wait
-Before starting the election timer, a node waits for a majority of peers to be reachable. This avoids a window where containers start at slightly different times and trigger spurious elections before the cluster is healthy.
 
 ---
 
