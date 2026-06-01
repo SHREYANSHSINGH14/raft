@@ -8,7 +8,7 @@ import (
 // Propose appends data as a new log entry on the leader. Returns an error if
 // this node is not the current leader.
 func (n *Node) Propose(ctx context.Context, data []byte) error {
-	if n.Role != ServerRole_Leader {
+	if n.GetRole() != ServerRole_Leader {
 		return fmt.Errorf("not the leader: current leader is %q", n.GetLeaderID())
 	}
 
@@ -32,5 +32,14 @@ func (n *Node) Propose(ctx context.Context, data []byte) error {
 		return fmt.Errorf("propose: failed to append log: %w", err)
 	}
 
+	n.commitCond.L.Lock()
+	for n.commitIndex < uint(entry.Index) && ctx.Err() == nil {
+		n.commitCond.Wait()
+	}
+	if ctx.Err() != nil {
+		n.commitCond.L.Unlock()
+		return fmt.Errorf("propose: context cancelled before commit")
+	}
+	n.commitCond.L.Unlock()
 	return nil
 }
