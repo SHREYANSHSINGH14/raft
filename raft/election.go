@@ -170,7 +170,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// responseReceived := 0
 	responsesPending := len(n.cfg.Peers)
 	var majority int = ((len(n.cfg.Peers) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
-	votesReceived := 1                                    // we have already voted for ourselves so we start with 1 vote
+	votesReceived := 1                                  // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {
 		select {
@@ -188,15 +188,16 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 			}
 			if res.rpcRes.VoteGranted && n.GetRole() == ServerRole_Candidate {
 				votesReceived++
-				if votesReceived >= majority {
-					resCh <- ElectionResponse{transitonRole: ServerRole_Leader}
-					return
-				}
 			}
 		}
 	}
 
-	resCh <- ElectionResponse{transitonRole: n.GetRole()}
+	if votesReceived >= majority {
+		resCh <- ElectionResponse{transitonRole: ServerRole_Leader}
+		return
+	}
+	resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
+	return
 }
 
 type responseRequestVote struct {

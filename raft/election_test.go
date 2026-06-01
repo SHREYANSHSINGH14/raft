@@ -81,8 +81,8 @@ func TestElection_ExactMajority_BecomesLeader(t *testing.T) {
 
 // ── follower transitions ──────────────────────────────────────────────────────
 
-// 3. Majority votes no → stays Candidate
-func TestElection_MajorityDenied_StaysCandidate(t *testing.T) {
+// 3. Majority votes no → Follower
+func TestElection_MajorityDenied_BecomesFollower(t *testing.T) {
 	node, _, transport := setupElectionTest(t)
 
 	transport.On(methodRequestVote, mock.Anything, mock.Anything).Return(denyVote(6), nil)
@@ -90,7 +90,7 @@ func TestElection_MajorityDenied_StaysCandidate(t *testing.T) {
 	res := runElection(node)
 
 	assert.NoError(t, res.err)
-	assert.Equal(t, ServerRole_Candidate, res.transitonRole)
+	assert.Equal(t, ServerRole_Follower, res.transitonRole)
 }
 
 // 4. One peer responds with higher term → Follower
@@ -106,8 +106,8 @@ func TestElection_PeerHasHigherTerm_BecomesFollower(t *testing.T) {
 	assert.Equal(t, ServerRole_Follower, res.transitonRole)
 }
 
-// 5. All peers timeout/fail → no majority → stays Candidate
-func TestElection_AllPeersFail_StaysCandidate(t *testing.T) {
+// 5. All peers timeout/fail → no majority → Follower
+func TestElection_AllPeersFail_BecomesFollower(t *testing.T) {
 	node, _, transport := setupElectionTest(t)
 
 	transport.On(methodRequestVote, mock.Anything, mock.Anything).Return(
@@ -117,11 +117,11 @@ func TestElection_AllPeersFail_StaysCandidate(t *testing.T) {
 	res := runElection(node)
 
 	assert.NoError(t, res.err) // election itself didn't error — just got no votes
-	assert.Equal(t, ServerRole_Candidate, res.transitonRole)
+	assert.Equal(t, ServerRole_Follower, res.transitonRole)
 }
 
-// 6. Mixed — some yes, some no, some error → no majority → stays Candidate
-func TestElection_Mixed_NoMajority_StaysCandidate(t *testing.T) {
+// 6. Mixed — some yes, some no, some error → no majority → Follower
+func TestElection_Mixed_NoMajority_BecomesFollower(t *testing.T) {
 	node, _, transport := setupElectionTest(t)
 
 	transport.On(methodRequestVote, "node-2", mock.Anything).Return(grantVote(6), nil)
@@ -134,7 +134,7 @@ func TestElection_Mixed_NoMajority_StaysCandidate(t *testing.T) {
 	res := runElection(node)
 
 	assert.NoError(t, res.err)
-	assert.Equal(t, ServerRole_Candidate, res.transitonRole)
+	assert.Equal(t, ServerRole_Follower, res.transitonRole)
 }
 
 // ── pre-condition failures ────────────────────────────────────────────────────
