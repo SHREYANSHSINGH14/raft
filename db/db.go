@@ -14,6 +14,7 @@ import (
 const (
 	CurrentTermKey = "current_term"
 	VotedForKey    = "voted_for"
+	LastAppliedKey = "last_applied"
 	LogPrefix      = "log:"
 )
 
@@ -50,6 +51,10 @@ func fromProto(p *types.LogEntry) raft.LogEntry {
 		Data:  p.Data,
 	}
 }
+
+// LastApplied
+func (s *Store) SetLastApplied(_ context.Context, _ uint) error { return nil }
+func (s *Store) GetLastApplied(_ context.Context) (uint, error) { return 0, nil }
 
 // Current Term
 func (s *Store) SetCurrentTerm(ctx context.Context, term uint) error {

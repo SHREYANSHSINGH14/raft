@@ -56,6 +56,22 @@ func (m *MockStore) GetVotedFor(ctx context.Context) (string, error) {
 	return args.String(0), args.Error(1)
 }
 
+// ── LastApplied ───────────────────────────────────────────────────────────────
+
+func (m *MockStore) SetLastApplied(ctx context.Context, term uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx, term)
+	return args.Error(0)
+}
+
+func (m *MockStore) GetLastApplied(ctx context.Context) (uint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx)
+	return args.Get(0).(uint), args.Error(1)
+}
+
 // ── Logs ─────────────────────────────────────────────────────────────────────
 
 func (m *MockStore) AppendLogs(ctx context.Context, logs []raft.LogEntry) error {
@@ -162,6 +178,25 @@ func indexFromLogKey(k string) (uint64, error) {
 		return 0, fmt.Errorf("malformed log key")
 	}
 	return binary.BigEndian.Uint64([]byte(raw)), nil
+}
+
+// ── LastApplied ───────────────────────────────────────────────────────────────
+
+func (m *MockKVStore) SetLastApplied(_ context.Context, term uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.set([]byte(LastAppliedKey), uintToBytes(term))
+	return nil
+}
+
+func (m *MockKVStore) GetLastApplied(_ context.Context) (uint, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.get([]byte(LastAppliedKey))
+	if !ok {
+		return 0, nil
+	}
+	return bytesToUint(v)
 }
 
 // ── Current Term ─────────────────────────────────────────────────────────────
