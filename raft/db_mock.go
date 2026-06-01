@@ -44,6 +44,20 @@ func (m *MockStorage) GetVotedFor(ctx context.Context) (string, error) {
 	return args.String(0), args.Error(1)
 }
 
+func (m *MockStorage) SetLastApplied(ctx context.Context, term uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx, term)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetLastApplied(ctx context.Context) (uint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx)
+	return args.Get(0).(uint), args.Error(1)
+}
+
 func (m *MockStorage) AppendLogs(ctx context.Context, entries []LogEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,6 +117,7 @@ type MemStorage struct {
 	mu          sync.RWMutex
 	currentTerm uint
 	votedFor    string
+	lastApplied uint
 	logs        []LogEntry // maintained in ascending Index order
 }
 
@@ -123,6 +138,19 @@ func (m *MemStorage) GetCurrentTerm(_ context.Context) (uint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentTerm, nil
+}
+
+func (m *MemStorage) SetLastApplied(_ context.Context, term uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastApplied = term
+	return nil
+}
+
+func (m *MemStorage) GetLastApplied(_ context.Context) (uint, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastApplied, nil
 }
 
 func (m *MemStorage) SetVotedFor(_ context.Context, id string) error {

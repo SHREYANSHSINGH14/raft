@@ -47,8 +47,8 @@ func (n *Node) SetNextPeerIndex(id string, idx uint) {
 	if !ok {
 		peer = nodeIndexes{}
 	}
-	peer.nextIndex = idx    // modify
-	n.nodeIdxs[id] = peer  // write back
+	peer.nextIndex = idx  // modify
+	n.nodeIdxs[id] = peer // write back
 }
 
 func (n *Node) SetMatchPeerIndex(id string, idx uint) {
@@ -64,17 +64,19 @@ func (n *Node) SetMatchPeerIndex(id string, idx uint) {
 }
 
 func (n *Node) SetCommitIndex(idx uint) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.commitCond.L.Lock()
+	defer n.commitCond.L.Unlock()
 	if idx < n.commitIndex {
 		return
 	}
 	n.commitIndex = idx
+
+	n.commitCond.Broadcast()
 }
 
 func (n *Node) GetCommitIndex() uint {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.commitCond.L.Lock()
+	defer n.commitCond.L.Unlock()
 
 	return n.commitIndex
 }

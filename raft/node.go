@@ -39,6 +39,26 @@ type Node struct {
 	nodeIdxs map[string]nodeIndexes
 
 	mu sync.Mutex
+	// commitMu guards commitIndex reads/writes in the apply loop and Propose waiters.
+	// Kept separate from mu because sync.Cond.Wait() holds its lock while sleeping —
+	// if commitCond used mu, the apply loop sleeping in Wait() would block every
+	// internal goroutine that needs mu (election, heartbeat, role transitions).
+	// SetCommitIndex updates commitIndex under mu, then broadcasts on commitCond
+	// without holding mu — the two mutexes are intentionally independent.
+	commitMu sync.Mutex
+
+	// commitCond notifies the apply loop and Propose waiters when commitIndex advances.
+	// Wait() must be called with commitMu held. Internally, sync.Cond maintains a list
+	// of blocked goroutines — shared memory. Before sleeping, a goroutine must register
+	// itself on that list, which is the "ticket". The lock ensures ticket assignment and
+	// lock release are atomic — if they weren't, a Signal() or Broadcast() could fire
+	// after the goroutine decided to wait but before it got its ticket. The goroutine
+	// would be on no list, Signal() or Broadcast() would walk the list and miss it,
+	// and it would sleep forever with nothing to wake it. By holding the lock during
+	// ticket assignment, we guarantee: by the time Signal() or Broadcast() walk the
+	// waiter list, any goroutine that decided to wait is already registered on it.
+	// Signal() and Broadcast() themselves require no lock — they only read the list.
+	commitCond sync.Cond
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -49,7 +69,7 @@ type Node struct {
 }
 
 func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) *Node {
-	return &Node{
+	node := Node{
 		ID:                cfg.ID,
 		Role:              ServerRole_Follower,
 		transport:         transport,
@@ -61,7 +81,12 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 		nodeIdxs:          nil,
 		LeaderID:          "",
 		electionTimeoutCh: make(chan struct{}, 2),
+		mu:                sync.Mutex{},
+		commitMu:          sync.Mutex{},
 	}
+
+	node.commitCond = *sync.NewCond(&node.commitMu)
+	return &node
 }
 
 // Start initialises persistent state if missing, waits for quorum, then begins
@@ -97,6 +122,7 @@ func (n *Node) Start(ctx context.Context) {
 	n.waitForQuorum(n.ctx)
 
 	n.startElectionOut(n.ctx)
+	n.startApplyLoop(n.ctx)
 
 	<-n.ctx.Done()
 }

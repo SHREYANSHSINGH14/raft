@@ -13,7 +13,9 @@ type Transport interface {
 // StateMachine is implemented by the caller. The library calls Apply after a
 // log entry reaches commit index and is ready to be applied to the caller's state.
 type StateMachine interface {
-	Apply(entry LogEntry) error
+	// Implementation has to be idempotent and durable otherwise it can diverge
+	// lastApplied index
+	Apply(entries []LogEntry) error
 }
 
 // Storage is implemented by the caller. The library calls it for all persistence
@@ -24,6 +26,9 @@ type Storage interface {
 
 	SetVotedFor(ctx context.Context, id string) error
 	GetVotedFor(ctx context.Context) (string, error)
+
+	SetLastApplied(ctx context.Context, term uint) error
+	GetLastApplied(ctx context.Context) (uint, error)
 
 	AppendLogs(ctx context.Context, entries []LogEntry) error
 	GetLogs(ctx context.Context, start, end *uint) ([]LogEntry, error)
