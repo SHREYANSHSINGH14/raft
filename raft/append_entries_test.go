@@ -20,7 +20,7 @@ const (
 
 func TestAppendEntries_EmptyLeaderID(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
 		LeaderID: "   ",
@@ -36,7 +36,7 @@ func TestAppendEntries_EmptyLeaderID(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetCurrentTerm(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), errors.New("db error"))
 
@@ -55,7 +55,7 @@ func TestAppendEntries_DBErr_GetCurrentTerm(t *testing.T) {
 
 func TestAppendEntries_TermLessThanCurrent(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -77,7 +77,7 @@ func TestAppendEntries_TermLessThanCurrent(t *testing.T) {
 
 func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -105,7 +105,7 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 
 func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
@@ -135,7 +135,7 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 
 func TestAppendEntries_DBErr_SetCurrentTerm(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(errors.New("db error"))
@@ -155,7 +155,7 @@ func TestAppendEntries_DBErr_SetCurrentTerm(t *testing.T) {
 
 func TestAppendEntries_DBErr_SetVotedForReset(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
@@ -176,7 +176,7 @@ func TestAppendEntries_DBErr_SetVotedForReset(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetLogByIndex(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{}, errors.New("db error"))
@@ -197,7 +197,7 @@ func TestAppendEntries_DBErr_GetLogByIndex(t *testing.T) {
 
 func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -224,7 +224,7 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 
 func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -248,7 +248,7 @@ func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 
 func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
@@ -271,7 +271,7 @@ func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
 
 func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -300,7 +300,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 
 func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	entries := []LogEntry{{Index: 4, Term: 5}}
 
@@ -327,7 +327,7 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 
 func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.commitIndex = 5
 	ctx := context.Background()
 
@@ -356,7 +356,7 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 
 func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.commitIndex = 2
 	ctx := context.Background()
 
@@ -385,7 +385,7 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 
 func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.commitIndex = 2
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -411,7 +411,7 @@ func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 
 func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.LeaderID = "old-leader"
 	ctx := context.Background()
 
@@ -439,7 +439,7 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 
 func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -466,7 +466,7 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 
 func TestAppendEntries_HappyPath(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.commitIndex = 2
 	ctx := context.Background()
 
@@ -506,7 +506,7 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 
 func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -537,7 +537,7 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 
 func TestAppendEntries_PrevLogIndexNonZero_NotFound_ReturnsFalse(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)

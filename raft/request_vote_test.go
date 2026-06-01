@@ -21,7 +21,7 @@ const (
 
 func TestRequestVote_EmptyCandidateID(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	_, err := node.HandleRequestVote(context.Background(), RequestVoteArgs{
 		CandidateID: "   ",
@@ -35,7 +35,7 @@ func TestRequestVote_EmptyCandidateID(t *testing.T) {
 
 func TestRequestVote_TermLessThanCurrent(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -55,7 +55,7 @@ func TestRequestVote_TermLessThanCurrent(t *testing.T) {
 
 func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
@@ -82,7 +82,7 @@ func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 
 func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -110,7 +110,7 @@ func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 
 func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -134,7 +134,7 @@ func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 
 func TestRequestVote_AlreadyVotedForDifferentCandidate(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -154,7 +154,7 @@ func TestRequestVote_AlreadyVotedForDifferentCandidate(t *testing.T) {
 
 func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -178,7 +178,7 @@ func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 
 func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -201,7 +201,7 @@ func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 
 func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -224,7 +224,7 @@ func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 
 func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -248,7 +248,7 @@ func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 
 func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
@@ -273,7 +273,7 @@ func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 // 14. GetCurrentTerm fails
 func TestRequestVote_DBErr_GetCurrentTerm(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), errors.New("db error"))
 
@@ -289,7 +289,7 @@ func TestRequestVote_DBErr_GetCurrentTerm(t *testing.T) {
 // 15. SetCurrentTerm fails (when term update needed)
 func TestRequestVote_DBErr_SetCurrentTerm(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(errors.New("db error"))
@@ -306,7 +306,7 @@ func TestRequestVote_DBErr_SetCurrentTerm(t *testing.T) {
 // 16. SetVotedFor("") fails (reset after term update)
 func TestRequestVote_DBErr_SetVotedForReset(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
@@ -324,7 +324,7 @@ func TestRequestVote_DBErr_SetVotedForReset(t *testing.T) {
 // 17. GetVotedFor fails
 func TestRequestVote_DBErr_GetVotedFor(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", errors.New("db error"))
@@ -341,7 +341,7 @@ func TestRequestVote_DBErr_GetVotedFor(t *testing.T) {
 // 18. GetLastLogEntry fails
 func TestRequestVote_DBErr_GetLastLogEntry(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
@@ -359,7 +359,7 @@ func TestRequestVote_DBErr_GetLastLogEntry(t *testing.T) {
 // 19. SetVotedFor(candidateID) fails (final vote persist)
 func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
@@ -384,7 +384,7 @@ func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 
 func TestRequestVote_ZeroValueLastLog_CandidateAhead_AllowVote(t *testing.T) {
 	store := new(MockStorage)
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)

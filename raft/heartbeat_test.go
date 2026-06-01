@@ -20,7 +20,7 @@ func setupSendLogsTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
 	store.SetCurrentTerm(context.Background(), 5)
 
 	transport := NewMockTransport()
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	node.transport = transport
 	node.Role = ServerRole_Leader
 
@@ -462,7 +462,7 @@ func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	// self + node-2 + node-3 = 3 = majority of 5, all at index 2
 	node.nodeIdxs["node-2"] = nodeIndexes{matchIndex: 2}
 	node.nodeIdxs["node-3"] = nodeIndexes{matchIndex: 2}
@@ -492,7 +492,7 @@ func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing
 		{Index: 1, Term: 4, Data: []byte("cmd-1")},
 	})
 
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	// all peers have replicated index 1 — majority achieved
 	for _, id := range node.cfg.Peers {
 		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
@@ -520,7 +520,7 @@ func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 	// only self has the log — no peer has replicated it
 	for _, id := range node.cfg.Peers {
 		node.nodeIdxs[id] = nodeIndexes{matchIndex: 0}
@@ -549,7 +549,7 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 
-	node := NewNodeMock(mockStore)
+	node := NewNodeMock(mockStore, nil)
 	for _, id := range node.cfg.Peers {
 		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
 	}
@@ -579,7 +579,7 @@ func TestStartCommitIndexUpdater_ContextCancelled_Exits(t *testing.T) {
 	store := NewMemStorage()
 	store.SetCurrentTerm(context.Background(), 5)
 
-	node := NewNodeMock(store)
+	node := NewNodeMock(store, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

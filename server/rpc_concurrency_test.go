@@ -14,7 +14,7 @@ import (
 
 func newConcurrentTestServer(store raft.Storage) *Server {
 	return &Server{
-		Node: raft.NewNodeMock(store),
+		Node: raft.NewNodeMock(store, nil),
 	}
 }
 

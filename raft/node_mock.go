@@ -1,6 +1,10 @@
 package raft
 
-import "github.com/stretchr/testify/mock"
+import (
+	"sync"
+
+	"github.com/stretchr/testify/mock"
+)
 
 type MockTransport struct {
 	mock.Mock
@@ -22,11 +26,12 @@ func NewMockTransport() *MockTransport {
 	return &MockTransport{}
 }
 
-func NewNodeMock(store Storage) *Node {
-	return &Node{
+func NewNodeMock(store Storage, sm StateMachine) *Node {
+	node := &Node{
 		ID:    "node-1",
 		Role:  ServerRole_Follower,
 		store: store,
+		sm:    sm,
 		cfg: Config{
 			ID:            "node-1",
 			Peers:         []string{"node-2", "node-3", "node-4", "node-5"},
@@ -45,4 +50,6 @@ func NewNodeMock(store Storage) *Node {
 			"node-5": {nextIndex: 1, matchIndex: 0},
 		},
 	}
+	node.commitCond = *sync.NewCond(&node.commitMu)
+	return node
 }
