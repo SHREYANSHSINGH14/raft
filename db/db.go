@@ -357,6 +357,10 @@ func (s *Store) TruncateLogs(ctx context.Context, startIdx uint) error {
 	return nil
 }
 
+func (s *Store) CompactLogs(ctx context.Context, upToIdx uint) error {
+	return nil
+}
+
 // upperBound takes a key prefix and returns the smallest key that is
 // guaranteed to be greater than all keys sharing that prefix.
 //

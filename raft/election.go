@@ -133,7 +133,9 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		lastLogTerm = lastLog.Term
 	}
 
-	requestVoteResponses := make(chan responseRequestVote, len(n.cfg.Peers))
+	peerIDs := n.peerIDs()
+
+	requestVoteResponses := make(chan responseRequestVote, len(peerIDs))
 	// defer close(requestVoteResponses)
 	// 1. closing is the sender's responsibility, and there are multiple senders (one goroutine
 	//    per peer) — no single goroutine can safely close without coordinating with others,
@@ -160,7 +162,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// ctx.Done(). this way, when cancel() is called, the goroutine exits immediately from the select
 	// without ever trying to send on resCh — so no leak, no blocking, no cascading term explosion.
 
-	for _, id := range n.cfg.Peers {
+	for _, id := range peerIDs {
 		// wg.Add(1)
 		go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
 	}
@@ -168,8 +170,8 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// wg.Wait()
 
 	// responseReceived := 0
-	responsesPending := len(n.cfg.Peers)
-	var majority int = ((len(n.cfg.Peers) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
+	responsesPending := len(peerIDs)
+	var majority int = ((len(peerIDs) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
 	votesReceived := 1                                  // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {

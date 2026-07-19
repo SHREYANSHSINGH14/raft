@@ -90,6 +90,13 @@ func (m *MockStorage) TruncateLogs(ctx context.Context, fromIdx uint) error {
 	return args.Error(0)
 }
 
+func (m *MockStorage) CompactLogs(ctx context.Context, upToIdx uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx, upToIdx)
+	return args.Error(0)
+}
+
 func (m *MockStorage) GetLastLogEntry(ctx context.Context) (LogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -209,6 +216,19 @@ func (m *MemStorage) TruncateLogs(_ context.Context, fromIdx uint) error {
 			return nil
 		}
 	}
+	return nil
+}
+
+func (m *MemStorage) CompactLogs(_ context.Context, upToIdx uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, e := range m.logs {
+		if uint(e.Index) > upToIdx {
+			m.logs = m.logs[i:]
+			return nil
+		}
+	}
+	m.logs = m.logs[:0]
 	return nil
 }
 

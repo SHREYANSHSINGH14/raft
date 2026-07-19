@@ -42,12 +42,14 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	// worst case: all peers respond with higher term simultaneously — len(peers) senders.
 	// buffering all of them means no sender ever blocks. the unread signals are GC'd when
 	// startSendLogs returns and the channel goes out of scope.
-	stepDownCh := make(chan struct{}, len(n.cfg.Peers))
-	updateCommitIndexCh := make(chan struct{}, len(n.cfg.Peers))
+	peerIDs := n.peerIDs()
 
-	started := make(chan struct{}, len(n.cfg.Peers))
+	stepDownCh := make(chan struct{}, len(peerIDs))
+	updateCommitIndexCh := make(chan struct{}, len(peerIDs))
 
-	for _, k := range n.cfg.Peers {
+	started := make(chan struct{}, len(peerIDs))
+
+	for _, k := range peerIDs {
 		go func(id string) {
 			started <- struct{}{}
 			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
@@ -55,7 +57,7 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	}
 
 	// drain and count — blocks until all goroutines have actually started
-	for i := 0; i < len(n.cfg.Peers); i++ {
+	for i := 0; i < len(peerIDs); i++ {
 		<-started
 	}
 
@@ -96,7 +98,7 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 				continue
 			}
 
-			commitIndex := getMajorityMatchIndex(n.nodeIdxs, lastLogIndex)
+			commitIndex := getMajorityMatchIndex(n.peersSnapshot(), lastLogIndex)
 			if commitIndex == 0 {
 
 				continue
@@ -157,7 +159,7 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		return
 	}
 
-	nextIdx := n.GetPeerIndex(peerID).nextIndex
+	nextIdx := n.GetPeerIndex(peerID).NextIndex
 
 	var prevLog LogEntry
 	if nextIdx > 1 {
@@ -202,14 +204,14 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	if res.Success {
 		if peerLogLen > 0 {
-			currentNext := n.GetPeerIndex(peerID).nextIndex
+			currentNext := n.GetPeerIndex(peerID).NextIndex
 			n.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
 			n.SetNextPeerIndex(peerID, currentNext+peerLogLen)
 			updateCommitIndexCh <- struct{}{}
 		}
 		// peerLogLen == 0 means pure heartbeat — follower is consistent, nothing to advance
 	} else {
-		currentNext := n.GetPeerIndex(peerID).nextIndex
+		currentNext := n.GetPeerIndex(peerID).NextIndex
 		if currentNext > 1 {
 			n.SetNextPeerIndex(peerID, currentNext-1)
 		}
@@ -238,11 +240,11 @@ func (n *Node) sendAppendLogs(ctx context.Context, peerID string, currentTerm, p
 // So matchIndexes[majorityCount-1] is the highest index replicated on a majority of servers.
 // Example 1 (no duplicates): n2:5, n3:3, n4:4, n5:6, self:7 → sorted [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 // Example 2 (with duplicates): n2:6, n3:5, n4:6, n5:5, self:7 → sorted [7,6,6,5,5], majorityCount=3 → matchIndexes[2]=6
-func getMajorityMatchIndex(nodeIdxs map[string]nodeIndexes, selfLastIndex uint) uint {
+func getMajorityMatchIndex(peers map[string]Peer, selfLastIndex uint) uint {
 	var matchIndexes []uint
 
-	for _, peer := range nodeIdxs {
-		matchIndexes = append(matchIndexes, peer.matchIndex)
+	for _, peer := range peers {
+		matchIndexes = append(matchIndexes, peer.MatchIndex)
 	}
 
 	matchIndexes = append(matchIndexes, selfLastIndex)
@@ -256,6 +258,6 @@ func getMajorityMatchIndex(nodeIdxs map[string]nodeIndexes, selfLastIndex uint) 
 		return 0
 	})
 
-	majorityCount := (len(nodeIdxs)+1)/2 + 1 // +1 is for self
+	majorityCount := (len(peers)+1)/2 + 1 // +1 is for self
 	return matchIndexes[majorityCount-1]
 }

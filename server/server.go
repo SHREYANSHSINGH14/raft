@@ -58,9 +58,9 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, fmt.Errorf("error creating transport: %w", err)
 	}
 
-	peers := make([]string, 0, len(cfg.ServerIDS))
+	peers := make(map[string]raft.Peer, len(cfg.ServerIDS))
 	for id := range cfg.ServerIDS {
-		peers = append(peers, id)
+		peers[id] = raft.Peer{PeerState: raft.PeerState_Voter}
 	}
 
 	raftCfg := raft.Config{

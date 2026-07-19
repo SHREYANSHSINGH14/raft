@@ -31,7 +31,6 @@ func (n *Node) becomeLeader() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
 	n.SetRole(ServerRole_Leader)
 	n.SetLeaderID("")
-	n.nodeIdxs = make(map[string]nodeIndexes)
 
 	lastIndex, err := n.store.GetLastLogIndex(n.ctx)
 	if err != nil {
@@ -40,12 +39,14 @@ func (n *Node) becomeLeader() {
 		return
 	}
 
-	for _, id := range n.cfg.Peers {
-		n.nodeIdxs[id] = nodeIndexes{
-			nextIndex:  lastIndex + 1,
-			matchIndex: 0,
-		}
+	n.mu.Lock()
+	for id, peer := range n.cfg.Peers {
+		peer.NextIndex = lastIndex + 1
+		peer.MatchIndex = 0
+		n.cfg.Peers[id] = peer
 	}
+	n.mu.Unlock()
+
 	n.startSendLogs(n.ctx)
 }
 
@@ -111,7 +112,7 @@ func (n *Node) waitForQuorum(ctx context.Context) {
 		}
 
 		reachable := 0
-		for _, peerID := range n.cfg.Peers {
+		for _, peerID := range n.peerIDs() {
 			// ping each peer with a real RequestVote — if it responds (even rejection) the connection is up
 			_, err := n.transport.RequestVote(peerID, RequestVoteArgs{
 				CandidateID: n.ID,

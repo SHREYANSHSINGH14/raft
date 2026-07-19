@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 )
@@ -15,11 +16,6 @@ const (
 	ServerRole_Candidate ServerRole = "CANDIDATE"
 	ServerRole_Leader    ServerRole = "LEADER"
 )
-
-type nodeIndexes struct {
-	nextIndex  uint
-	matchIndex uint
-}
 
 // Node is the library entry point. Create one with NewNode, then call Start.
 type Node struct {
@@ -35,9 +31,6 @@ type Node struct {
 	commitIndex uint
 	lastApplied uint
 
-	// only populated when Role == Leader
-	nodeIdxs map[string]nodeIndexes
-
 	mu sync.Mutex
 	// commitMu guards commitIndex reads/writes in the apply loop and Propose waiters.
 	// Kept separate from mu because sync.Cond.Wait() holds its lock while sleeping —
@@ -46,6 +39,9 @@ type Node struct {
 	// SetCommitIndex updates commitIndex under mu, then broadcasts on commitCond
 	// without holding mu — the two mutexes are intentionally independent.
 	commitMu sync.Mutex
+
+	// clientMu guards exposed methods that may be called concurrently by users of the library, like Propose, HandleAppendEntries, and HandleRequestVote. This is separate from mu because it doesn't need to be held for internal operations like the election timer or apply loop, and we want to avoid unnecessary blocking of those.
+	clientMu sync.Mutex
 
 	// commitCond notifies the apply loop and Propose waiters when commitIndex advances.
 	// Wait() must be called with commitMu held. Internally, sync.Cond maintains a list
@@ -66,6 +62,10 @@ type Node struct {
 	// signals the election-timeout goroutine to reset its timer when a valid
 	// leader heartbeat or granted vote is received.
 	electionTimeoutCh chan struct{}
+
+	// when statemachine is taking a snapshot, this flag is set to prevent apply loop from applying new entries and
+	//potentially diverging lastApplied index from the snapshot index
+	snapShotInProgress atomic.Bool
 }
 
 func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) *Node {
@@ -78,11 +78,11 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 		cfg:               cfg,
 		commitIndex:       0,
 		lastApplied:       0,
-		nodeIdxs:          nil,
 		LeaderID:          "",
 		electionTimeoutCh: make(chan struct{}, 2),
 		mu:                sync.Mutex{},
 		commitMu:          sync.Mutex{},
+		clientMu:          sync.Mutex{},
 	}
 
 	node.commitCond = *sync.NewCond(&node.commitMu)

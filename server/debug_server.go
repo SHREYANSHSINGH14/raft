@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/SHREYANSHSINGH14/raft/raft"
 	"github.com/rs/zerolog"
 )
 
@@ -49,7 +50,7 @@ func (d *DebugServer) handleAppendLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := d.server.Node.Propose(context.Background(), []byte(req.Data))
+	err := d.server.Node.Propose(context.Background(), raft.EntryType_Command, []byte(req.Data))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, AppendLogsDebugResponse{
 			Success:  false,

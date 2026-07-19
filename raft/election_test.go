@@ -26,8 +26,10 @@ func setupElectionTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
 		Role:  ServerRole_Candidate,
 		store: store,
 		cfg: Config{
-			ID:    "node-1",
-			Peers: []string{"node-2", "node-3", "node-4", "node-5"},
+			ID: "node-1",
+			Peers: map[string]Peer{
+				"node-2": {}, "node-3": {}, "node-4": {}, "node-5": {},
+			},
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
 		transport:         transport,
@@ -162,7 +164,7 @@ func TestElection_DBErr_GetCurrentTerm(t *testing.T) {
 		Role:              ServerRole_Candidate,
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
-		cfg:               Config{Peers: []string{}},
+		cfg:               Config{Peers: map[string]Peer{}},
 	}
 
 	res := runElection(node)
@@ -181,7 +183,7 @@ func TestElection_DBErr_SetCurrentTerm(t *testing.T) {
 		Role:              ServerRole_Candidate,
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
-		cfg:               Config{Peers: []string{}},
+		cfg:               Config{Peers: map[string]Peer{}},
 	}
 
 	res := runElection(node)
@@ -201,7 +203,7 @@ func TestElection_DBErr_SetVotedFor(t *testing.T) {
 		Role:              ServerRole_Candidate,
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
-		cfg:               Config{Peers: []string{}},
+		cfg:               Config{Peers: map[string]Peer{}},
 	}
 
 	res := runElection(node)
@@ -222,7 +224,7 @@ func TestElection_DBErr_GetLastLogIndex(t *testing.T) {
 		Role:              ServerRole_Candidate,
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
-		cfg:               Config{Peers: []string{}},
+		cfg:               Config{Peers: map[string]Peer{}},
 	}
 
 	res := runElection(node)
@@ -244,7 +246,7 @@ func TestElection_DBErr_GetLogByIndex(t *testing.T) {
 		Role:              ServerRole_Candidate,
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
-		cfg:               Config{Peers: []string{}},
+		cfg:               Config{Peers: map[string]Peer{}},
 	}
 
 	res := runElection(node)

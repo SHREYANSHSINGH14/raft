@@ -8,7 +8,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// NOTE: This method is thread safe and can be called concurrently by multiple callers
 func (n *Node) HandleRequestVote(ctx context.Context, args RequestVoteArgs) (RequestVoteResponse, error) {
+	n.clientMu.Lock()
+	defer n.clientMu.Unlock()
+
 	if strings.TrimSpace(args.CandidateID) == "" {
 		err := fmt.Errorf("candidate id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("candidate id is empty")

@@ -34,13 +34,19 @@ func setupSendLogsTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
 // the role transition, but that path is not exercised here).
 func runSendLogs(n *Node) (bool, error) {
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(n.cfg.Peers))
+
+	// snapshot the peer IDs before fanning out — sendLogs calls SetMatchPeerIndex/
+	// SetNextPeerIndex, which write to n.cfg.Peers. Ranging the live map here would
+	// race with those writes. This is why production uses n.peerIDs(), not the map.
+	peerIDs := n.peerIDs()
+
+	errCh := make(chan error, len(peerIDs))
 
 	// mirror the production buffer size — all peers could signal step-down simultaneously
-	stepDownCh := make(chan struct{}, len(n.cfg.Peers))
-	updateCommitIndexCh := make(chan struct{}, len(n.cfg.Peers))
+	stepDownCh := make(chan struct{}, len(peerIDs))
+	updateCommitIndexCh := make(chan struct{}, len(peerIDs))
 
-	for _, peerID := range n.cfg.Peers {
+	for _, peerID := range peerIDs {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
@@ -102,10 +108,10 @@ func TestSendLogs_LogsSentBasedOnNextIndex(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	node.nodeIdxs["node-2"] = nodeIndexes{nextIndex: 2, matchIndex: 1}
-	node.nodeIdxs["node-3"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
-	node.nodeIdxs["node-4"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
-	node.nodeIdxs["node-5"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
+	node.cfg.Peers["node-2"] = Peer{NextIndex: 2, MatchIndex: 1}
+	node.cfg.Peers["node-3"] = Peer{NextIndex: 1, MatchIndex: 0}
+	node.cfg.Peers["node-4"] = Peer{NextIndex: 1, MatchIndex: 0}
+	node.cfg.Peers["node-5"] = Peer{NextIndex: 1, MatchIndex: 0}
 
 	transport.On(methodAppendEntries, "node-2", mock.MatchedBy(func(args AppendEntriesArgs) bool {
 		return len(args.Entries) == 2 && args.Entries[0].Index == 2
@@ -151,8 +157,8 @@ func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{nextIndex: 3, matchIndex: 2}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{NextIndex: 3, MatchIndex: 2}
 	}
 
 	transport.On(methodAppendEntries, mock.Anything, mock.MatchedBy(func(args AppendEntriesArgs) bool {
@@ -179,10 +185,10 @@ func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
 	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for _, id := range node.cfg.Peers {
-		assert.Equal(t, uint(3), node.GetPeerIndex(id).nextIndex,
+	for id := range node.cfg.Peers {
+		assert.Equal(t, uint(3), node.GetPeerIndex(id).NextIndex,
 			"nextIndex should advance to 3 for %s", id)
-		assert.Equal(t, uint(2), node.GetPeerIndex(id).matchIndex,
+		assert.Equal(t, uint(2), node.GetPeerIndex(id).MatchIndex,
 			"matchIndex should be 2 for %s", id)
 	}
 }
@@ -196,8 +202,8 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{nextIndex: 2, matchIndex: 0}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{NextIndex: 2, MatchIndex: 0}
 	}
 
 	transport.On(methodAppendEntries, mock.Anything, mock.Anything).Return(failResponse(), nil)
@@ -205,10 +211,10 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for _, id := range node.cfg.Peers {
-		assert.Equal(t, uint(1), node.GetPeerIndex(id).nextIndex,
+	for id := range node.cfg.Peers {
+		assert.Equal(t, uint(1), node.GetPeerIndex(id).NextIndex,
 			"nextIndex should decrement to 1 for %s", id)
-		assert.Equal(t, uint(0), node.GetPeerIndex(id).matchIndex,
+		assert.Equal(t, uint(0), node.GetPeerIndex(id).MatchIndex,
 			"matchIndex should stay 0 for %s", id)
 	}
 }
@@ -223,8 +229,8 @@ func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{nextIndex: 2, matchIndex: 1}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{NextIndex: 2, MatchIndex: 1}
 	}
 
 	transport.On(methodAppendEntries, "node-2", mock.Anything).Return(successResponse(), nil)
@@ -235,11 +241,11 @@ func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
 	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	assert.Equal(t, uint(3), node.GetPeerIndex("node-2").nextIndex)
-	assert.Equal(t, uint(2), node.GetPeerIndex("node-2").matchIndex)
-	assert.Equal(t, uint(1), node.GetPeerIndex("node-3").nextIndex)
-	assert.Equal(t, uint(1), node.GetPeerIndex("node-4").nextIndex)
-	assert.Equal(t, uint(1), node.GetPeerIndex("node-5").nextIndex)
+	assert.Equal(t, uint(3), node.GetPeerIndex("node-2").NextIndex)
+	assert.Equal(t, uint(2), node.GetPeerIndex("node-2").MatchIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-3").NextIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-4").NextIndex)
+	assert.Equal(t, uint(1), node.GetPeerIndex("node-5").NextIndex)
 }
 
 // ── 7. Heartbeat — no logs to send ───────────────────────────────────────────
@@ -288,10 +294,10 @@ func TestSendLogs_MixedHeartbeatAndLogs(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	node.nodeIdxs["node-2"] = nodeIndexes{nextIndex: 4, matchIndex: 3}
-	node.nodeIdxs["node-3"] = nodeIndexes{nextIndex: 1, matchIndex: 0}
-	node.nodeIdxs["node-4"] = nodeIndexes{nextIndex: 2, matchIndex: 1}
-	node.nodeIdxs["node-5"] = nodeIndexes{nextIndex: 3, matchIndex: 2}
+	node.cfg.Peers["node-2"] = Peer{NextIndex: 4, MatchIndex: 3}
+	node.cfg.Peers["node-3"] = Peer{NextIndex: 1, MatchIndex: 0}
+	node.cfg.Peers["node-4"] = Peer{NextIndex: 2, MatchIndex: 1}
+	node.cfg.Peers["node-5"] = Peer{NextIndex: 3, MatchIndex: 2}
 
 	transport.On(methodAppendEntries, "node-2", mock.MatchedBy(func(args AppendEntriesArgs) bool {
 		return len(args.Entries) == 0
@@ -325,12 +331,9 @@ func TestSendLogs_DBErr_GetCurrentTerm(t *testing.T) {
 		Role:  ServerRole_Leader,
 		store: mockStore,
 		cfg: Config{
-			Peers: []string{"node-2"},
+			Peers: map[string]Peer{"node-2": {NextIndex: 1, MatchIndex: 0}},
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
-		nodeIdxs: map[string]nodeIndexes{
-			"node-2": {nextIndex: 1, matchIndex: 0},
-		},
 	}
 
 	_, err := runSendLogs(node)
@@ -349,12 +352,9 @@ func TestSendLogs_DBErr_GetLogByIndex(t *testing.T) {
 		Role:  ServerRole_Leader,
 		store: mockStore,
 		cfg: Config{
-			Peers: []string{"node-2"},
+			Peers: map[string]Peer{"node-2": {NextIndex: 2, MatchIndex: 1}},
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
-		nodeIdxs: map[string]nodeIndexes{
-			"node-2": {nextIndex: 2, matchIndex: 1},
-		},
 	}
 
 	_, err := runSendLogs(node)
@@ -375,12 +375,9 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 		Role:  ServerRole_Leader,
 		store: mockStore,
 		cfg: Config{
-			Peers: []string{"node-2"},
+			Peers: map[string]Peer{"node-2": {NextIndex: 1, MatchIndex: 0}},
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
-		nodeIdxs: map[string]nodeIndexes{
-			"node-2": {nextIndex: 1, matchIndex: 0},
-		},
 	}
 
 	_, err := runSendLogs(node)
@@ -400,43 +397,43 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 // sorted desc: [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 
 func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
-	nodeIdxs := map[string]nodeIndexes{
-		"node-2": {matchIndex: 5},
-		"node-3": {matchIndex: 3},
-		"node-4": {matchIndex: 4},
-		"node-5": {matchIndex: 6},
+	peers := map[string]Peer{
+		"node-2": {MatchIndex: 5},
+		"node-3": {MatchIndex: 3},
+		"node-4": {MatchIndex: 4},
+		"node-5": {MatchIndex: 6},
 	}
 
-	result := getMajorityMatchIndex(nodeIdxs, 7)
+	result := getMajorityMatchIndex(peers, 7)
 	assert.Equal(t, uint(5), result)
 }
 
 // ── 14. No majority → returns 0 ───────────────────────────────────────────────
 
 func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
-	nodeIdxs := map[string]nodeIndexes{
-		"node-2": {matchIndex: 0},
-		"node-3": {matchIndex: 0},
-		"node-4": {matchIndex: 0},
-		"node-5": {matchIndex: 0},
+	peers := map[string]Peer{
+		"node-2": {MatchIndex: 0},
+		"node-3": {MatchIndex: 0},
+		"node-4": {MatchIndex: 0},
+		"node-5": {MatchIndex: 0},
 	}
 
 	// only self has index 1 — not a majority of 5
-	result := getMajorityMatchIndex(nodeIdxs, 1)
+	result := getMajorityMatchIndex(peers, 1)
 	assert.Equal(t, uint(0), result)
 }
 
 // ── 15. All peers at same index → that index returned ─────────────────────────
 
 func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
-	nodeIdxs := map[string]nodeIndexes{
-		"node-2": {matchIndex: 3},
-		"node-3": {matchIndex: 3},
-		"node-4": {matchIndex: 3},
-		"node-5": {matchIndex: 3},
+	peers := map[string]Peer{
+		"node-2": {MatchIndex: 3},
+		"node-3": {MatchIndex: 3},
+		"node-4": {MatchIndex: 3},
+		"node-5": {MatchIndex: 3},
 	}
 
-	result := getMajorityMatchIndex(nodeIdxs, 3)
+	result := getMajorityMatchIndex(peers, 3)
 	assert.Equal(t, uint(3), result)
 }
 
@@ -464,10 +461,10 @@ func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T
 
 	node := NewNodeMock(store, nil)
 	// self + node-2 + node-3 = 3 = majority of 5, all at index 2
-	node.nodeIdxs["node-2"] = nodeIndexes{matchIndex: 2}
-	node.nodeIdxs["node-3"] = nodeIndexes{matchIndex: 2}
-	node.nodeIdxs["node-4"] = nodeIndexes{matchIndex: 0}
-	node.nodeIdxs["node-5"] = nodeIndexes{matchIndex: 0}
+	node.cfg.Peers["node-2"] = Peer{MatchIndex: 2}
+	node.cfg.Peers["node-3"] = Peer{MatchIndex: 2}
+	node.cfg.Peers["node-4"] = Peer{MatchIndex: 0}
+	node.cfg.Peers["node-5"] = Peer{MatchIndex: 0}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -494,8 +491,8 @@ func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing
 
 	node := NewNodeMock(store, nil)
 	// all peers have replicated index 1 — majority achieved
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{MatchIndex: 1}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -522,8 +519,8 @@ func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
 
 	node := NewNodeMock(store, nil)
 	// only self has the log — no peer has replicated it
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{matchIndex: 0}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{MatchIndex: 0}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -550,8 +547,8 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 
 	node := NewNodeMock(mockStore, nil)
-	for _, id := range node.cfg.Peers {
-		node.nodeIdxs[id] = nodeIndexes{matchIndex: 1}
+	for id := range node.cfg.Peers {
+		node.cfg.Peers[id] = Peer{MatchIndex: 1}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

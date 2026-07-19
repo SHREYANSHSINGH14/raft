@@ -45,7 +45,7 @@ func TestApplyLoop_GetLastAppliedFails_GoroutineExits(t *testing.T) {
 	awaitCall(t, called, "GetLastApplied")
 	time.Sleep(20 * time.Millisecond)
 
-	sm.AssertNotCalled(t, methodApply, mock.Anything)
+	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertExpectations(t)
 }
 
@@ -64,7 +64,7 @@ func TestApplyLoop_NonZeroLastApplied_StartsFromCorrectOffset(t *testing.T) {
 	done := make(chan struct{})
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(2), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, entries).Return(nil)
+	sm.On(methodApply, mock.Anything, entries).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(3)).
 		Run(func(_ mock.Arguments) { close(done) }).
 		Return(nil)
@@ -99,7 +99,7 @@ func TestApplyLoop_SingleBroadcast_AppliesEntriesAndPersists(t *testing.T) {
 	done := make(chan struct{})
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, entries).Return(nil)
+	sm.On(methodApply, mock.Anything, entries).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(3)).
 		Run(func(_ mock.Arguments) { close(done) }).
 		Return(nil)
@@ -133,13 +133,13 @@ func TestApplyLoop_CommitAdvancesDuringApply_SecondIterationAppliesWithoutBroadc
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start1, &end1).Return(entries1, nil)
 	store.On(methodGetLogs, mock.Anything, &start2, &end2).Return(entries2, nil)
-	sm.On(methodApply, entries1).
+	sm.On(methodApply, mock.Anything, entries1).
 		Run(func(_ mock.Arguments) {
 			// advance commitIndex while the goroutine is outside commitMu (slow work)
 			node.SetCommitIndex(6)
 		}).
 		Return(nil)
-	sm.On(methodApply, entries2).Return(nil)
+	sm.On(methodApply, mock.Anything, entries2).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(3)).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(6)).
 		Run(func(_ mock.Arguments) { close(done) }).
@@ -172,7 +172,7 @@ func TestApplyLoop_SpuriousWakeup_NothingApplied(t *testing.T) {
 	node.commitCond.Broadcast()
 	time.Sleep(50 * time.Millisecond)
 
-	sm.AssertNotCalled(t, methodApply, mock.Anything)
+	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 
 	cancel()
@@ -201,7 +201,7 @@ func TestApplyLoop_GetLogsFails_GoroutineExits(t *testing.T) {
 	awaitCall(t, called, "GetLogs")
 	time.Sleep(20 * time.Millisecond)
 
-	sm.AssertNotCalled(t, methodApply, mock.Anything)
+	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertExpectations(t)
 }
 
@@ -216,7 +216,7 @@ func TestApplyLoop_ApplyFails_GoroutineExits(t *testing.T) {
 	called := make(chan struct{})
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, entries).
+	sm.On(methodApply, mock.Anything, entries).
 		Run(func(_ mock.Arguments) { close(called) }).
 		Return(errors.New("apply error"))
 
@@ -242,7 +242,7 @@ func TestApplyLoop_SetLastAppliedFails_GoroutineExits(t *testing.T) {
 	called := make(chan struct{})
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, entries).Return(nil)
+	sm.On(methodApply, mock.Anything, entries).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(3)).
 		Run(func(_ mock.Arguments) { close(called) }).
 		Return(errors.New("db error"))
@@ -275,7 +275,7 @@ func TestApplyLoop_ContextCancelledWhileWaiting_GoroutineExits(t *testing.T) {
 	node.commitCond.Broadcast() // unblock Wait so goroutine can observe ctx.Err
 	time.Sleep(20 * time.Millisecond)
 
-	sm.AssertNotCalled(t, methodApply, mock.Anything)
+	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertExpectations(t)
 }
 
@@ -293,7 +293,7 @@ func TestApplyLoop_ContextCancelledBetweenIterations_GoroutineExits(t *testing.T
 	firstCycleDone := make(chan struct{})
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start1, &end1).Return(entries1, nil)
-	sm.On(methodApply, entries1).Return(nil)
+	sm.On(methodApply, mock.Anything, entries1).Return(nil)
 	store.On(methodSetLastApplied, mock.Anything, uint(3)).
 		Run(func(_ mock.Arguments) { close(firstCycleDone) }).
 		Return(nil)
@@ -332,7 +332,7 @@ func TestApplyLoop_CommitIndexZero_BroadcastDoesNotApply(t *testing.T) {
 	node.commitCond.Broadcast()
 	time.Sleep(50 * time.Millisecond)
 
-	sm.AssertNotCalled(t, methodApply, mock.Anything)
+	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertNotCalled(t, methodGetLogs, mock.Anything, mock.Anything, mock.Anything)
 	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 

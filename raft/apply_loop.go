@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"slices"
 
 	"github.com/rs/zerolog"
 )
@@ -36,7 +37,7 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 
 		for ctx.Err() == nil {
 			// inner loop guards against spurious wakeups
-			for n.commitIndex <= lastApplied && ctx.Err() == nil {
+			for n.shouldWaitForApply(lastApplied) && ctx.Err() == nil {
 				n.commitCond.Wait()
 			}
 
@@ -48,23 +49,8 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 			commitIdx := n.commitIndex
 			n.commitCond.L.Unlock() // unlock before slow work
 
-			startIdx := lastApplied + 1
-			endIdx := commitIdx + 1
-			logs, err := n.store.GetLogs(ctx, &startIdx, &endIdx)
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop db error: error getting logs")
-				return
-			}
-
-			err = n.sm.Apply(logs)
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop stateMachine error: error applying logs")
-				return
-			}
-
-			err = n.store.SetLastApplied(ctx, commitIdx)
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop db error: error setting lastapplied")
+			if err := n.applyEntries(ctx, lastApplied, commitIdx); err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop error")
 				return
 			}
 
@@ -73,4 +59,27 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 		}
 		n.commitCond.L.Unlock()
 	}()
+}
+
+func (n *Node) shouldWaitForApply(lastApplied uint) bool {
+	return n.commitIndex <= lastApplied || n.snapShotInProgress.Load()
+}
+
+func (n *Node) applyEntries(ctx context.Context, lastApplied, commitIdx uint) error {
+	startIdx := lastApplied + 1
+	endIdx := commitIdx + 1
+	logs, err := n.store.GetLogs(ctx, &startIdx, &endIdx)
+	if err != nil {
+		return err
+	}
+
+	slices.SortFunc(logs, func(a, b LogEntry) int {
+		return int(a.Index) - int(b.Index)
+	})
+
+	if err = n.sm.Apply(ctx, logs); err != nil {
+		return err
+	}
+
+	return n.store.SetLastApplied(ctx, commitIdx)
 }

@@ -8,9 +8,6 @@ import (
 )
 
 func (s *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	resp, err := s.Node.HandleRequestVote(ctx, raft.RequestVoteArgs{
 		Term:         args.Term,
 		CandidateID:  args.CandidateId,
@@ -27,9 +24,6 @@ func (s *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (
 }
 
 func (s *Server) AppendEntries(ctx context.Context, args *types.AppendEntriesArgs) (*types.AppendEntriesResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	entries := make([]raft.LogEntry, len(args.Entries))
 	for i, e := range args.Entries {
 		entries[i] = raft.LogEntry{

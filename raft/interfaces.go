@@ -1,6 +1,9 @@
 package raft
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Transport is implemented by the caller. The library calls out to it when it
 // needs to send RPCs to peers. The caller owns all network concerns — addresses,
@@ -15,7 +18,14 @@ type Transport interface {
 type StateMachine interface {
 	// Implementation has to be idempotent and durable otherwise it can diverge
 	// lastApplied index
-	Apply(entries []LogEntry) error
+	Apply(ctx context.Context, entries []LogEntry) error
+	Snapshot(ctx context.Context) (Snapshot, error)
+	Restore(ctx context.Context, snapshot io.ReadCloser) error
+}
+
+type Snapshot interface {
+	Persist(ctx context.Context, writer io.Writer) error
+	Release() error
 }
 
 // Storage is implemented by the caller. The library calls it for all persistence
@@ -31,9 +41,13 @@ type Storage interface {
 	GetLastApplied(ctx context.Context) (uint, error)
 
 	AppendLogs(ctx context.Context, entries []LogEntry) error
+	// GetLogs must return entries in ascending Index order.
 	GetLogs(ctx context.Context, start, end *uint) ([]LogEntry, error)
 	GetLogByIndex(ctx context.Context, idx uint) (LogEntry, error)
+	// TruncateLogs removes all log entries with index >= fromIdx (used for conflict resolution).
 	TruncateLogs(ctx context.Context, fromIdx uint) error
+	// CompactLogs removes all log entries with index <= upToIdx (used after snapshotting).
+	CompactLogs(ctx context.Context, upToIdx uint) error
 
 	GetLastLogEntry(ctx context.Context) (LogEntry, error)
 	GetLastLogIndex(ctx context.Context) (uint, error)

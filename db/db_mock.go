@@ -106,6 +106,13 @@ func (m *MockStore) TruncateLogs(ctx context.Context, startIdx uint) error {
 	return args.Error(0)
 }
 
+func (m *MockStore) CompactLogs(ctx context.Context, upToIdx uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx, upToIdx)
+	return args.Error(0)
+}
+
 // ── Log Metadata ─────────────────────────────────────────────────────────────
 
 func (m *MockStore) GetLastLogTerm(ctx context.Context) (uint, error) {
@@ -333,6 +340,20 @@ func (m *MockKVStore) TruncateLogs(_ context.Context, startIdx uint) error {
 
 	for k := range m.data {
 		if k >= startKey && k < endKey {
+			delete(m.data, k)
+		}
+	}
+	return nil
+}
+
+func (m *MockKVStore) CompactLogs(_ context.Context, upToIdx uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	endKey := string(logKey(uint64(upToIdx + 1))) // +1 because endKey is exclusive
+
+	for k := range m.data {
+		if k < endKey {
 			delete(m.data, k)
 		}
 	}

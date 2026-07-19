@@ -9,7 +9,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// NOTE: This method is thread safe and can be called concurrently by multiple callers
 func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) (AppendEntriesResponse, error) {
+	n.clientMu.Lock()
+	defer n.clientMu.Unlock()
+
 	if strings.TrimSpace(args.LeaderID) == "" {
 		err := fmt.Errorf("leader id is empty")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("leader id is empty")
