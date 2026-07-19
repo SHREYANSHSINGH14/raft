@@ -253,13 +253,57 @@ The library only knows peer IDs; the `Transport` implementation knows the addres
 
 ---
 
+## The Apply Loop: Three Mechanisms Solving Each Other's Problems
+
+With the library refactor done, committed entries still never reached a state machine. The first
+design used a bridge goroutine to translate `commitCond` broadcasts into a buffered channel, and a
+separate consumer goroutine with an `inFlight` flag to prevent concurrent applies.
+
+Each piece created work for the next. The buffered channel needed drain logic so it wouldn't fill.
+The `inFlight` flag meant a commit arriving mid-apply would be dropped, so completion had to
+re-signal. The re-signal could deadlock against the held lock, so the send had to be non-blocking.
+Three mechanisms, each fixing a problem the previous one introduced.
+
+**The fix:** delete all of it and use `sync.Cond` directly in one goroutine. An inner loop guards
+spurious wakeups; an outer loop catches commits that land during slow work (DB reads, `sm.Apply`),
+because the condition is re-checked on reacquire without needing a signal at all. `lastApplied` is
+tracked locally to keep the DB out of the hot path.
+
+The lesson that generalizes: when three mechanisms are load-bearing for each other, the problem is
+usually the first one. Removing the bridge channel removed the need for the other two.
+
+### Why `commitMu` is not `mu`
+
+`sync.Cond.Wait()` holds its lock while sleeping. If `commitCond` had been built on `mu` — the
+node's general state lock — then the apply loop sleeping in `Wait()` would hold `mu` for as long as
+there was nothing to apply, blocking the election timer, the heartbeat loop, and every role
+transition. The cluster would deadlock while idle.
+
+So `commitMu` is a second, independent mutex whose only job is to be `commitCond`'s lock.
+`SetCommitIndex` writes `commitIndex` under `mu`, then broadcasts *without* holding it.
+
+This is also why the lock is required around `Wait()` at all, which is worth stating because it
+looks like ceremony: `sync.Cond` keeps a list of sleeping goroutines, and a goroutine must register
+itself on that list before it sleeps. The lock makes "register on the list" and "release the lock and
+sleep" atomic. Without it, a `Broadcast()` firing in between would walk the list, not find the
+goroutine that had already decided to wait, and leave it asleep forever with nothing left to wake it.
+
+Once the apply loop existed, `Propose` could wait on the same condition variable — it appends, then
+blocks until `commitIndex` reaches its entry's index. That's what makes `Propose` return only after
+the entry is genuinely committed rather than merely appended locally.
+
+---
+
 ## What Remains
 
-- **Apply loop**: committed entries reach `commitIndex` but are never applied to a state machine.
-  The `StateMachine` interface is wired in; calling `Apply` on it after each commit is the next step.
-- **Wait-for-commit on Propose**: `Propose` appends locally and returns. A real implementation would
-  block until the entry is committed (majority replicated) before returning to the caller.
-- **Log compaction / snapshots**: unbounded log growth is fine for learning but not for production.
-- **Membership changes**: the cluster topology is fixed at startup.
+**In progress (uncommitted):** snapshotting and log compaction. The on-disk format and the follower's
+`HandleInstallSnapshot` exist; neither snapshot creation nor snapshot *sending* is wired to a running
+node yet. See `STATE.md` for the precise state and the next steps.
+
+- **Membership changes**: the cluster topology is fixed at startup. Design is decided and written up
+  in `docs/membership-change.md`; it depends on snapshotting landing first.
 - **Linearizable reads**: reads currently go through the log; read leases or heartbeat-based reads
   would allow bypassing the log for non-mutating queries.
+- **Propose as a future**: `Propose` blocks until commit. Returning a future would let the caller do
+  other work while waiting — and would fix the fact that a blocked `Propose` currently hangs
+  indefinitely if the leader steps down.
