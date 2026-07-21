@@ -9,6 +9,9 @@ type Config struct {
 	ElectionMinMs int
 	ElectionMaxMs int
 
+	InstallSnapshotDeadlineScaleSizeByte int
+	InstallSnapshotDeadlineScaleTimeMs   int
+
 	SnapshotDir string
 	// will only be used by snapshot loop
 	SnapshotInterval  uint // in seconds

@@ -133,9 +133,15 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		lastLogTerm = lastLog.Term
 	}
 
-	peerIDs := n.peerIDs()
+	peerStates := n.peersSnapshot()
 
-	requestVoteResponses := make(chan responseRequestVote, len(peerIDs))
+	votingPeers := 0
+	for _, peer := range peerStates {
+		if peer.PeerState == PeerState_Voter {
+			votingPeers++
+		}
+	}
+	requestVoteResponses := make(chan responseRequestVote, votingPeers)
 	// defer close(requestVoteResponses)
 	// 1. closing is the sender's responsibility, and there are multiple senders (one goroutine
 	//    per peer) — no single goroutine can safely close without coordinating with others,
@@ -162,17 +168,19 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// ctx.Done(). this way, when cancel() is called, the goroutine exits immediately from the select
 	// without ever trying to send on resCh — so no leak, no blocking, no cascading term explosion.
 
-	for _, id := range peerIDs {
-		// wg.Add(1)
-		go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
+	for id, peer := range peerStates {
+		if peer.PeerState == PeerState_Voter {
+			// wg.Add(1)
+			go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
+		}
 	}
 
 	// wg.Wait()
 
 	// responseReceived := 0
-	responsesPending := len(peerIDs)
-	var majority int = ((len(peerIDs) + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
-	votesReceived := 1                                  // we have already voted for ourselves so we start with 1 vote
+	responsesPending := votingPeers
+	var majority int = ((votingPeers + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
+	votesReceived := 1                             // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {
 		select {
@@ -217,8 +225,10 @@ func (n *Node) sendRequestVote(ctx context.Context, peerID string, newTerm, last
 	}
 
 	var res responseRequestVote
+	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(n.cfg.RPCTimeoutMs)*time.Millisecond)
+	defer cancel()
 
-	rpcRes, err := n.transport.RequestVote(peerID, rpcReq)
+	rpcRes, err := n.transport.RequestVote(deadLineCtx, peerID, rpcReq)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending request vote rpc to peer %s: %s", peerID, err.Error())
 		res.err = err

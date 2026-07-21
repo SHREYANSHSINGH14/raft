@@ -221,6 +221,33 @@ func (s *Store) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) {
 	return fromProto(&log), nil
 }
 
+func (s *Store) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
+	iterOptions := &pebble.IterOptions{
+		LowerBound: []byte(LogPrefix),
+		UpperBound: upperBound([]byte(LogPrefix)),
+	}
+
+	iter, err := s.db.NewIter(iterOptions)
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return raft.LogEntry{}, nil // no logs yet
+		}
+		return raft.LogEntry{}, err
+	}
+	defer iter.Close()
+
+	if !iter.First() {
+		return raft.LogEntry{}, nil // no logs yet
+	}
+
+	var log types.LogEntry
+	if err := proto.Unmarshal(iter.Value(), &log); err != nil {
+		return raft.LogEntry{}, err
+	}
+
+	return fromProto(&log), nil
+}
+
 // Note: we leave the entry.Index and index key check to business logic
 // this layer is just supposed set them in db
 func (s *Store) AppendLogs(ctx context.Context, logs []raft.LogEntry) error {

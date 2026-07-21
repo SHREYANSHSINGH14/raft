@@ -136,6 +136,13 @@ func (m *MockStore) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) 
 	return args.Get(0).(raft.LogEntry), args.Error(1)
 }
 
+func (m *MockStore) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx)
+	return args.Get(0).(raft.LogEntry), args.Error(1)
+}
+
 // MockKVStore is a stateful in-memory implementation of raft.Storage.
 // Keys are stored in the same raw byte encoding as the real pebble Store,
 // so sort.Strings() on log keys produces the same order as pebble's
@@ -273,6 +280,16 @@ func (m *MockKVStore) GetLastLogEntry(_ context.Context) (raft.LogEntry, error) 
 		return raft.LogEntry{}, nil
 	}
 	return m.unmarshalEntry([]byte(keys[len(keys)-1]))
+}
+
+func (m *MockKVStore) GetFirstLogEntry(_ context.Context) (raft.LogEntry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	keys := m.sortedLogKeys()
+	if len(keys) == 0 {
+		return raft.LogEntry{}, nil
+	}
+	return m.unmarshalEntry([]byte(keys[0]))
 }
 
 // ── Log CRUD ──────────────────────────────────────────────────────────────────

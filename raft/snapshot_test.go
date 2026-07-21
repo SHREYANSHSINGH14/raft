@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -39,7 +40,7 @@ func newNodeWithSnapshot(t *testing.T, store Storage, sm StateMachine) *Node {
 // an existing snapshot at the given index/term so shouldTriggerSnapshot sees it.
 func writeFakeSnapshot(t *testing.T, snapshotDir string, index, term uint) {
 	t.Helper()
-	name := generateLatestSnapshotDirName(index, term)
+	name := generateLatestSnapshotDirName(index, term, time.Now())
 	if err := os.Mkdir(snapshotDir+"/"+name, 0755); err != nil {
 		t.Fatalf("writeFakeSnapshot: %v", err)
 	}
@@ -49,7 +50,7 @@ func writeFakeSnapshot(t *testing.T, snapshotDir string, index, term uint) {
 // an existing tmp snapshot at the given index/term so shouldTriggerSnapshot sees it.
 func writeFakeSnapshotTmp(t *testing.T, snapshotDir string, index, term uint) {
 	t.Helper()
-	name := generateLatestSnapshotDirName(index, term)
+	name := generateLatestSnapshotDirName(index, term, time.Now())
 	if err := os.Mkdir(snapshotDir+"/"+name+".tmp", 0755); err != nil {
 		t.Fatalf("writeFakeSnapshotTmp: %v", err)
 	}

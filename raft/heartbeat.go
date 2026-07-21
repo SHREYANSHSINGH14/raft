@@ -136,7 +136,18 @@ func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				go n.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
+				firstLog, err := n.store.GetFirstLogEntry(sendLogCtx)
+				if err != nil {
+					zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs per peer db error: %s", err.Error())
+					continue
+				}
+				if n.GetPeerIndex(peerID).NextIndex < uint(firstLog.Index) {
+					// follower is too far behind, needs to install snapshot
+					zerolog.Ctx(ctx).Debug().Msgf("peer %s nextIndex %d is less than first log index %d, sending snapshot", peerID, n.GetPeerIndex(peerID).NextIndex, firstLog.Index)
+					go n.sendInstallSnapshot(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
+				} else {
+					go n.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
+				}
 				inFlight = true
 			}
 		case err := <-sendLogErrChan:
@@ -197,6 +208,7 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		// for the full failure chain.
 		//
 		// now we just signal and return. startSendLogs owns the transition.
+		zerolog.Ctx(ctx).Debug().Msgf("stepping down peer: %s term is %d and current term %d", peerID, res.Term, currentTerm)
 		stepDownCh <- struct{}{}
 		errChan <- nil
 		return
@@ -230,8 +242,43 @@ func (n *Node) sendAppendLogs(ctx context.Context, peerID string, currentTerm, p
 		Entries:      logs,
 		LeaderCommit: uint64(leaderCommit),
 	}
+	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(n.cfg.RPCTimeoutMs)*time.Millisecond)
+	defer cancel()
+	return n.transport.AppendEntries(deadLineCtx, peerID, rpcReq)
+}
 
-	return n.transport.AppendEntries(peerID, rpcReq)
+func (n *Node) sendInstallSnapshot(ctx context.Context, peerID string, errChan chan<- error, stepDownCh, updateCommitIndexCh chan<- struct{}) {
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
+		errChan <- err
+		return
+	}
+
+	res, snapshotIndex, err := n.callInstallSnapshot(ctx, peerID)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in send install snapshot response from peerID: %s", peerID)
+		errChan <- err
+		return
+	}
+
+	if res.Term > uint64(currentTerm) {
+		zerolog.Ctx(ctx).Debug().Msgf("stepping down peer: %s term is %d and current term %d", peerID, res.Term, currentTerm)
+		stepDownCh <- struct{}{}
+		errChan <- nil
+		return
+	}
+
+	if res.Success {
+		n.SetMatchPeerIndex(peerID, snapshotIndex)
+		n.SetNextPeerIndex(peerID, snapshotIndex+1)
+		updateCommitIndexCh <- struct{}{}
+	} else {
+		zerolog.Ctx(ctx).Debug().Msgf("install snapshot failed peer: %s", peerID)
+	}
+
+	errChan <- nil
+	return
 }
 
 // Sort all matchIndexes (peers + self) in descending order.

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"sync"
 
 	"github.com/stretchr/testify/mock"
@@ -12,14 +13,19 @@ type MockTransport struct {
 
 var _ Transport = &MockTransport{}
 
-func (m *MockTransport) AppendEntries(peerID string, args AppendEntriesArgs) (AppendEntriesResponse, error) {
+func (m *MockTransport) AppendEntries(ctx context.Context, peerID string, args AppendEntriesArgs) (AppendEntriesResponse, error) {
 	ret := m.Called(peerID, args)
 	return ret.Get(0).(AppendEntriesResponse), ret.Error(1)
 }
 
-func (m *MockTransport) RequestVote(peerID string, args RequestVoteArgs) (RequestVoteResponse, error) {
+func (m *MockTransport) RequestVote(ctx context.Context, peerID string, args RequestVoteArgs) (RequestVoteResponse, error) {
 	ret := m.Called(peerID, args)
 	return ret.Get(0).(RequestVoteResponse), ret.Error(1)
+}
+
+func (m *MockTransport) InstallSnapshot(ctx context.Context, peerID string, args InstallSnapshotArgs) (InstallSnapshotResponse, error) {
+	ret := m.Called(peerID, args)
+	return ret.Get(0).(InstallSnapshotResponse), ret.Error(1)
 }
 
 func NewMockTransport() *MockTransport {

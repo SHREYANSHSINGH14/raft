@@ -137,12 +137,12 @@ func newGRPCTransport(peerURLs map[string]string, timeoutMs int) (*grpcTransport
 	}, nil
 }
 
-func (t *grpcTransport) RequestVote(peerID string, args raft.RequestVoteArgs) (raft.RequestVoteResponse, error) {
+func (t *grpcTransport) RequestVote(ctx context.Context, peerID string, args raft.RequestVoteArgs) (raft.RequestVoteResponse, error) {
 	client, ok := t.clients[peerID]
 	if !ok {
 		return raft.RequestVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
 	resp, err := client.RequestVote(ctx, &types.RequestVoteArgs{
@@ -160,12 +160,12 @@ func (t *grpcTransport) RequestVote(peerID string, args raft.RequestVoteArgs) (r
 	}, nil
 }
 
-func (t *grpcTransport) AppendEntries(peerID string, args raft.AppendEntriesArgs) (raft.AppendEntriesResponse, error) {
+func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args raft.AppendEntriesArgs) (raft.AppendEntriesResponse, error) {
 	client, ok := t.clients[peerID]
 	if !ok {
 		return raft.AppendEntriesResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
 	entries := make([]*types.LogEntry, len(args.Entries))
@@ -192,4 +192,11 @@ func (t *grpcTransport) AppendEntries(peerID string, args raft.AppendEntriesArgs
 		Term:    resp.Term,
 		Success: resp.Success,
 	}, nil
+}
+
+// InstallSnapshot is a stub: proto/rpc.proto has no InstallSnapshot RPC yet, so
+// types.RaftRpcClient can't send one. Wire the streaming client call once the
+// proto exists. See STATE.md.
+func (t *grpcTransport) InstallSnapshot(ctx context.Context, peerID string, args raft.InstallSnapshotArgs) (raft.InstallSnapshotResponse, error) {
+	return raft.InstallSnapshotResponse{}, fmt.Errorf("InstallSnapshot not implemented")
 }

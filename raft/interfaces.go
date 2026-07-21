@@ -9,8 +9,9 @@ import (
 // needs to send RPCs to peers. The caller owns all network concerns — addresses,
 // connection pooling, retries, and timeouts.
 type Transport interface {
-	AppendEntries(peerID string, args AppendEntriesArgs) (AppendEntriesResponse, error)
-	RequestVote(peerID string, args RequestVoteArgs) (RequestVoteResponse, error)
+	AppendEntries(ctx context.Context, peerID string, args AppendEntriesArgs) (AppendEntriesResponse, error)
+	RequestVote(ctx context.Context, peerID string, args RequestVoteArgs) (RequestVoteResponse, error)
+	InstallSnapshot(ctx context.Context, peerID string, args InstallSnapshotArgs) (InstallSnapshotResponse, error)
 }
 
 // StateMachine is implemented by the caller. The library calls Apply after a
@@ -52,4 +53,6 @@ type Storage interface {
 	GetLastLogEntry(ctx context.Context) (LogEntry, error)
 	GetLastLogIndex(ctx context.Context) (uint, error)
 	GetLastLogTerm(ctx context.Context) (uint, error)
+
+	GetFirstLogEntry(ctx context.Context) (LogEntry, error)
 }

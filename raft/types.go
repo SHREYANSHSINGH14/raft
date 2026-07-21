@@ -61,7 +61,7 @@ type SnapshotMetadata struct {
 	MemberConfig      map[string]PeerState
 }
 
-type InstallSnapshotRequest struct {
+type InstallSnapshotArgs struct {
 	Term             uint64
 	LeaderID         string
 	SnapshotMetadata SnapshotMetadata

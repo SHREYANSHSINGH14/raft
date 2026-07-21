@@ -4,11 +4,12 @@ import (
 	"context"
 	"io"
 	"os"
+	"time"
 
 	"github.com/rs/zerolog"
 )
 
-func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotRequest) (resp *InstallSnapshotResponse, err error) {
+func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotArgs) (resp *InstallSnapshotResponse, err error) {
 
 	term, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
@@ -65,7 +66,8 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotRe
 		return
 	}
 
-	snapshotDir := generateLatestSnapshotDirName(uint(req.SnapshotMetadata.LastIncludedIndex), uint(req.SnapshotMetadata.LastIncludedTerm))
+	timestamp := time.Now()
+	snapshotDir := generateLatestSnapshotDirName(uint(req.SnapshotMetadata.LastIncludedIndex), uint(req.SnapshotMetadata.LastIncludedTerm), timestamp)
 
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + snapshotDir
 

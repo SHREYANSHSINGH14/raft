@@ -24,6 +24,7 @@ type SnapshotMeta struct {
 	ID           string               `json:"id"` // Server ID of the node that created/got the snapshot
 	LeaderID     string               `json:"leader_id"`
 	MemberConfig map[string]PeerState `json:"member_config"`
+	Timestamp    time.Time            `json:"timestamp"`
 }
 
 // TODO: execute apply loop and snapshot in single goroutine and use channels for communication instead of locks and condition variables, this way we can avoid all the complexity around locks and condition variables and make the code simpler and easier to reason about, but for simplicity we are using locks and condition variables for now
@@ -78,9 +79,21 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	// closing the read end unblocks Persist if writeSnapshotToDisk bails before draining pr
 	defer pr.Close()
 
-	snapshotDirName := generateLatestSnapshotDirName(latestAppliedIndex, uint(latestLog.Term))
+	timestamp := time.Now()
+	snapshotDirName := generateLatestSnapshotDirName(latestAppliedIndex, uint(latestLog.Term), timestamp)
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + snapshotDirName
-	meta := SnapshotMeta{Index: latestAppliedIndex, Term: uint(latestLog.Term), ID: snapshotDirName}
+	memberConfig := make(map[string]PeerState)
+	for id, peer := range n.peersSnapshot() {
+		memberConfig[id] = peer.PeerState
+	}
+	meta := SnapshotMeta{
+		Index:        latestAppliedIndex,
+		Term:         uint(latestLog.Term),
+		ID:           n.GetID(),
+		LeaderID:     n.GetLeaderID(),
+		MemberConfig: memberConfig,
+		Timestamp:    timestamp,
+	}
 	err = writeSnapshotToDisk(pr, snapshotDirPath, meta, snap.Release)
 	if err != nil {
 		return fmt.Errorf("writing snapshot to disk: %w", err)
@@ -89,8 +102,8 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	return n.store.CompactLogs(ctx, latestAppliedIndex)
 }
 
-func generateLatestSnapshotDirName(latestIndex, latestTerm uint) string {
-	return strconv.Itoa(int(latestIndex)) + "-" + strconv.Itoa(int(latestTerm)) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+func generateLatestSnapshotDirName(latestIndex, latestTerm uint, timestamp time.Time) string {
+	return strconv.Itoa(int(latestIndex)) + "-" + strconv.Itoa(int(latestTerm)) + "-" + strconv.FormatInt(timestamp.UnixNano(), 10)
 }
 
 func parseSnapshotDirName(dirName string) (latestIdx uint, latestTerm uint, timestamp time.Time, err error) {
@@ -149,6 +162,9 @@ func shouldTriggerSnapshot(ctx context.Context, snapshotDir string, lastApplied,
 func getLatestSnapshotIndex(dirs []os.DirEntry) (uint, error) {
 	maxIdx := uint(0)
 	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
 		idx, _, _, err := parseSnapshotDirName(dir.Name())
 		if err != nil {
 			continue
@@ -158,6 +174,32 @@ func getLatestSnapshotIndex(dirs []os.DirEntry) (uint, error) {
 		}
 	}
 	return maxIdx, nil
+}
+
+func (n *Node) getLatestSnapshotDir() (string, error) {
+	snapShotDirEntries, err := os.ReadDir(n.cfg.SnapshotDir)
+	if err != nil {
+		return "", fmt.Errorf("getLatestSnapshotDir: reading snapshot directory: %w", err)
+	}
+	var latestSnapshotDir string
+	maxIdx := uint(0)
+	for _, dir := range snapShotDirEntries {
+		if !dir.IsDir() {
+			continue
+		}
+		idx, _, _, err := parseSnapshotDirName(dir.Name())
+		if err != nil {
+			continue
+		}
+		if uint(idx) > maxIdx {
+			maxIdx = uint(idx)
+			latestSnapshotDir = dir.Name()
+		}
+	}
+	if latestSnapshotDir == "" {
+		return "", fmt.Errorf("getLatestSnapshotDir: no snapshot directory found")
+	}
+	return latestSnapshotDir, nil
 }
 
 // writeSnapshotToDisk streams r into a .tmp directory and atomically renames it into place on
@@ -231,4 +273,64 @@ func writeFileSynced(path string, write func(*os.File) error) error {
 		return err
 	}
 	return f.Close()
+}
+
+func (n *Node) callInstallSnapshot(ctx context.Context, target string) (*InstallSnapshotResponse, uint, error) {
+	latestSnapshotDir, err := n.getLatestSnapshotDir()
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
+	}
+	snapshotDirPath := n.cfg.SnapshotDir + "/" + latestSnapshotDir
+	metafile, err := os.Open(snapshotDirPath + "/" + MetaFileName)
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: opening snapshot meta file: %w", err)
+	}
+	defer metafile.Close()
+	var meta SnapshotMeta
+	err = json.NewDecoder(metafile).Decode(&meta)
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: reading snapshot meta: %w", err)
+	}
+
+	snapshotFilePath := snapshotDirPath + "/" + SnapshotFileName
+	snapshotFile, err := os.Open(snapshotFilePath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: opening snapshot file: %w", err)
+	}
+	defer snapshotFile.Close()
+	snapshotFileInfo, err := snapshotFile.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: getting snapshot file info: %w", err)
+	}
+	snapshotFileSize := snapshotFileInfo.Size()
+	if snapshotFileSize <= 0 {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: snapshot file size is zero")
+	}
+
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("callInstallSnapshot: getting current term: %w", err)
+	}
+
+	req := InstallSnapshotArgs{
+		Term:     uint64(currentTerm),
+		LeaderID: n.GetLeaderID(),
+		SnapshotMetadata: SnapshotMetadata{
+			LastIncludedIndex: uint64(meta.Index),
+			LastIncludedTerm:  uint64(meta.Term),
+			TimeStamp:         meta.Timestamp,
+			MemberConfig:      meta.MemberConfig,
+		},
+		Reader:       snapshotFile,
+		SnapshotSize: uint64(snapshotFileSize),
+	}
+
+	deadLineTime := n.cfg.RPCTimeoutMs + ((int(snapshotFileSize) / n.cfg.InstallSnapshotDeadlineScaleSizeByte) * n.cfg.InstallSnapshotDeadlineScaleTimeMs)
+	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(deadLineTime)*time.Millisecond)
+	defer cancel()
+	resp, err := n.transport.InstallSnapshot(deadLineCtx, target, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &resp, meta.Index, nil
 }

@@ -118,6 +118,13 @@ func (m *MockStorage) GetLastLogTerm(ctx context.Context) (uint, error) {
 	return args.Get(0).(uint), args.Error(1)
 }
 
+func (m *MockStorage) GetFirstLogEntry(ctx context.Context) (LogEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(ctx)
+	return args.Get(0).(LogEntry), args.Error(1)
+}
+
 // MemStorage is a stateful in-memory implementation of Storage used in tests.
 // Use it when tests need real state across multiple method calls.
 type MemStorage struct {
@@ -257,4 +264,13 @@ func (m *MemStorage) GetLastLogTerm(_ context.Context) (uint, error) {
 		return 0, nil
 	}
 	return uint(m.logs[len(m.logs)-1].Term), nil
+}
+
+func (m *MemStorage) GetFirstLogEntry(_ context.Context) (LogEntry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.logs) == 0 {
+		return LogEntry{}, nil
+	}
+	return m.logs[0], nil
 }

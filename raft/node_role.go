@@ -114,7 +114,7 @@ func (n *Node) waitForQuorum(ctx context.Context) {
 		reachable := 0
 		for _, peerID := range n.peerIDs() {
 			// ping each peer with a real RequestVote — if it responds (even rejection) the connection is up
-			_, err := n.transport.RequestVote(peerID, RequestVoteArgs{
+			_, err := n.transport.RequestVote(ctx, peerID, RequestVoteArgs{
 				CandidateID: n.ID,
 				Term:        0, // term 0 — always rejected but proves connectivity
 			})
