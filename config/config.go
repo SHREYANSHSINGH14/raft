@@ -23,6 +23,13 @@ type Config struct {
 	ElectionMinMs      int
 	ElectionMaxMs      int
 	ElectionDurationMs int
+
+	SnapshotDir       string
+	SnapshotInterval  uint // in seconds
+	SnapshotThreshold uint // in number of log entries
+
+	InstallSnapshotDeadlineScaleSizeByte int
+	InstallSnapshotDeadlineScaleTimeMs   int
 }
 
 type PeerClient struct {
@@ -50,6 +57,16 @@ func LoadConfig() *Config {
 	c.ElectionMinMs = getEnvInt("ELECTION_MIN_MS", 1000)
 	c.ElectionMaxMs = getEnvInt("ELECTION_MAX_MS", 5000)
 	c.ElectionDurationMs = c.ElectionMaxMs - c.ElectionMinMs
+
+	c.SnapshotDir = os.Getenv("SNAPSHOT_DIR")
+	c.SnapshotInterval = uint(getEnvInt("SNAPSHOT_INTERVAL_S", 300))
+	c.SnapshotThreshold = uint(getEnvInt("SNAPSHOT_THRESHOLD", 1000))
+
+	// InstallSnapshot RPC deadline scales with snapshot size: allow
+	// InstallSnapshotDeadlineScaleTime ms per InstallSnapshotDeadlineScaleSize bytes.
+	// Nothing consumes these yet — the leader-side send path doesn't exist.
+	c.InstallSnapshotDeadlineScaleSizeByte = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE", 1024)
+	c.InstallSnapshotDeadlineScaleTimeMs = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS", 10)
 
 	// Validate timing relationships
 	// RPCTimeout < HeartbeatMs < ElectionMinMs is required for Raft correctness
