@@ -99,17 +99,10 @@ func (m *MockStore) GetLogByIndex(ctx context.Context, idx uint) (raft.LogEntry,
 	return args.Get(0).(raft.LogEntry), args.Error(1)
 }
 
-func (m *MockStore) TruncateLogs(ctx context.Context, startIdx uint) error {
+func (m *MockStore) DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	args := m.Called(ctx, startIdx)
-	return args.Error(0)
-}
-
-func (m *MockStore) CompactLogs(ctx context.Context, upToIdx uint) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	args := m.Called(ctx, upToIdx)
+	args := m.Called(ctx, fromIdx, toIdx)
 	return args.Error(0)
 }
 
@@ -348,29 +341,21 @@ func (m *MockKVStore) GetLogs(_ context.Context, startIdx, endIdx *uint) ([]raft
 	return logs, nil
 }
 
-func (m *MockKVStore) TruncateLogs(_ context.Context, startIdx uint) error {
+func (m *MockKVStore) DeleteLogs(_ context.Context, fromIdx, toIdx uint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	startKey := string(logKey(uint64(startIdx)))
-	endKey := string(upperBound([]byte(LogPrefix)))
+	// [startKey, endKey) — startKey inclusive, endKey exclusive.
+	startKey := string(logKey(uint64(fromIdx))) // fromIdx==0 -> below every real entry
+	var endKey string
+	if toIdx == 0 {
+		endKey = string(upperBound([]byte(LogPrefix))) // past the last log key
+	} else {
+		endKey = string(logKey(uint64(toIdx) + 1)) // +1 so toIdx itself is included
+	}
 
 	for k := range m.data {
 		if k >= startKey && k < endKey {
-			delete(m.data, k)
-		}
-	}
-	return nil
-}
-
-func (m *MockKVStore) CompactLogs(_ context.Context, upToIdx uint) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	endKey := string(logKey(uint64(upToIdx + 1))) // +1 because endKey is exclusive
-
-	for k := range m.data {
-		if k < endKey {
 			delete(m.data, k)
 		}
 	}

@@ -93,7 +93,7 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 	// This is because if there is any inconsistency then it will be in the logs after prevLogIndex and prevLogTerm, so we can just truncate the logs from there and append the new logs from leader which are correct
 	// This is simple way to resolve log inconsistency without having to find the exact conflicting log index and it is also efficient because in real world scenario we won't have many inconsistent logs and even if
 	// we have many inconsistent logs then it means there is some issue with the leader and in that case we can just truncate all the logs after prevLogIndex and append the new logs from leader which are correct
-	err = n.store.TruncateLogs(ctx, uint(args.PrevLogIndex)+1)
+	err = n.store.DeleteLogs(ctx, uint(args.PrevLogIndex)+1, 0)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 		return AppendEntriesResponse{}, err

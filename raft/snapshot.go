@@ -99,7 +99,7 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		return fmt.Errorf("writing snapshot to disk: %w", err)
 	}
 
-	return n.store.CompactLogs(ctx, latestAppliedIndex)
+	return n.store.DeleteLogs(ctx, 0, latestAppliedIndex)
 }
 
 func generateLatestSnapshotDirName(latestIndex, latestTerm uint, timestamp time.Time) string {

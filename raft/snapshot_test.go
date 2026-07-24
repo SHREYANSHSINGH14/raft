@@ -23,7 +23,6 @@ const (
 	methodSnapshot = "Snapshot"
 	methodPersist  = "Persist"
 	methodRelease  = "Release"
-	methodCompact  = "CompactLogs"
 )
 
 // newNodeWithSnapshot returns a node wired with a real temp snapshot dir and the

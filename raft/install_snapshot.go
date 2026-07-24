@@ -122,7 +122,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	log, err := n.store.GetLogByIndex(ctx, uint(req.SnapshotMetadata.LastIncludedIndex))
 	if err != nil {
 		if err == ErrNotFound {
-			err = n.store.CompactLogs(ctx, lastLogIndex)
+			err = n.store.DeleteLogs(ctx, 0, lastLogIndex)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
 				success = false
@@ -134,14 +134,14 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			return
 		}
 	} else if log.Term != req.SnapshotMetadata.LastIncludedTerm {
-		err = n.store.CompactLogs(ctx, lastLogIndex)
+		err = n.store.DeleteLogs(ctx, 0, lastLogIndex)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
 			success = false
 			return
 		}
 	} else {
-		err = n.store.CompactLogs(ctx, uint(req.SnapshotMetadata.LastIncludedIndex))
+		err = n.store.DeleteLogs(ctx, 0, uint(req.SnapshotMetadata.LastIncludedIndex))
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
 			success = false

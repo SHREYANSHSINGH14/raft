@@ -45,10 +45,16 @@ type Storage interface {
 	// GetLogs must return entries in ascending Index order.
 	GetLogs(ctx context.Context, start, end *uint) ([]LogEntry, error)
 	GetLogByIndex(ctx context.Context, idx uint) (LogEntry, error)
-	// TruncateLogs removes all log entries with index >= fromIdx (used for conflict resolution).
-	TruncateLogs(ctx context.Context, fromIdx uint) error
-	// CompactLogs removes all log entries with index <= upToIdx (used after snapshotting).
-	CompactLogs(ctx context.Context, upToIdx uint) error
+	// DeleteLogs removes every log entry whose index lies in the inclusive
+	// range [fromIdx, toIdx]. A bound of 0 is open-ended: because valid log
+	// indices start at 1, 0 is never a real entry and instead means "no bound
+	// on this side". So:
+	//   - DeleteLogs(ctx, fromIdx, 0)  removes the suffix index >= fromIdx
+	//     (conflict resolution — the old TruncateLogs).
+	//   - DeleteLogs(ctx, 0, toIdx)    removes the prefix index <= toIdx
+	//     (compaction after snapshotting — the old CompactLogs).
+	//   - DeleteLogs(ctx, 0, 0)        removes all log entries.
+	DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error
 
 	GetLastLogEntry(ctx context.Context) (LogEntry, error)
 	GetLastLogIndex(ctx context.Context) (uint, error)

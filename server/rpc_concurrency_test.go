@@ -418,7 +418,7 @@ func TestInterleaving_AppendEntries_ConcurrentFromSameLeader(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Logs 1,2,3 must exist exactly once — TruncateLogs+AppendLogs is idempotent
+	// Logs 1,2,3 must exist exactly once — DeleteLogs+AppendLogs is idempotent
 	for _, expected := range entries {
 		entry, err := store.GetLogByIndex(ctx, uint(expected.Index))
 		assert.NoError(t, err)

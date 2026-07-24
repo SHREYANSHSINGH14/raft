@@ -11,7 +11,7 @@ import (
 
 const (
 	methodGetLogByIndex   = "GetLogByIndex"
-	methodTruncateLogs    = "TruncateLogs"
+	methodDeleteLogs      = "DeleteLogs"
 	methodAppendLogs      = "AppendLogs"
 	methodGetLastLogIndex = "GetLastLogIndex"
 )
@@ -83,7 +83,7 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	// SetCurrentTerm and SetVotedFor("") must NOT be called
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -112,7 +112,7 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -202,7 +202,7 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -244,15 +244,15 @@ func TestAppendEntries_PrevLogTermMismatch(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// ── 11. TruncateLogs fails ────────────────────────────────────────────────────
+// ── 11. DeleteLogs fails ──────────────────────────────────────────────────────
 
-func TestAppendEntries_DBErr_TruncateLogs(t *testing.T) {
+func TestAppendEntries_DBErr_DeleteLogs(t *testing.T) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(errors.New("db error"))
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(errors.New("db error"))
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -276,7 +276,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	// AppendLogs must NOT be called
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil)
 
@@ -306,7 +306,7 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(errors.New("db error"))
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
@@ -333,7 +333,7 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	// GetLastLogIndex must NOT be called
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -362,7 +362,7 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(6), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -390,7 +390,7 @@ func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
@@ -417,7 +417,7 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -444,7 +444,7 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -477,7 +477,7 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodTruncateLogs, mock.Anything, uint(4)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(4), uint(0)).Return(nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(5), nil)
 
@@ -511,7 +511,7 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{}, ErrNotFound)
-	store.On(methodTruncateLogs, mock.Anything, uint(1)).Return(nil)
+	store.On(methodDeleteLogs, mock.Anything, uint(1), uint(0)).Return(nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -542,7 +542,7 @@ func TestAppendEntries_PrevLogIndexNonZero_NotFound_ReturnsFalse(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(5)).Return(LogEntry{}, ErrNotFound)
-	// TruncateLogs, AppendLogs, electionTimeoutCh must NOT be touched
+	// DeleteLogs, AppendLogs, electionTimeoutCh must NOT be touched
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",

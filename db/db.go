@@ -373,18 +373,24 @@ func (s *Store) GetLogsByTerm(ctx context.Context, term uint) ([]raft.LogEntry, 
 	return logs, nil
 }
 
-// Deletes everything from the provided startIndex to lastIndex
-// the reason is to maintain consistency throughout the logs
-func (s *Store) TruncateLogs(ctx context.Context, startIdx uint) error {
-	err := s.db.DeleteRange(logKey(uint64(startIdx)), upperBound([]byte(LogPrefix)), nil)
+// DeleteLogs removes every log entry whose index lies in the inclusive range
+// [fromIdx, toIdx]. A bound of 0 is open-ended (log indices start at 1):
+// fromIdx==0 has no lower bound, toIdx==0 has no upper bound. See the
+// raft.Storage interface for the full contract.
+func (s *Store) DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error {
+	// DeleteRange deletes [lower, upper) — lower inclusive, upper exclusive.
+	lower := logKey(uint64(fromIdx)) // fromIdx==0 -> logKey(0), below every real entry
+	var upper []byte
+	if toIdx == 0 {
+		upper = upperBound([]byte(LogPrefix)) // past the last log key
+	} else {
+		upper = logKey(uint64(toIdx) + 1) // +1 so toIdx itself is included
+	}
+	err := s.db.DeleteRange(lower, upper, nil)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("error while deleting startIdx: %d", startIdx)
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error while deleting logs [%d, %d]", fromIdx, toIdx)
 		return err
 	}
-	return nil
-}
-
-func (s *Store) CompactLogs(ctx context.Context, upToIdx uint) error {
 	return nil
 }
 

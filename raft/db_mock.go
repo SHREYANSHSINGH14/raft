@@ -83,17 +83,10 @@ func (m *MockStorage) GetLogByIndex(ctx context.Context, idx uint) (LogEntry, er
 	return args.Get(0).(LogEntry), args.Error(1)
 }
 
-func (m *MockStorage) TruncateLogs(ctx context.Context, fromIdx uint) error {
+func (m *MockStorage) DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	args := m.Called(ctx, fromIdx)
-	return args.Error(0)
-}
-
-func (m *MockStorage) CompactLogs(ctx context.Context, upToIdx uint) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	args := m.Called(ctx, upToIdx)
+	args := m.Called(ctx, fromIdx, toIdx)
 	return args.Error(0)
 }
 
@@ -214,28 +207,18 @@ func (m *MemStorage) GetLogByIndex(_ context.Context, idx uint) (LogEntry, error
 	return LogEntry{}, ErrNotFound
 }
 
-func (m *MemStorage) TruncateLogs(_ context.Context, fromIdx uint) error {
+func (m *MemStorage) DeleteLogs(_ context.Context, fromIdx, toIdx uint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i, e := range m.logs {
-		if uint(e.Index) >= fromIdx {
-			m.logs = m.logs[:i]
-			return nil
+	kept := make([]LogEntry, 0, len(m.logs))
+	for _, e := range m.logs {
+		idx := uint(e.Index)
+		inRange := (fromIdx == 0 || idx >= fromIdx) && (toIdx == 0 || idx <= toIdx)
+		if !inRange {
+			kept = append(kept, e)
 		}
 	}
-	return nil
-}
-
-func (m *MemStorage) CompactLogs(_ context.Context, upToIdx uint) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, e := range m.logs {
-		if uint(e.Index) > upToIdx {
-			m.logs = m.logs[i:]
-			return nil
-		}
-	}
-	m.logs = m.logs[:0]
+	m.logs = kept
 	return nil
 }
 

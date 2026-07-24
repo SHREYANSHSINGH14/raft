@@ -408,7 +408,7 @@ func TestTruncateLogs_RemovesFromIndexOnwards(t *testing.T) {
 	err := store.AppendLogs(ctx, logs)
 	assert.NoError(t, err)
 
-	err = store.TruncateLogs(ctx, 3)
+	err = store.DeleteLogs(ctx, 3, 0)
 	assert.NoError(t, err)
 
 	// range scan confirms only 1 and 2 remain
@@ -440,7 +440,7 @@ func TestTruncateLogs_FromFirstIndex_RemovesAll(t *testing.T) {
 	err := store.AppendLogs(ctx, logs)
 	assert.NoError(t, err)
 
-	err = store.TruncateLogs(ctx, 1)
+	err = store.DeleteLogs(ctx, 1, 0)
 	assert.NoError(t, err)
 
 	got, err := store.GetLogs(ctx, uintPtr(1), uintPtr(4))
@@ -464,7 +464,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	err := store.AppendLogs(ctx, logs)
 	assert.NoError(t, err)
 
-	err = store.TruncateLogs(ctx, 2)
+	err = store.DeleteLogs(ctx, 2, 0)
 	assert.NoError(t, err)
 
 	idx, err := store.GetLastLogIndex(ctx)
@@ -493,6 +493,6 @@ func TestTruncateLogs_EmptyStore(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	err := store.TruncateLogs(ctx, 1)
+	err := store.DeleteLogs(ctx, 1, 0)
 	assert.NoError(t, err, "truncating empty store should not error")
 }
