@@ -26,10 +26,14 @@ func (n *Node) GetID() string {
 	return n.ID
 }
 
+// NOTE: the peer helpers below all read and write n.configurations.latest — the
+// live operating configuration. cfg.Peers is only the bootstrap seed (copied into
+// configurations in NewNode) and must not be used at runtime.
+
 func (n *Node) GetPeerIndex(id string) Peer {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.cfg.Peers[id]
+	return n.configurations.latest[id]
 }
 
 func (n *Node) SetNextPeerIndex(id string, idx uint) {
@@ -37,57 +41,71 @@ func (n *Node) SetNextPeerIndex(id string, idx uint) {
 	defer n.mu.Unlock()
 
 	// map returns a copy of value so if we do
-	// n.cfg.Peers[id].NextIndex = idx
+	// n.configurations.latest[id].NextIndex = idx
 	// it won't work coz we change value of copy
 	// not the original thing so to change the
 	// actual value assign a new struct
 	// Better to use pointers if frequent change
 	// but for learning we keep it like this
-	peer := n.cfg.Peers[id] // copy
-	peer.NextIndex = idx    // modify
-	n.cfg.Peers[id] = peer  // write back
+	peer := n.configurations.latest[id] // copy
+	peer.NextIndex = idx                // modify
+	n.configurations.latest[id] = peer  // write back
 }
 
 func (n *Node) SetMatchPeerIndex(id string, idx uint) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	peer := n.cfg.Peers[id]
+	peer := n.configurations.latest[id]
 	peer.MatchIndex = idx
-	n.cfg.Peers[id] = peer
+	n.configurations.latest[id] = peer
 }
 
 func (n *Node) SetPeerState(id string, state PeerState) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	peer := n.cfg.Peers[id]
+	peer := n.configurations.latest[id]
 	peer.PeerState = state
-	n.cfg.Peers[id] = peer
+	n.configurations.latest[id] = peer
 }
 
 // peerIDs returns a snapshot of peer IDs, safe to range over without racing
-// concurrent NextIndex/MatchIndex updates to n.cfg.Peers.
+// concurrent NextIndex/MatchIndex updates to n.configurations.latest.
 func (n *Node) peerIDs() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	ids := make([]string, 0, len(n.cfg.Peers))
-	for id := range n.cfg.Peers {
+	ids := make([]string, 0, len(n.configurations.latest))
+	for id := range n.configurations.latest {
 		ids = append(ids, id)
 	}
 	return ids
 }
 
-// peersSnapshot returns a copy of the peers map, safe to read without racing
-// concurrent NextIndex/MatchIndex updates to n.cfg.Peers.
+// peersSnapshot returns a copy of the latest peers map, safe to read without
+// racing concurrent NextIndex/MatchIndex updates to n.configurations.latest.
 func (n *Node) peersSnapshot() map[string]Peer {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	cp := make(map[string]Peer, len(n.cfg.Peers))
-	for id, peer := range n.cfg.Peers {
-		cp[id] = peer
+	return clonePeers(n.configurations.latest)
+}
+
+func (n *Node) addPeer(id string, peer Peer) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.configurations.latest[id] = peer
+	return
+}
+
+func (n *Node) hasStagingPeer() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, peer := range n.configurations.latest {
+		if peer.PeerState == PeerState_Staging {
+			return true
+		}
 	}
-	return cp
+	return false
 }
 
 func (n *Node) SetCommitIndex(idx uint) {

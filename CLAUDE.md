@@ -75,6 +75,26 @@ replication uses one independent `sendLogsPerPeer` goroutine per peer, each with
 While the state machine is being captured, the apply loop must not advance `lastApplied` past the
 index the snapshot is being taken at.
 
+### The live cluster configuration is `configurations.latest`, not `cfg.Peers`.
+
+Membership is tracked in the `configurations` struct ([raft_config.go](raft/raft_config.go)) as two
+views: `latest` (most recent config in the log, committed or not — the **operating** set every peer
+helper, election, and heartbeat reads) and `committed` (last config known committed), each tagged with
+its producing log index. `cfg.Peers` is only the **bootstrap seed**, copied into both views once in
+`NewNode`/`NewNodeMock`; nothing may read it at runtime. Any raw `&Node{}` built in a test must seed
+`configurations`, not just `cfg.Peers`, or the node behaves as if it has no peers.
+
+`configurations` is guarded by `mu` (same lock as the peer maps). Mutators deep-copy via `clonePeers`
+so `latest` and `committed` never alias. When `HandleAppendEntries` truncates a conflicting suffix, it
+calls `rollbackLatestIfTruncated`: if the truncation removes the entry that produced `latest`, `latest`
+reverts to `committed` — an uncommitted config that just left the log must not stay live. See
+JOURNEY.md Bug 4.
+
+Config entries carry the **whole** configuration as a JSON `map[string]Peer` (AddMember marshals
+`n.peersSnapshot()`), so `processConfigurationLogEntry` on the follower is a straight replace of
+`latest`. `committed` still only advances on commit (`setCommittedConfiguration`), which is not yet
+wired into the apply loop — see STATE.md.
+
 ## Conventions
 
 - Errors: `ErrNotFound` is defined in `raft/` so the library doesn't depend on Pebble's sentinel.

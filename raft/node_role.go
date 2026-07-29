@@ -40,10 +40,10 @@ func (n *Node) becomeLeader() {
 	}
 
 	n.mu.Lock()
-	for id, peer := range n.cfg.Peers {
+	for id, peer := range n.configurations.latest {
 		peer.NextIndex = lastIndex + 1
 		peer.MatchIndex = 0
-		n.cfg.Peers[id] = peer
+		n.configurations.latest[id] = peer
 	}
 	n.mu.Unlock()
 
@@ -102,7 +102,7 @@ func (n *Node) startElectionOut(ctx context.Context) {
 // running so waitForQuorum returns on the first iteration.
 
 func (n *Node) waitForQuorum(ctx context.Context) {
-	majority := (len(n.cfg.Peers)+1)/2 + 1
+	majority := (len(n.peerIDs())+1)/2 + 1
 
 	for {
 		select {

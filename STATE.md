@@ -14,6 +14,38 @@ The snapshot milestone is no longer sitting uncommitted. Three commits on `main`
 Working tree is clean. `go build ./...` and `go test ./...` are green.
 **`go test ./... -race` is not** — see the top item below.
 
+## In flight: membership configuration tracking (this session, uncommitted)
+
+Groundwork for membership changes landed alongside the snapshot work below:
+
+- **`configurations` struct** ([raft_config.go](raft/raft_config.go)) with `latest`/`committed` views
+  + their producing indexes. `latest` is now the single live operating config and **replaced
+  `cfg.Peers`** everywhere (peer helpers, election, heartbeat, `becomeLeader`, `waitForQuorum`).
+  `cfg.Peers` is bootstrap-seed only. `NewNode`/`NewNodeMock` seed both views from it.
+- **`HandleAppendEntries` rewritten** ([append_entries.go](raft/append_entries.go)) from unconditional
+  truncate-and-append to §5.3 conflict-only truncation (skip matching prefix, truncate only on a term
+  conflict). Fixed a latent bug where a delayed/duplicate AppendEntries could truncate committed
+  entries — see JOURNEY.md Bug 4. The commit-index block below it is unchanged (no staged-commit yet).
+- **`rollbackLatestIfTruncated`** is live: truncating the suffix that produced `latest` reverts it to
+  `committed`. Tested in `append_entries_test.go` (tests 22–23).
+
+- **Config entries carry the whole config.** `AddMember` marshals `n.peersSnapshot()` (a full
+  `map[string]Peer`) as the `EntryType_Config` payload, and `processConfigurationLogEntry`
+  ([configuration.go](raft/configuration.go)) decodes it and replaces `latest` on the follower path.
+  Tested in `append_entries_test.go` (test 24). `MemberAdditionInfo` was removed.
+
+**Still stubbed / not wired:**
+- `setCommittedConfiguration` exists but nothing calls it — advancing `committed` when a config entry
+  commits belongs in the apply loop and isn't wired. So `committed` currently only ever holds the
+  bootstrap config, which means `rollbackLatestIfTruncated` reverts to bootstrap, not to the true last
+  committed config. Wiring the apply loop to advance `committed` is the next step.
+- `AddMember` mutates `latest` on the leader directly (`addPeer`) rather than through
+  `processConfigurationLogEntry`; only the follower path decodes the entry. Removal has no payload/flow.
+- `AddMember` ([add_member.go](raft/add_member.go)) still stops after append+commit-wait (steps 3–5 —
+  snapshot/catch-up/promote — are TODO).
+- Quorum math still counts by `PeerState_Voter` in election but `getMajorityMatchIndex` does not filter
+  — unchanged by this session, still the gap `docs/membership-change.md` flags.
+
 ## In flight: snapshotting / log compaction
 
 Prerequisite for membership changes, per `docs/membership-change.md`.

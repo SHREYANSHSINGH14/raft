@@ -17,28 +17,10 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) er
 		return fmt.Errorf("not the leader: current leader is %q", n.GetLeaderID())
 	}
 
-	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
+	entry, err := n.appendEntry(ctx, entryType, data)
 	if err != nil {
 		n.clientMu.Unlock()
-		return fmt.Errorf("propose: failed to get last log index: %w", err)
-	}
-
-	currentTerm, err := n.store.GetCurrentTerm(ctx)
-	if err != nil {
-		n.clientMu.Unlock()
-		return fmt.Errorf("propose: failed to get current term: %w", err)
-	}
-
-	entry := LogEntry{
-		Index: uint64(lastLogIndex + 1),
-		Term:  uint64(currentTerm),
-		Type:  entryType,
-		Data:  data,
-	}
-
-	if err := n.store.AppendLogs(ctx, []LogEntry{entry}); err != nil {
-		n.clientMu.Unlock()
-		return fmt.Errorf("propose: failed to append log: %w", err)
+		return fmt.Errorf("propose: %w", err)
 	}
 	n.clientMu.Unlock()
 
@@ -55,4 +37,31 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) er
 	}
 	n.commitCond.L.Unlock()
 	return nil
+}
+
+// appendEntry builds a LogEntry with the next log index and the current term,
+// appends it to the store, and returns it. Callers must hold clientMu.
+func (n *Node) appendEntry(ctx context.Context, entryType EntryType, data []byte) (LogEntry, error) {
+	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
+	if err != nil {
+		return LogEntry{}, fmt.Errorf("failed to get last log index: %w", err)
+	}
+
+	currentTerm, err := n.store.GetCurrentTerm(ctx)
+	if err != nil {
+		return LogEntry{}, fmt.Errorf("failed to get current term: %w", err)
+	}
+
+	entry := LogEntry{
+		Index: uint64(lastLogIndex + 1),
+		Term:  uint64(currentTerm),
+		Type:  entryType,
+		Data:  data,
+	}
+
+	if err := n.store.AppendLogs(ctx, []LogEntry{entry}); err != nil {
+		return LogEntry{}, fmt.Errorf("failed to append log: %w", err)
+	}
+
+	return entry, nil
 }

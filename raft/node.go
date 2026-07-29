@@ -28,6 +28,11 @@ type Node struct {
 	store     Storage
 	cfg       Config
 
+	// configurations holds the latest/committed membership views. `latest` is the
+	// live operating configuration and supersedes cfg.Peers, which is now only the
+	// bootstrap seed read once in NewNode. Guarded by mu. See raft_config.go.
+	configurations configurations
+
 	commitIndex uint
 	lastApplied uint
 
@@ -86,6 +91,16 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 	}
 
 	node.commitCond = *sync.NewCond(&node.commitMu)
+
+	// Seed both configuration views from the caller-supplied bootstrap peers at
+	// index 0. Until the first config entry is appended, latest == committed.
+	node.configurations = configurations{
+		latest:         clonePeers(cfg.Peers),
+		latestIndex:    0,
+		committed:      clonePeers(cfg.Peers),
+		committedIndex: 0,
+	}
+
 	return &node
 }
 

@@ -21,15 +21,26 @@ func setupElectionTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
 
 	transport := NewMockTransport()
 
+	// Voters — election only counts and requests votes from PeerState_Voter peers,
+	// so the operating configuration (configurations.latest) must mark them as such.
+	voters := map[string]Peer{
+		"node-2": {PeerState: PeerState_Voter},
+		"node-3": {PeerState: PeerState_Voter},
+		"node-4": {PeerState: PeerState_Voter},
+		"node-5": {PeerState: PeerState_Voter},
+	}
+
 	node := &Node{
 		ID:    "node-1",
 		Role:  ServerRole_Candidate,
 		store: store,
 		cfg: Config{
-			ID: "node-1",
-			Peers: map[string]Peer{
-				"node-2": {}, "node-3": {}, "node-4": {}, "node-5": {},
-			},
+			ID:    "node-1",
+			Peers: voters,
+		},
+		configurations: configurations{
+			latest:    clonePeers(voters),
+			committed: clonePeers(voters),
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
 		transport:         transport,

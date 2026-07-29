@@ -195,6 +195,60 @@ heartbeat context; it's the only one allowed to cancel it and trigger a step-dow
 
 ---
 
+## Bug 4: `HandleAppendEntries` truncated more than it was allowed to
+
+The follower's append path used to be blunt: after the `prevLogIndex`/`prevLogTerm` check passed it
+ran `DeleteLogs(prevLogIndex+1, 0)` — delete everything after `prevLogIndex` — and then re-appended
+whatever the leader sent. Simple, and it *looks* safe because the consistency check upstream
+guarantees the log matches up to `prevLogIndex`.
+
+It isn't safe. AppendEntries RPCs can arrive delayed or duplicated. Consider a follower whose log is
+already ahead of a particular (stale) heartbeat: an old AppendEntries with a small `Entries` set (or
+an empty one, a bare heartbeat) still passes the `prevLogIndex` check, and the unconditional
+`DeleteLogs` then throws away perfectly good entries after `prevLogIndex` — entries the leader still
+considers committed. The next real heartbeat re-replicates them, so it usually self-heals, but for a
+window the follower's log has *regressed*, which is exactly what Raft §5.3 forbids: *"If an existing
+entry conflicts with a new one … delete the existing entry and all that follow it"* — the operative
+word being **conflicts**.
+
+The fix is to truncate only on an actual term conflict. Walk the incoming entries against what we
+already hold:
+- an entry we already have at the same index **and term** is a no-op — skip it (idempotent),
+- the first index we don't have yet is where the genuinely-new suffix begins,
+- the first index where our term differs from the leader's is the *only* place we truncate, and we
+  truncate from there.
+
+The lesson generalizes past this function: a correctness rule that names a precondition
+("if it *conflicts*") is not satisfied by a stronger action that ignores the precondition
+("always truncate"). "Stronger" here means "throws away more," and throwing away committed log is the
+one thing a follower may never do.
+
+### The configuration rollback that rides along
+
+This is also where cluster membership tracking hooks in. Membership now lives in a `configurations`
+struct with two views (see `raft_config.go`): `latest` — the most recent config seen in the log,
+committed or not, which is the live operating set that replaced the old single `cfg.Peers` map — and
+`committed`, the last config we know actually committed, each tagged with the log index that produced
+it.
+
+Why two views, and why the follower's truncation cares: a config change replicates as a normal log
+entry, so `latest` can advance to an entry that has **not** committed yet. If that very entry sits in
+a suffix we just truncated as a conflict, `latest` is now pointing at a configuration that no longer
+exists in anyone's log. It has to roll back — and the only safe thing to roll back *to* is the last
+configuration we know committed. Hence `rollbackLatestIfTruncated(fromIndex)`: if the truncation
+started at or below `latestIndex`, revert `latest` (and `latestIndex`) to `committed`. The index tags
+are what make "did this truncation invalidate the current config?" answerable at all.
+
+The forward direction is live too: a config entry carries the **whole** configuration as a JSON
+`map[string]Peer` (deciding to ship the full set rather than a per-member delta makes applying it a
+straight replace, and sidesteps having to replay deltas in order), so
+`processConfigurationLogEntry` just decodes it into `latest`. What's still missing is the third leg:
+advancing `committed` when a config entry commits, which belongs in the apply loop. Until that lands,
+`committed` only holds the bootstrap config, so a rollback reverts to bootstrap rather than to the true
+last-committed configuration. See `STATE.md`.
+
+---
+
 ## The Refactor: From Binary to Library
 
 With the core bugs fixed, the implementation worked as a 5-node Docker cluster. But the code was

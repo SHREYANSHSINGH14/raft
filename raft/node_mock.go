@@ -55,6 +55,11 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 		LeaderID:          "",
 		commitIndex:       0,
 	}
+	// Seed the operating configuration from the bootstrap peers, same as NewNode.
+	node.configurations = configurations{
+		latest:    clonePeers(node.cfg.Peers),
+		committed: clonePeers(node.cfg.Peers),
+	}
 	node.commitCond = *sync.NewCond(&node.commitMu)
 	return node
 }
