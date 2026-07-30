@@ -102,7 +102,12 @@ func (n *Node) startElectionOut(ctx context.Context) {
 // running so waitForQuorum returns on the first iteration.
 
 func (n *Node) waitForQuorum(ctx context.Context) {
-	majority := (len(n.peerIDs())+1)/2 + 1
+	// Only voters form the quorum an election needs, so wait for a majority of
+	// voters to be reachable — a Staging or NonVoter peer being down must not hold
+	// up startup. Membership is fixed here (AddMember can't run before we've become
+	// leader), so it is safe to read the voter set once.
+	voterIDs := n.voterPeerIDs()
+	majority := majoritySize(len(voterIDs))
 
 	for {
 		select {
@@ -112,7 +117,7 @@ func (n *Node) waitForQuorum(ctx context.Context) {
 		}
 
 		reachable := 0
-		for _, peerID := range n.peerIDs() {
+		for _, peerID := range voterIDs {
 			// ping each peer with a real RequestVote — if it responds (even rejection) the connection is up
 			_, err := n.transport.RequestVote(ctx, peerID, RequestVoteArgs{
 				CandidateID: n.ID,

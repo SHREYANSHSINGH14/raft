@@ -42,14 +42,26 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	// worst case: all peers respond with higher term simultaneously — len(peers) senders.
 	// buffering all of them means no sender ever blocks. the unread signals are GC'd when
 	// startSendLogs returns and the channel goes out of scope.
-	peerIDs := n.peerIDs()
+	// Staging peers are a transient catch-up state: AddMember drives their
+	// InstallSnapshot + log replication out-of-band until they are promoted to
+	// Voter/NonVoter. The normal heartbeat fan-out must skip them — otherwise it
+	// would race AddMember's catch-up and replicate to a peer that isn't a member
+	// of the cluster yet.
+	peers := n.peersSnapshot()
+	activePeerIDs := make([]string, 0, len(peers))
+	for id, peer := range peers {
+		if peer.PeerState == PeerState_Staging {
+			continue
+		}
+		activePeerIDs = append(activePeerIDs, id)
+	}
 
-	stepDownCh := make(chan struct{}, len(peerIDs))
-	updateCommitIndexCh := make(chan struct{}, len(peerIDs))
+	stepDownCh := make(chan struct{}, len(activePeerIDs))
+	updateCommitIndexCh := make(chan struct{}, len(activePeerIDs))
 
-	started := make(chan struct{}, len(peerIDs))
+	started := make(chan struct{}, len(activePeerIDs))
 
-	for _, k := range peerIDs {
+	for _, k := range activePeerIDs {
 		go func(id string) {
 			started <- struct{}{}
 			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
@@ -57,7 +69,7 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	}
 
 	// drain and count — blocks until all goroutines have actually started
-	for i := 0; i < len(peerIDs); i++ {
+	for i := 0; i < len(activePeerIDs); i++ {
 		<-started
 	}
 
@@ -291,6 +303,9 @@ func getMajorityMatchIndex(peers map[string]Peer, selfLastIndex uint) uint {
 	var matchIndexes []uint
 
 	for _, peer := range peers {
+		if peer.PeerState != PeerState_Voter {
+			continue
+		}
 		matchIndexes = append(matchIndexes, peer.MatchIndex)
 	}
 
@@ -305,6 +320,10 @@ func getMajorityMatchIndex(peers map[string]Peer, selfLastIndex uint) uint {
 		return 0
 	})
 
-	majorityCount := (len(peers)+1)/2 + 1 // +1 is for self
+	// majorityCount is over voters only: matchIndexes holds one entry per voter
+	// peer plus self, so its length is the voter count and len-1 is the voter-peer
+	// count. Using len(peers) here would be wrong once non-voters exist — it would
+	// overshoot the slice (the non-voters were filtered out above).
+	majorityCount := majoritySize(len(matchIndexes) - 1)
 	return matchIndexes[majorityCount-1]
 }

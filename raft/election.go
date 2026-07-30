@@ -179,8 +179,8 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 
 	// responseReceived := 0
 	responsesPending := votingPeers
-	var majority int = ((votingPeers + 1) / 2) + 1 // +1 for counting self vote, /2 for getting majority and +1 to round up in case of even number of servers
-	votesReceived := 1                             // we have already voted for ourselves so we start with 1 vote
+	majority := majoritySize(votingPeers) // voters only; self is counted inside the helper
+	votesReceived := 1                    // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {
 		select {

@@ -407,10 +407,10 @@ func TestSendLogs_DBErr_GetLogs(t *testing.T) {
 
 func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
 	peers := map[string]Peer{
-		"node-2": {MatchIndex: 5},
-		"node-3": {MatchIndex: 3},
-		"node-4": {MatchIndex: 4},
-		"node-5": {MatchIndex: 6},
+		"node-2": {PeerState: PeerState_Voter, MatchIndex: 5},
+		"node-3": {PeerState: PeerState_Voter, MatchIndex: 3},
+		"node-4": {PeerState: PeerState_Voter, MatchIndex: 4},
+		"node-5": {PeerState: PeerState_Voter, MatchIndex: 6},
 	}
 
 	result := getMajorityMatchIndex(peers, 7)
@@ -421,10 +421,10 @@ func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
 
 func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
 	peers := map[string]Peer{
-		"node-2": {MatchIndex: 0},
-		"node-3": {MatchIndex: 0},
-		"node-4": {MatchIndex: 0},
-		"node-5": {MatchIndex: 0},
+		"node-2": {PeerState: PeerState_Voter, MatchIndex: 0},
+		"node-3": {PeerState: PeerState_Voter, MatchIndex: 0},
+		"node-4": {PeerState: PeerState_Voter, MatchIndex: 0},
+		"node-5": {PeerState: PeerState_Voter, MatchIndex: 0},
 	}
 
 	// only self has index 1 — not a majority of 5
@@ -436,10 +436,10 @@ func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
 
 func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
 	peers := map[string]Peer{
-		"node-2": {MatchIndex: 3},
-		"node-3": {MatchIndex: 3},
-		"node-4": {MatchIndex: 3},
-		"node-5": {MatchIndex: 3},
+		"node-2": {PeerState: PeerState_Voter, MatchIndex: 3},
+		"node-3": {PeerState: PeerState_Voter, MatchIndex: 3},
+		"node-4": {PeerState: PeerState_Voter, MatchIndex: 3},
+		"node-5": {PeerState: PeerState_Voter, MatchIndex: 3},
 	}
 
 	result := getMajorityMatchIndex(peers, 3)
@@ -470,10 +470,10 @@ func TestStartCommitIndexUpdater_CurrentTermLog_CommitIndexAdvances(t *testing.T
 
 	node := NewNodeMock(store, nil)
 	// self + node-2 + node-3 = 3 = majority of 5, all at index 2
-	node.configurations.latest["node-2"] = Peer{MatchIndex: 2}
-	node.configurations.latest["node-3"] = Peer{MatchIndex: 2}
-	node.configurations.latest["node-4"] = Peer{MatchIndex: 0}
-	node.configurations.latest["node-5"] = Peer{MatchIndex: 0}
+	node.configurations.latest["node-2"] = Peer{PeerState: PeerState_Voter, MatchIndex: 2}
+	node.configurations.latest["node-3"] = Peer{PeerState: PeerState_Voter, MatchIndex: 2}
+	node.configurations.latest["node-4"] = Peer{PeerState: PeerState_Voter, MatchIndex: 0}
+	node.configurations.latest["node-5"] = Peer{PeerState: PeerState_Voter, MatchIndex: 0}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -501,7 +501,7 @@ func TestStartCommitIndexUpdater_PreviousTermLog_CommitIndexUnchanged(t *testing
 	node := NewNodeMock(store, nil)
 	// all peers have replicated index 1 — majority achieved
 	for id := range node.configurations.latest {
-		node.configurations.latest[id] = Peer{MatchIndex: 1}
+		node.configurations.latest[id] = Peer{PeerState: PeerState_Voter, MatchIndex: 1}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -529,7 +529,7 @@ func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
 	node := NewNodeMock(store, nil)
 	// only self has the log — no peer has replicated it
 	for id := range node.configurations.latest {
-		node.configurations.latest[id] = Peer{MatchIndex: 0}
+		node.configurations.latest[id] = Peer{PeerState: PeerState_Voter, MatchIndex: 0}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -557,7 +557,7 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 
 	node := NewNodeMock(mockStore, nil)
 	for id := range node.configurations.latest {
-		node.configurations.latest[id] = Peer{MatchIndex: 1}
+		node.configurations.latest[id] = Peer{PeerState: PeerState_Voter, MatchIndex: 1}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

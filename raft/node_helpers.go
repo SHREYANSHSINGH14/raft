@@ -82,6 +82,29 @@ func (n *Node) peerIDs() []string {
 	return ids
 }
 
+// voterPeerIDs returns the IDs of peers that count toward majorities. Only Voter
+// peers do — Staging (still catching up) and NonVoter (replica-only) peers are
+// excluded, so they neither raise the majority threshold nor get counted in it.
+func (n *Node) voterPeerIDs() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ids := make([]string, 0, len(n.configurations.latest))
+	for id, peer := range n.configurations.latest {
+		if peer.PeerState == PeerState_Voter {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// majoritySize returns how many nodes form a majority in a cluster made of
+// voterPeerCount voter peers plus this node. Self is always counted (the +1),
+// because every caller of this — election, commit-index, quorum wait — runs only
+// while this node is itself a voter. Only Voter peers count toward majorities.
+func majoritySize(voterPeerCount int) int {
+	return (voterPeerCount+1)/2 + 1
+}
+
 // peersSnapshot returns a copy of the latest peers map, safe to read without
 // racing concurrent NextIndex/MatchIndex updates to n.configurations.latest.
 func (n *Node) peersSnapshot() map[string]Peer {
