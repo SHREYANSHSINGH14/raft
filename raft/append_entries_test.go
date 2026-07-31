@@ -83,7 +83,6 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	// SetCurrentTerm and SetVotedFor("") must NOT be called
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -111,7 +110,6 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -200,7 +198,6 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -419,7 +416,6 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -445,7 +441,6 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{Index: 0, Term: 0}, nil)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -514,7 +509,6 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLogByIndex, mock.Anything, uint(0)).Return(LogEntry{}, ErrNotFound)
 	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -704,5 +698,65 @@ func TestAppendEntries_ConfigEntryUpdatesLatest(t *testing.T) {
 	assert.Len(t, node.configurations.latest, 2)
 	assert.Equal(t, PeerState_Staging, node.configurations.latest["node-6"].PeerState)
 	assert.Len(t, node.configurations.committed, 1) // committed unchanged
+	store.AssertExpectations(t)
+}
+
+// ── 25. prevLogIndex at the snapshot boundary → anchored via the cached term ──
+// Right after an InstallSnapshot the leader sends prevLogIndex == the follower's
+// snapshot last-included index, whose entry is compacted. GetLogByIndex is never
+// called for it; the match is validated against snapshotLatestTerm.
+
+func TestAppendEntries_PrevLogAtSnapshotBoundary_Accepted(t *testing.T) {
+	store := new(MockStorage)
+	node := NewNodeMock(store, nil)
+	node.SetSnapshotLatest(5, 3) // snapshot covers up to index 5, term 3
+	ctx := context.Background()
+
+	entries := []LogEntry{{Index: 6, Term: 4}}
+
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
+	// index 5 is compacted; logTermAt resolves it from the snapshot, so NO
+	// GetLogByIndex(5) is expected. lastLogIdx is 5, so entry 6 is new.
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
+
+	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
+		LeaderID:     "leader-1",
+		Term:         4,
+		PrevLogIndex: 5, // the snapshot boundary
+		PrevLogTerm:  3, // matches snapshotLatestTerm
+		Entries:      entries,
+		LeaderCommit: 0,
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, resp.Success)
+	assert.Equal(t, "leader-1", node.GetLeaderID())
+	assert.Equal(t, 1, len(node.electionTimeoutCh))
+	store.AssertExpectations(t)
+}
+
+// ── 26. prevLogIndex at the snapshot boundary but wrong term → rejected ───────
+
+func TestAppendEntries_PrevLogAtSnapshotBoundary_TermMismatch_Rejected(t *testing.T) {
+	store := new(MockStorage)
+	node := NewNodeMock(store, nil)
+	node.SetSnapshotLatest(5, 3)
+	ctx := context.Background()
+
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
+
+	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
+		LeaderID:     "leader-1",
+		Term:         4,
+		PrevLogIndex: 5,
+		PrevLogTerm:  99, // does NOT match snapshotLatestTerm (3)
+		Entries:      []LogEntry{{Index: 6, Term: 4}},
+	})
+
+	assert.NoError(t, err)
+	assert.False(t, resp.Success)
+	assert.Equal(t, "", node.GetLeaderID())
+	assert.Equal(t, 0, len(node.electionTimeoutCh))
 	store.AssertExpectations(t)
 }

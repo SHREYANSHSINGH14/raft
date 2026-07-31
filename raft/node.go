@@ -74,8 +74,12 @@ type Node struct {
 	//potentially diverging lastApplied index from the snapshot index
 	snapShotInProgress atomic.Bool
 
-	// This is set every time a new snapshot is taken, it represents the value for the latest snapshot
+	// Set every time a snapshot is taken (leader) or installed (follower): the
+	// last-included index and term of the latest snapshot. The term is what lets
+	// HandleAppendEntries accept prevLogIndex == snapshotLatestIndex as a valid
+	// consistency anchor even though that entry is compacted (see logTermAt).
 	snapshotLatestIndex uint
+	snapshotLatestTerm  uint
 
 	// catchingUpIdx is the retain floor a catching-up member publishes: while it is
 	// not DefaultCatchingUpIdx, the compactor must not delete logs at or above it.

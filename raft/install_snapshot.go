@@ -194,6 +194,11 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 
 	n.SetLeaderID(req.LeaderID)
 
+	// Cache the snapshot boundary so the next AppendEntries from the leader — whose
+	// prevLogIndex is this snapshot's last-included index — can be validated against
+	// it in logTermAt even though the entry itself is now compacted.
+	n.SetSnapshotLatest(uint(req.SnapshotMetadata.LastIncludedIndex), uint(req.SnapshotMetadata.LastIncludedTerm))
+
 	for peerID, peerState := range req.SnapshotMetadata.MemberConfig {
 		n.SetPeerState(peerID, peerState)
 	}

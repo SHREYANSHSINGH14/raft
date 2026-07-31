@@ -119,7 +119,7 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("writing snapshot to disk: %w", err)
 	}
-	n.SetSnapshotLatestIndex(latestAppliedIndex)
+	n.SetSnapshotLatest(latestAppliedIndex, uint(latestAppliedLog.Term))
 
 	// Delay (do not skip) compaction while a catching-up member still needs logs at
 	// or below latestAppliedIndex. Parks until the floor clears rather than busy-

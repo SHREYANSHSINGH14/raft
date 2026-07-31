@@ -48,25 +48,19 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 		}
 	}
 
-	prevLog, err := n.store.GetLogByIndex(ctx, uint(args.PrevLogIndex))
+	// prevLog consistency check. logTermAt returns the term at prevLogIndex,
+	// treating the snapshot boundary as a valid anchor: right after an
+	// InstallSnapshot the leader's next AppendEntries carries prevLogIndex equal to
+	// our snapshot's last-included index, whose entry is compacted — but the
+	// snapshot metadata proves we agree at that index. ok == false means we have
+	// neither the entry nor an anchor there, i.e. a log inconsistency: reply false
+	// and let the leader back off (or fall back to InstallSnapshot).
+	prevTerm, ok, err := n.logTermAt(ctx, args.PrevLogIndex)
 	if err != nil {
-		if !errors.Is(err, ErrNotFound) {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return AppendEntriesResponse{}, err
-		}
-		if args.PrevLogIndex != 0 {
-			// If prevLogIndex is not 0 and we are getting ErrNotFound then it means there is log inconsistency because it means leader is expecting some log at prevLogIndex but follower doesn't have that log
-			// This can happen when there is a new leader and it is trying to replicate its logs to the followers but some followers are lagging behind and they don't have the logs that leader has,
-			// in that case we should just return false and let the leader handle the log inconsistency in next append entries call by sending the logs from nextIndex to end of log to that follower
-			return AppendEntriesResponse{
-				Term:    uint64(currentTerm),
-				Success: false,
-			}, nil
-		}
-		// prevLogIndex == 0 and ErrNotFound — fresh follower, no prior log to check, skip term check
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
+		return AppendEntriesResponse{}, err
 	}
-
-	if prevLog.Term != args.PrevLogTerm {
+	if !ok || prevTerm != args.PrevLogTerm {
 		return AppendEntriesResponse{
 			Term:    uint64(currentTerm),
 			Success: false,
@@ -185,4 +179,31 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 		Term:    uint64(currentTerm),
 		Success: true,
 	}, nil
+}
+
+// logTermAt returns the term of the log entry at index for the prevLog
+// consistency check, treating the log floor as a valid anchor even when the entry
+// itself has been compacted into a snapshot:
+//   - index 0                      → term 0 (the empty-log floor).
+//   - index == snapshotLatestIndex → the snapshot's term; the entry lives inside
+//     the latest snapshot and its metadata is the proof we agree at that index.
+//   - otherwise                    → the stored entry's term.
+//
+// ok is false when there is neither a stored entry nor an anchor at index, which
+// the caller treats as a log inconsistency (reply false; the leader backs off).
+func (n *Node) logTermAt(ctx context.Context, index uint64) (term uint64, ok bool, err error) {
+	if index == 0 {
+		return 0, true, nil
+	}
+	if snapIdx := n.GetSnapshotLatestIndex(); snapIdx != 0 && index == uint64(snapIdx) {
+		return uint64(n.GetSnapshotLatestTerm()), true, nil
+	}
+	entry, err := n.store.GetLogByIndex(ctx, uint(index))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	return entry.Term, true, nil
 }

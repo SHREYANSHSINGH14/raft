@@ -173,14 +173,23 @@ func (n *Node) GetCurrentTerm(ctx context.Context) (uint, error) {
 	return n.store.GetCurrentTerm(ctx)
 }
 
-func (n *Node) SetSnapshotLatestIndex(idx uint) {
+// SetSnapshotLatest records the latest snapshot's last-included index and term
+// together, under one lock, so a reader never sees a torn (index, term) pair.
+func (n *Node) SetSnapshotLatest(idx, term uint) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.snapshotLatestIndex = idx
+	n.snapshotLatestTerm = term
 }
 
 func (n *Node) GetSnapshotLatestIndex() uint {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.snapshotLatestIndex
+}
+
+func (n *Node) GetSnapshotLatestTerm() uint {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snapshotLatestTerm
 }

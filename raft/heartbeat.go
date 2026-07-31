@@ -149,9 +149,13 @@ func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				if n.GetPeerIndex(peerID).NextIndex < uint(n.GetSnapshotLatestIndex()) {
-					// follower is too far behind, needs to install snapshot
-					zerolog.Ctx(ctx).Debug().Msgf("peer %s nextIndex %d is less than first log index %d, sending snapshot", peerID, n.GetPeerIndex(peerID).NextIndex, n.GetSnapshotLatestIndex())
+				snapIdx := n.GetSnapshotLatestIndex()
+				// nextIndex <= snapshot index means the peer is missing an entry at or
+				// before the snapshot boundary — it is behind the snapshot, so send a
+				// snapshot, not logs. (nextIndex == snapshotIndex+1 falls through to
+				// sendLogs, which anchors prevLog on the snapshot via logTermAt.)
+				if snapIdx > 0 && n.GetPeerIndex(peerID).NextIndex <= snapIdx {
+					zerolog.Ctx(ctx).Debug().Msgf("peer %s nextIndex %d is at or below snapshot index %d, sending snapshot", peerID, n.GetPeerIndex(peerID).NextIndex, snapIdx)
 					go n.sendInstallSnapshot(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
 				} else {
 					go n.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
@@ -180,16 +184,30 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	nextIdx := n.GetPeerIndex(peerID).NextIndex
 
-	var prevLog LogEntry
+	var prevLogIndex, prevLogTerm uint
 	if nextIdx > 1 {
-		prevLog, err = n.store.GetLogByIndex(ctx, nextIdx-1)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err at index:%d : %s", nextIdx-1, err.Error())
+		prevLogIndex = nextIdx - 1
+		// logTermAt resolves the term even when prevLogIndex is the compacted snapshot
+		// boundary — e.g. right after we InstallSnapshot'd this peer and set its
+		// nextIndex to snapshotIndex+1, prevLogIndex is snapshotIndex whose entry is
+		// gone. It reads the cached snapshot term instead of failing on GetLogByIndex.
+		term, ok, termErr := n.logTermAt(ctx, uint64(prevLogIndex))
+		if termErr != nil {
+			zerolog.Ctx(ctx).Error().Err(termErr).Msgf("send logs db err at index:%d : %s", prevLogIndex, termErr.Error())
+			errChan <- termErr
+			return
+		}
+		if !ok {
+			// No entry and not the snapshot boundary — the peer is behind the snapshot
+			// (the sendLogsPerPeer guard should have sent a snapshot). Bail this round.
+			err = fmt.Errorf("send logs: no entry or snapshot anchor at index %d for peer %s", prevLogIndex, peerID)
+			zerolog.Ctx(ctx).Error().Err(err).Msg("send logs: cannot build prevLog")
 			errChan <- err
 			return
 		}
+		prevLogTerm = uint(term)
 	}
-	// nextIdx <= 1: prevLog is zero value {Index:0, Term:0} — correct for the first entry
+	// nextIdx <= 1: prevLogIndex/prevLogTerm stay 0 — correct for the first entry
 
 	logs, err := n.store.GetLogs(ctx, &nextIdx, nil)
 	if err != nil {
@@ -200,7 +218,7 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 
 	peerLogLen := uint(len(logs))
 
-	res, err := n.sendAppendLogs(ctx, peerID, currentTerm, uint(prevLog.Term), uint(prevLog.Index), n.commitIndex, logs)
+	res, err := n.sendAppendLogs(ctx, peerID, currentTerm, prevLogTerm, prevLogIndex, n.commitIndex, logs)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in append logs rpc response from peer %s", peerID)
 		errChan <- err
