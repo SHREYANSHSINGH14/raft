@@ -1,0 +1,49 @@
+%% raft — clean block map of one node. View at mermaid.live, or: mmdc -i architecture.mmd -o architecture.svg
+%% Per-concern diagrams with prose live in docs/architecture.md
+flowchart TB
+    CLIENT(["app client"])
+    PEERS(["peer nodes"])
+
+    subgraph NODE["raft.Node"]
+        direction TB
+        ROLES["Role engine<br/>Follower · Candidate · Leader"]
+        ELECT["Election<br/>request votes from voters"]
+        REPL["Replication (leader)<br/>heartbeat · commit-index updater"]
+        HAND["Inbound handlers<br/>AppendEntries · RequestVote · InstallSnapshot"]
+        MEMB["AddMember<br/>stage · snapshot · catch-up · promote"]
+        CMT["Commit + Apply<br/>commitCond · apply loop"]
+        SNAP["Snapshot (NOT wired to Start)<br/>capture · delay-compact"]
+    end
+
+    subgraph BND["caller-implemented boundary"]
+        TR["Transport"]
+        ST["Storage — the log"]
+        SM["StateMachine"]
+    end
+
+    %% control flow: role drives election vs replication
+    ROLES -->|becomes leader| REPL
+    ROLES -->|follower / candidate| ELECT
+
+    %% who calls in
+    CLIENT -->|Propose| CMT
+    CLIENT -->|AddMember| MEMB
+    PEERS -->|inbound RPC| HAND
+
+    %% RPCs out
+    ELECT --> TR
+    REPL --> TR
+    MEMB -->|snapshot + catch-up| TR
+    TR --> PEERS
+
+    %% commit and apply
+    HAND -->|leaderCommit| CMT
+    REPL -->|majority matchIndex| CMT
+    CMT -->|apply committed| SM
+    HAND -->|append / truncate| ST
+
+    %% snapshot + membership coupling
+    SNAP -->|capture| SM
+    SNAP -->|compact prefix| ST
+    HAND & REPL -.->|"prevLog anchor (logTermAt)"| SNAP
+    MEMB <-->|"retain floor · catchUpSignal"| SNAP

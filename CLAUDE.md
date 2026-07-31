@@ -6,6 +6,7 @@ A Raft consensus implementation built from the paper, structured as an importabl
 - `README.md` — what it is and how to use it (the map)
 - `JOURNEY.md` — bugs hit, why they happened, what each fix taught (the travel log)
 - `STATE.md` — what is in flight right now (read this first when resuming)
+- `docs/architecture.mmd` — one connected Mermaid flowchart of a whole node (read when the details stop fitting in your head); `docs/architecture.md` is the per-concern breakdown with prose
 - `docs/` — design decisions made before building
 
 ## Architecture

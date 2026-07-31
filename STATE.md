@@ -10,10 +10,12 @@ The membership-change milestone. `AddMember` is now an end-to-end flow, and the 
 
 - membership config tracking (`configurations` latest/committed, §5.3 conflict-only append).
 - exclude non-voters from replication + majority math.
-- **this commit** — `AddMember` + InstallSnapshot send path + catch-up + deadline scaling.
+- `AddMember` + InstallSnapshot send path + catch-up + deadline scaling.
+- **latest (`5991a3d`)** — anchor the prevLog check on the snapshot boundary, both sides
+  (`logTermAt` + cached `snapshotLatestTerm`), which unblocks catch-up against a real follower.
 
-`go build ./...`, `go vet ./...`, and `go test ./...` are green.
-**`go test ./... -race` is not** — the pre-existing `Persist`-goroutine race (top blocking item).
+`go build ./...`, `go vet ./...`, `go test ./...`, **and `go test ./... -race`** are all green — the
+long-standing `Persist`-goroutine race is fixed (`runSnapshotOnce` now joins the goroutine).
 
 ## In flight: membership changes (`AddMember`)
 
@@ -35,20 +37,15 @@ The membership-change milestone. `AddMember` is now an end-to-end flow, and the 
   heartbeat and catch-up. Entries aren't serialized at this layer, so it's count-based not byte-based.
 - Staging peers skipped in the heartbeat fan-out (`startSendLogs`); `getMajorityMatchIndex`/election/
   `waitForQuorum` count Voters only (`majoritySize`, `voterPeerIDs`).
+- **Snapshot-boundary prevLog anchor** (commit `5991a3d`): `logTermAt` treats `prevLogIndex ==
+  snapshotLatestIndex` as a valid anchor (validated against a cached `snapshotLatestTerm`, set on both
+  create and install), so replication survives compaction. Used on **both** sides — the follower
+  (`HandleAppendEntries`) and the leader (`sendLogs` + AddMember catch-up). This closed the "catch-up
+  rejected by a real follower" blocker.
 
 ### Blocking / broken — do these first
 
-1. **`-race`: the `Persist` goroutine is never joined.** `runSnapshotOnce` spawns `go snap.Persist(...)`
-   and returns without waiting. `TestRunSnapshotOnce_PersistError_TmpDirCleaned` fails under `-race`
-   because the goroutine records a mock call while `AssertExpectations` reads it. Fix: capture the error
-   in a buffered channel, `pr.Close()` first, receive before returning.
-2. **The catch-up's first AppendEntries will be rejected by the follower.** It sends `prevLogIndex =
-   meta.Index` (the snapshot anchor), but `HandleAppendEntries` still does `GetLogByIndex(prevLogIndex)`
-   → `ErrNotFound` (that index is inside the snapshot, compacted) → reply false. The follower needs to
-   accept the snapshot boundary as a valid prevLog anchor — i.e. a `logTermAt` helper that validates
-   `prevLogIndex == snapshotLatestIndex` against a cached `snapshotLatestTerm`. **Neither exists yet.**
-   Until this lands, catch-up cannot actually succeed against a real follower.
-3. **`db.Store.CompactLogs`/`DeleteLogs` prefix path** — confirm the production store actually deletes
+1. **`db.Store.CompactLogs`/`DeleteLogs` prefix path** — confirm the production store actually deletes
    the prefix (the mocks do). Compaction being a no-op in prod would mask the whole retain-floor design.
 
 ### Not wired at all
@@ -67,9 +64,10 @@ The membership-change milestone. `AddMember` is now an end-to-end flow, and the 
 
 ## Open questions worth resolving
 
-- `SnapshotMeta.PrevIndex/PrevTerm` = `meta.Index-1`'s entry. The catch-up anchor should really be
-  `meta.Index/meta.Term` (the snapshot's own last-included). Revisit whether `PrevIndex/PrevTerm` is the
-  right field or an off-by-one.
+- The catch-up now anchors at `meta.Index/meta.Term` (the snapshot's own last-included) and the backoff
+  uses `logTermAt`, so the boundary is handled correctly. `SnapshotMeta.PrevIndex/PrevTerm`
+  (= `meta.Index-1`'s entry) is now unused by the catch-up — likely vestigial; remove it or find it a
+  purpose.
 - Why streaming InstallSnapshot rather than the paper's chunked/offset form?
 - Why `clientMu` in the library rather than `server/rpc.go`? (Answer reconstructed in chat: the
   check-then-act on term/votedFor/log isn't transactional; the lock must not depend on every caller
