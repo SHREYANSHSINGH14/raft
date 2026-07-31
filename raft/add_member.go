@@ -159,23 +159,27 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 			}
 
 			if !res.Success {
-				// Log inconsistency: back off one entry and retry from there. If the
-				// entry we need to back off to has itself been compacted, the member
-				// is further behind than the log now holds — restart from a snapshot.
+				// Log inconsistency: back off one entry and retry from there.
+				// logTermAt resolves the term even at the snapshot boundary
+				// (prevLogIdx-1 == snapshotLatestIndex), so backing off onto the anchor
+				// works without a full resend. ok == false means prevLogIdx-1 is below
+				// the snapshot — the member is further behind than the log now holds, so
+				// restart from a snapshot.
 				if prevLogIdx == 0 {
 					return fmt.Errorf("addMember: append entries rejected at start of log for peer %q", peerID)
 				}
-				backoff, err := n.store.GetLogByIndex(ctx, prevLogIdx-1)
-				if err != nil {
-					if errors.Is(err, ErrNotFound) {
-						zerolog.Ctx(ctx).Debug().Msg("addMember: back-off entry compacted, resending snapshot")
-						goto send_snapshot
-					}
-					return err
+				backoffIdx := prevLogIdx - 1
+				term, ok, termErr := n.logTermAt(ctx, uint64(backoffIdx))
+				if termErr != nil {
+					return termErr
 				}
-				startIdx = uint(backoff.Index) + 1
-				prevLogIdx = uint(backoff.Index)
-				prevLogTerm = uint(backoff.Term)
+				if !ok {
+					zerolog.Ctx(ctx).Debug().Msg("addMember: back-off entry compacted, resending snapshot")
+					goto send_snapshot
+				}
+				startIdx = backoffIdx + 1
+				prevLogIdx = backoffIdx
+				prevLogTerm = uint(term)
 				continue
 			}
 
