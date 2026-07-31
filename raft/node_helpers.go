@@ -120,6 +120,12 @@ func (n *Node) addPeer(id string, peer Peer) {
 	return
 }
 
+func (n *Node) removePeer(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.configurations.latest, id)
+}
+
 func (n *Node) hasStagingPeer() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -165,4 +171,16 @@ func (n *Node) GetLeaderID() string {
 
 func (n *Node) GetCurrentTerm(ctx context.Context) (uint, error) {
 	return n.store.GetCurrentTerm(ctx)
+}
+
+func (n *Node) SetSnapshotLatestIndex(idx uint) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.snapshotLatestIndex = idx
+}
+
+func (n *Node) GetSnapshotLatestIndex() uint {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snapshotLatestIndex
 }

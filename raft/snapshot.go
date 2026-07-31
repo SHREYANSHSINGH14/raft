@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,8 @@ const (
 type SnapshotMeta struct {
 	Index        uint                 `json:"index"`
 	Term         uint                 `json:"term"`
+	PrevIndex    uint                 `json:"prev_index"`
+	PrevTerm     uint                 `json:"prev_term"`
 	ID           string               `json:"id"` // Server ID of the node that created/got the snapshot
 	LeaderID     string               `json:"leader_id"`
 	MemberConfig map[string]PeerState `json:"member_config"`
@@ -45,11 +48,11 @@ func (n *Node) startSnapshotLoop(ctx context.Context) {
 }
 
 func (n *Node) runSnapshotOnce(ctx context.Context) error {
-	lastAppliedIndex, err := n.store.GetLastApplied(ctx)
+	latestAppliedIndex, err := n.store.GetLastApplied(ctx)
 	if err != nil {
 		return fmt.Errorf("getting last applied index: %w", err)
 	}
-	if !shouldTriggerSnapshot(ctx, n.cfg.SnapshotDir, lastAppliedIndex, n.cfg.SnapshotThreshold) {
+	if !shouldTriggerSnapshot(ctx, n.cfg.SnapshotDir, latestAppliedIndex, n.cfg.SnapshotThreshold) {
 		return nil
 	}
 
@@ -59,16 +62,32 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		n.snapShotInProgress.Store(false)
 		return fmt.Errorf("taking snapshot: %w", err)
 	}
-	latestAppliedIndex, err := n.store.GetLastApplied(ctx)
+	latestAppliedIndex, err = n.store.GetLastApplied(ctx)
 	if err != nil {
 		n.snapShotInProgress.Store(false)
 		return fmt.Errorf("getting latest applied index: %w", err)
 	}
 	n.snapShotInProgress.Store(false)
 	n.commitCond.Broadcast()
-	latestLog, err := n.store.GetLogByIndex(ctx, latestAppliedIndex)
+	latestAppliedLog, err := n.store.GetLogByIndex(ctx, latestAppliedIndex)
 	if err != nil {
 		return fmt.Errorf("getting latest log entry: %w", err)
+	}
+
+	// prevLastAppliedLog anchors the snapshot to the entry just before its last
+	// included index. If that entry does not exist — latestAppliedIndex is 1 (there
+	// is no entry at index 0) or index-1 was already compacted into an earlier
+	// snapshot — fall back to the empty-log anchor {Index:0, Term:0} rather than
+	// failing the whole snapshot.
+	var prevLastAppliedLog LogEntry
+	if latestAppliedIndex > 1 {
+		prevLastAppliedLog, err = n.store.GetLogByIndex(ctx, latestAppliedIndex-1)
+		if err != nil {
+			if !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("getting prev latest log entry: %w", err)
+			}
+			prevLastAppliedLog = LogEntry{}
+		}
 	}
 
 	pr, pw := io.Pipe()
@@ -80,7 +99,7 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	defer pr.Close()
 
 	timestamp := time.Now()
-	snapshotDirName := generateLatestSnapshotDirName(latestAppliedIndex, uint(latestLog.Term), timestamp)
+	snapshotDirName := generateLatestSnapshotDirName(latestAppliedIndex, uint(latestAppliedLog.Term), timestamp)
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + snapshotDirName
 	memberConfig := make(map[string]PeerState)
 	for id, peer := range n.peersSnapshot() {
@@ -88,18 +107,58 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	}
 	meta := SnapshotMeta{
 		Index:        latestAppliedIndex,
-		Term:         uint(latestLog.Term),
+		Term:         uint(latestAppliedLog.Term),
 		ID:           n.GetID(),
 		LeaderID:     n.GetLeaderID(),
 		MemberConfig: memberConfig,
 		Timestamp:    timestamp,
+		PrevIndex:    uint(prevLastAppliedLog.Index),
+		PrevTerm:     uint(prevLastAppliedLog.Term),
 	}
 	err = writeSnapshotToDisk(pr, snapshotDirPath, meta, snap.Release)
 	if err != nil {
 		return fmt.Errorf("writing snapshot to disk: %w", err)
 	}
+	n.SetSnapshotLatestIndex(latestAppliedIndex)
 
+	// Delay (do not skip) compaction while a catching-up member still needs logs at
+	// or below latestAppliedIndex. Parks until the floor clears rather than busy-
+	// waiting, and exits on shutdown.
+	if err := n.waitForCatchUpFloor(ctx, latestAppliedIndex); err != nil {
+		return err
+	}
 	return n.store.DeleteLogs(ctx, 0, latestAppliedIndex)
+}
+
+// waitForCatchUpFloor blocks until it is safe to compact up to upto — i.e. no
+// catch-up retain floor sits at or below upto — or ctx is cancelled. It re-Loads
+// the floor after every wake because the floor is level state, not a one-shot
+// event: intermediate changes (the floor advancing but still <= upto) must keep it
+// waiting. add_member pokes catchUpSignal on every floor change via setCatchingUpIdx.
+func (n *Node) waitForCatchUpFloor(ctx context.Context, upto uint) error {
+	for {
+		floor := n.catchingUpIdx.Load()
+		if floor == DefaultCatchingUpIdx || uint(floor) > upto {
+			return nil
+		}
+		select {
+		case <-n.catchUpSignal:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// setCatchingUpIdx updates the catch-up retain floor and wakes any snapshot
+// goroutine parked in waitForCatchUpFloor. The send is non-blocking on a size-1
+// buffered channel: if a wake is already queued, dropping the duplicate is fine
+// because the waiter re-Loads the latest floor when it runs.
+func (n *Node) setCatchingUpIdx(idx int64) {
+	n.catchingUpIdx.Store(idx)
+	select {
+	case n.catchUpSignal <- struct{}{}:
+	default:
+	}
 }
 
 func generateLatestSnapshotDirName(latestIndex, latestTerm uint, timestamp time.Time) string {
@@ -275,41 +334,41 @@ func writeFileSynced(path string, write func(*os.File) error) error {
 	return f.Close()
 }
 
-func (n *Node) callInstallSnapshot(ctx context.Context, target string) (*InstallSnapshotResponse, uint, error) {
+func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *InstallSnapshotResponse, snapshotMeta SnapshotMeta, err error) {
 	latestSnapshotDir, err := n.getLatestSnapshotDir()
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
 	}
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + latestSnapshotDir
 	metafile, err := os.Open(snapshotDirPath + "/" + MetaFileName)
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: opening snapshot meta file: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: opening snapshot meta file: %w", err)
 	}
 	defer metafile.Close()
 	var meta SnapshotMeta
 	err = json.NewDecoder(metafile).Decode(&meta)
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: reading snapshot meta: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: reading snapshot meta: %w", err)
 	}
 
 	snapshotFilePath := snapshotDirPath + "/" + SnapshotFileName
 	snapshotFile, err := os.Open(snapshotFilePath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: opening snapshot file: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: opening snapshot file: %w", err)
 	}
 	defer snapshotFile.Close()
 	snapshotFileInfo, err := snapshotFile.Stat()
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: getting snapshot file info: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting snapshot file info: %w", err)
 	}
 	snapshotFileSize := snapshotFileInfo.Size()
 	if snapshotFileSize <= 0 {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: snapshot file size is zero")
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: snapshot file size is zero")
 	}
 
 	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
-		return nil, 0, fmt.Errorf("callInstallSnapshot: getting current term: %w", err)
+		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting current term: %w", err)
 	}
 
 	req := InstallSnapshotArgs{
@@ -330,7 +389,7 @@ func (n *Node) callInstallSnapshot(ctx context.Context, target string) (*Install
 	defer cancel()
 	resp, err := n.transport.InstallSnapshot(deadLineCtx, target, req)
 	if err != nil {
-		return nil, 0, err
+		return nil, SnapshotMeta{}, err
 	}
-	return &resp, meta.Index, nil
+	return &resp, meta, nil
 }

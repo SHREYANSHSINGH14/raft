@@ -17,6 +17,8 @@ const (
 	ServerRole_Leader    ServerRole = "LEADER"
 )
 
+const DefaultCatchingUpIdx int64 = -1
+
 // Node is the library entry point. Create one with NewNode, then call Start.
 type Node struct {
 	ID       string
@@ -71,24 +73,42 @@ type Node struct {
 	// when statemachine is taking a snapshot, this flag is set to prevent apply loop from applying new entries and
 	//potentially diverging lastApplied index from the snapshot index
 	snapShotInProgress atomic.Bool
+
+	// This is set every time a new snapshot is taken, it represents the value for the latest snapshot
+	snapshotLatestIndex uint
+
+	// catchingUpIdx is the retain floor a catching-up member publishes: while it is
+	// not DefaultCatchingUpIdx, the compactor must not delete logs at or above it.
+	// catchUpSignal wakes the snapshot goroutine parked in waitForCatchUpFloor each
+	// time the floor changes (see setCatchingUpIdx). Buffered size 1: a pending wake
+	// is enough because the waiter always re-Loads the latest floor.
+	catchingUpIdx atomic.Int64
+	catchUpSignal chan struct{}
 }
 
 func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) *Node {
 	node := Node{
-		ID:                cfg.ID,
-		Role:              ServerRole_Follower,
-		transport:         transport,
-		sm:                sm,
-		store:             storage,
-		cfg:               cfg,
-		commitIndex:       0,
-		lastApplied:       0,
-		LeaderID:          "",
-		electionTimeoutCh: make(chan struct{}, 2),
-		mu:                sync.Mutex{},
-		commitMu:          sync.Mutex{},
-		clientMu:          sync.Mutex{},
+		ID:                  cfg.ID,
+		Role:                ServerRole_Follower,
+		transport:           transport,
+		sm:                  sm,
+		store:               storage,
+		cfg:                 cfg,
+		commitIndex:         0,
+		lastApplied:         0,
+		LeaderID:            "",
+		electionTimeoutCh:   make(chan struct{}, 2),
+		mu:                  sync.Mutex{},
+		commitMu:            sync.Mutex{},
+		clientMu:            sync.Mutex{},
+		snapshotLatestIndex: 0,
+		catchUpSignal:       make(chan struct{}, 1),
 	}
+
+	// No member is catching up at startup. The zero value of atomic.Int64 is 0,
+	// which is a valid log index, so it must be set to the inactive sentinel
+	// explicitly — otherwise the compactor would think a floor at index 0 is held.
+	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
 
 	node.commitCond = *sync.NewCond(&node.commitMu)
 

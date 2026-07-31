@@ -95,6 +95,22 @@ Config entries carry the **whole** configuration as a JSON `map[string]Peer` (Ad
 `latest`. `committed` still only advances on commit (`setCommittedConfiguration`), which is not yet
 wired into the apply loop — see STATE.md.
 
+### Compaction is *delayed* for a catching-up member, never bounded — via a channel, not a spin.
+
+While `AddMember` catches up a new member it publishes a retain floor in `catchingUpIdx` (atomic): the
+lowest log index that member still needs. `runSnapshotOnce` does not compact past it — it **parks** in
+`waitForCatchUpFloor` until the floor clears (`floor == DefaultCatchingUpIdx` or `floor > compact
+target`), waking on the `catchUpSignal` channel or `ctx.Done()`. Always change the floor through
+`setCatchingUpIdx` (store **and** signal) — a bare `catchingUpIdx.Store` leaves the snapshot goroutine
+asleep forever. The wait re-Loads the floor after every wake because the floor is level state, not a
+one-shot event.
+
+Two footguns: (1) `catchingUpIdx` **must be initialised to `DefaultCatchingUpIdx`** in `NewNode`/
+`NewNodeMock` — the `atomic.Int64` zero value is `0`, a valid index, which would make the compactor
+think a floor at 0 is permanently held and block the first snapshot forever. (2) `AddMember`'s `defer`
+must release the floor through `setCatchingUpIdx(DefaultCatchingUpIdx)` so the signal fires on every
+exit path (success, abort, panic-unwind).
+
 ## Conventions
 
 - Errors: `ErrNotFound` is defined in `raft/` so the library doesn't depend on Pebble's sentinel.

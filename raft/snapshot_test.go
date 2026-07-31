@@ -146,6 +146,7 @@ func TestRunSnapshotOnce_PersistError_TmpDirCleaned(t *testing.T) {
 
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(10), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 1}, nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(9)).Return(LogEntry{Index: 9, Term: 1}, nil)
 	sm.On(methodSnapshot, mock.Anything).Return(snap, nil)
 	snap.On(methodPersist, mock.Anything, mock.Anything).Return(errors.New("persist error"))
 

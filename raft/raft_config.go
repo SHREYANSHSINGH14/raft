@@ -12,6 +12,16 @@ type Config struct {
 	InstallSnapshotDeadlineScaleSizeByte int
 	InstallSnapshotDeadlineScaleTimeMs   int
 
+	// AppendEntries RPC deadline scaling. A batch of log entries can be large
+	// (e.g. the whole retained tail sent to a catching-up member), so the RPC
+	// deadline is RPCTimeoutMs plus AppendEntriesDeadlineScaleTimeMs for every
+	// AppendEntriesDeadlineScaleCount entries in the batch. Entries are handed to
+	// the Transport as structs — they are not serialized at this layer — so the
+	// batch is measured in entry count, not bytes. Set ScaleCount to 0 to disable
+	// scaling and use a flat RPCTimeoutMs.
+	AppendEntriesDeadlineScaleCount  int
+	AppendEntriesDeadlineScaleTimeMs int
+
 	SnapshotDir string
 	// will only be used by snapshot loop
 	SnapshotInterval  uint // in seconds

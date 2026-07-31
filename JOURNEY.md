@@ -249,6 +249,37 @@ last-committed configuration. See `STATE.md`.
 
 ---
 
+## Bug 5: Catching a new member up, without the snapshot loop deleting the logs it needs
+
+Adding a member has a race between two subsystems. `AddMember` sends the new server a snapshot, then
+replicates the log tail after it. Meanwhile the periodic snapshot loop keeps compacting — and if it
+compacts past where the member has caught up to, the logs the catch-up still needs are gone, and (worse
+than a wasted retry) the next round can append entries with a gap in the follower's log. Two lessons
+came out of getting this right.
+
+**Delay, don't bound — but with the right primitive.** The fix is a retain floor: the member publishes
+the lowest index it still needs in `catchingUpIdx`, and the compactor refuses to delete past it. The
+first attempt did that with a bare spin — `for floor <= target {}` with an empty body. That is a
+busy-wait: it pegs a CPU core re-reading an atomic millions of times a second while nothing changes,
+and it never checks `ctx.Done()`, so it hangs forever on shutdown. The lesson is the standard one, but
+it's easy to reach for the spin first: *waiting on a predicate that another goroutine changes is a
+condition-variable/channel problem, not a loop problem.* The rewrite parks in a `select` on a buffered
+signal channel (or `ctx.Done()`), and — because the floor is **level** state, not a one-shot event —
+re-Loads the floor after every wake rather than assuming one signal means "safe now." The signal is a
+"something changed, look again" tap, not a "you may proceed" grant. Intermediate taps (the floor
+advancing but still below the compaction target) must keep it waiting.
+
+**An atomic's zero value is a value, not "unset."** `catchingUpIdx` is an `atomic.Int64`; its zero
+value is `0` — which is a perfectly valid log index. The inactive sentinel is a separate constant
+(`DefaultCatchingUpIdx`), so forgetting to initialise the field in `NewNode` doesn't leave it "empty,"
+it leaves it claiming a retain floor at index 0 — and the compactor then blocks the *first* snapshot
+forever, waiting for a catch-up that will never release a floor nobody set. This was masked only
+because the snapshot loop isn't wired into a running node yet. The general rule: when a zero value is a
+legal domain value, the "none" state needs its own sentinel *and* explicit initialisation — the type's
+default can't carry that meaning for you.
+
+---
+
 ## The Refactor: From Binary to Library
 
 With the core bugs fixed, the implementation worked as a 5-node Docker cluster. But the code was

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -148,14 +149,9 @@ func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 		select {
 		case <-ticker.C:
 			if !inFlight {
-				firstLog, err := n.store.GetFirstLogEntry(sendLogCtx)
-				if err != nil {
-					zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs per peer db error: %s", err.Error())
-					continue
-				}
-				if n.GetPeerIndex(peerID).NextIndex < uint(firstLog.Index) {
+				if n.GetPeerIndex(peerID).NextIndex < uint(n.GetSnapshotLatestIndex()) {
 					// follower is too far behind, needs to install snapshot
-					zerolog.Ctx(ctx).Debug().Msgf("peer %s nextIndex %d is less than first log index %d, sending snapshot", peerID, n.GetPeerIndex(peerID).NextIndex, firstLog.Index)
+					zerolog.Ctx(ctx).Debug().Msgf("peer %s nextIndex %d is less than first log index %d, sending snapshot", peerID, n.GetPeerIndex(peerID).NextIndex, n.GetSnapshotLatestIndex())
 					go n.sendInstallSnapshot(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
 				} else {
 					go n.sendLogs(sendLogCtx, peerID, sendLogErrChan, stepDownCh, updateCommitIndexCh)
@@ -254,12 +250,35 @@ func (n *Node) sendAppendLogs(ctx context.Context, peerID string, currentTerm, p
 		Entries:      logs,
 		LeaderCommit: uint64(leaderCommit),
 	}
-	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(n.cfg.RPCTimeoutMs)*time.Millisecond)
+	deadLineCtx, cancel := context.WithTimeout(ctx, n.appendEntriesDeadline(len(logs)))
 	defer cancel()
 	return n.transport.AppendEntries(deadLineCtx, peerID, rpcReq)
 }
 
+// appendEntriesDeadline returns the RPC timeout for replicating a batch, scaled
+// by how many entries it carries: RPCTimeoutMs plus AppendEntriesDeadlineScaleTimeMs
+// for every AppendEntriesDeadlineScaleCount entries. A large catch-up batch thus
+// gets proportionally longer than a small heartbeat delta. ScaleCount == 0
+// disables scaling and returns a flat RPCTimeoutMs.
+func (n *Node) appendEntriesDeadline(entryCount int) time.Duration {
+	ms := n.cfg.RPCTimeoutMs
+	if n.cfg.AppendEntriesDeadlineScaleCount > 0 {
+		ms += (entryCount / n.cfg.AppendEntriesDeadlineScaleCount) * n.cfg.AppendEntriesDeadlineScaleTimeMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func (n *Node) sendInstallSnapshot(ctx context.Context, peerID string, errChan chan<- error, stepDownCh, updateCommitIndexCh chan<- struct{}) {
+	sendSnapshotCount := 0
+
+send_snapshot:
+	sendSnapshotCount++
+	if sendSnapshotCount > 5 { // TODO: make 5 configurable
+		err := fmt.Errorf("install snapshot is slow and node not able to catchup aborting")
+		zerolog.Ctx(ctx).Error().Err(err).Msg("sendInstallSnapshot: " + err.Error())
+		errChan <- err
+		return
+	}
 	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs db err: %s", err.Error())
@@ -267,7 +286,7 @@ func (n *Node) sendInstallSnapshot(ctx context.Context, peerID string, errChan c
 		return
 	}
 
-	res, snapshotIndex, err := n.callInstallSnapshot(ctx, peerID)
+	res, snapshotMeta, err := n.callInstallSnapshot(ctx, peerID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("error in send install snapshot response from peerID: %s", peerID)
 		errChan <- err
@@ -282,11 +301,22 @@ func (n *Node) sendInstallSnapshot(ctx context.Context, peerID string, errChan c
 	}
 
 	if res.Success {
-		n.SetMatchPeerIndex(peerID, snapshotIndex)
-		n.SetNextPeerIndex(peerID, snapshotIndex+1)
+		n.SetMatchPeerIndex(peerID, snapshotMeta.Index)
+		n.SetNextPeerIndex(peerID, snapshotMeta.Index+1)
 		updateCommitIndexCh <- struct{}{}
 	} else {
 		zerolog.Ctx(ctx).Debug().Msgf("install snapshot failed peer: %s", peerID)
+	}
+
+	_, err = n.store.GetLogByIndex(ctx, n.GetPeerIndex(peerID).NextIndex)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			zerolog.Ctx(ctx).Debug().Msg("sendInstallSnapshot: logs compacted sending snapshot again")
+			goto send_snapshot
+		}
+		zerolog.Ctx(ctx).Debug().Msgf("sendInstallSnapshot: error getting log at index: %d", snapshotMeta.Index)
+		errChan <- err
+		return
 	}
 
 	errChan <- nil

@@ -38,32 +38,61 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 		return
 	}
 
-	latestSnapshotIdx, err := getLatestSnapshotIndex(dirs)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting latest snapshot index")
-		success = false
-		return
-	}
-
-	if req.SnapshotMetadata.LastIncludedIndex <= uint64(latestSnapshotIdx) {
-		zerolog.Ctx(ctx).Debug().Msgf("install snapshot: ignoring request from %s with snapshot index %d, latest snapshot index is %d", req.LeaderID, req.SnapshotMetadata.LastIncludedIndex, latestSnapshotIdx)
-		err = n.store.SetCurrentTerm(ctx, uint(req.Term))
+	if len(dirs) > 0 {
+		var latestSnapshotIdx uint
+		latestSnapshotIdx, err = getLatestSnapshotIndex(dirs)
 		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting current term")
+			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting latest snapshot index")
 			success = false
 			return
 		}
 
-		err = n.store.SetVotedFor(ctx, req.LeaderID)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting voted for")
-			success = false
-			return
-		}
+		if req.SnapshotMetadata.LastIncludedIndex <= uint64(latestSnapshotIdx) {
+			zerolog.Ctx(ctx).Debug().Msgf("install snapshot: ignoring request from %s with snapshot index %d, latest snapshot index is %d", req.LeaderID, req.SnapshotMetadata.LastIncludedIndex, latestSnapshotIdx)
+			err = n.store.SetCurrentTerm(ctx, uint(req.Term))
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting current term")
+				success = false
+				return
+			}
 
-		n.SetLeaderID(req.LeaderID)
-		success = true
-		return
+			err = n.store.SetVotedFor(ctx, req.LeaderID)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting voted for")
+				success = false
+				return
+			}
+
+			n.SetLeaderID(req.LeaderID)
+			success = true
+			return
+		} else {
+			for _, dir := range dirs {
+				if !dir.IsDir() {
+					continue
+				}
+				err = os.RemoveAll(dir.Name())
+				if err != nil {
+					zerolog.Ctx(ctx).Error().Err(err).Msgf("install snapshot: error deleting %s", dir.Name())
+					return
+				}
+			}
+
+			var lastIndex uint
+			lastIndex, err = n.store.GetLastLogIndex(ctx)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting lastIndex")
+				return
+			}
+
+			if lastIndex > 0 {
+				err = n.store.DeleteLogs(ctx, 0, lastIndex)
+				if err != nil {
+					zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
+					return
+				}
+			}
+		}
 	}
 
 	timestamp := time.Now()

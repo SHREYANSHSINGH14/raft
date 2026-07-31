@@ -42,7 +42,15 @@ type Storage interface {
 	GetLastApplied(ctx context.Context) (uint, error)
 
 	AppendLogs(ctx context.Context, entries []LogEntry) error
-	// GetLogs must return entries in ascending Index order.
+	// GetLogs returns every log entry whose index lies in the half-open range
+	// [start, end): start is inclusive, end is exclusive. Bounds are pointers
+	// (rather than a 0 sentinel like DeleteLogs) so a nil bound means "no bound
+	// on this side". Note the asymmetry with DeleteLogs, whose range is fully
+	// inclusive — here the end is exclusive. So:
+	//   - GetLogs(ctx, &from, nil)  returns the suffix index >= from.
+	//   - GetLogs(ctx, nil, &to)    returns the prefix index <  to.
+	//   - GetLogs(ctx, nil, nil)    returns all log entries.
+	// Entries must be returned in ascending Index order.
 	GetLogs(ctx context.Context, start, end *uint) ([]LogEntry, error)
 	GetLogByIndex(ctx context.Context, idx uint) (LogEntry, error)
 	// DeleteLogs removes every log entry whose index lies in the inclusive
@@ -57,8 +65,14 @@ type Storage interface {
 	DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error
 
 	GetLastLogEntry(ctx context.Context) (LogEntry, error)
+
+	// Note: returns 0 and error nil when no logs are present
 	GetLastLogIndex(ctx context.Context) (uint, error)
+	// Note: returns 0 and error nil when no logs are present
 	GetLastLogTerm(ctx context.Context) (uint, error)
 
+	// GetFirstLogEntry returns the first log entry in the log i.e. the log entry with the smallest
+	// index. This is used to determine if a snapshot is needed when a follower's nextIndex is less than the
+	// first log entry index. In that case, the follower needs to install a snapshot to catch up.
 	GetFirstLogEntry(ctx context.Context) (LogEntry, error)
 }

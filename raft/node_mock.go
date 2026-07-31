@@ -54,12 +54,14 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 		electionTimeoutCh: make(chan struct{}, 10),
 		LeaderID:          "",
 		commitIndex:       0,
+		catchUpSignal:     make(chan struct{}, 1),
 	}
 	// Seed the operating configuration from the bootstrap peers, same as NewNode.
 	node.configurations = configurations{
 		latest:    clonePeers(node.cfg.Peers),
 		committed: clonePeers(node.cfg.Peers),
 	}
+	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
 	node.commitCond = *sync.NewCond(&node.commitMu)
 	return node
 }
