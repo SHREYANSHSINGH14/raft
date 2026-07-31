@@ -90,13 +90,23 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		}
 	}
 
+	// Persist streams the snapshot into the pipe on its own goroutine; the main
+	// goroutine reads the other end through writeSnapshotToDisk. `done` is the join
+	// point: the deferred receive guarantees runSnapshotOnce cannot return until
+	// this goroutine has fully finished CloseWithError. Without the join, the
+	// pipe's close wakes the reader partway through CloseWithError and the main
+	// goroutine races the goroutine's trailing writes to pw (see JOURNEY.md).
 	pr, pw := io.Pipe()
+	done := make(chan error, 1)
 	go func() {
 		err := snap.Persist(ctx, pw)
-		pw.CloseWithError(err)
+		pw.CloseWithError(err) // the reader needs the close to see EOF/err
+		done <- err
 	}()
-	// closing the read end unblocks Persist if writeSnapshotToDisk bails before draining pr
-	defer pr.Close()
+	defer func() {
+		pr.Close() // unblock a Persist stuck on pw.Write if we bailed mid-stream
+		<-done     // wait for the goroutine to fully return before we do
+	}()
 
 	timestamp := time.Now()
 	snapshotDirName := generateLatestSnapshotDirName(latestAppliedIndex, uint(latestAppliedLog.Term), timestamp)
