@@ -27,16 +27,24 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) er
 	// TODO: add leaderCloseCh and select on that channel in case leader steps down while waiting for commit so that we can return early instead of waiting for commit indefinitely in that case
 
 	// TODO: we can optimize this by appending the log entry to store before acquiring the lock and then just waiting for commit after acquiring the lock, this way we can reduce the time we are holding the lock and allow other concurrent calls to Propose and HandleAppendEntries and HandleRequestVote to proceed without waiting for the log entry to be appended to store which can be a slow operation, but for simplicity we are doing it in this way for now
-	n.commitCond.L.Lock()
-	for n.commitIndex < uint(entry.Index) && ctx.Err() == nil {
-		n.commitCond.Wait()
-	}
-	if ctx.Err() != nil {
-		n.commitCond.L.Unlock()
+	if err := n.waitForCommit(ctx, uint(entry.Index)); err != nil {
 		return fmt.Errorf("propose: context cancelled before commit")
 	}
-	n.commitCond.L.Unlock()
 	return nil
+}
+
+// waitForCommit blocks until commitIndex reaches index, or ctx is cancelled. It
+// returns ctx.Err() (non-nil) if cancelled before the entry committed, and nil
+// once committed. Callers decide what to do with the error — a proposer surfaces
+// it; a best-effort rollback ignores it. This is the single place the commitCond
+// wait loop lives; Propose and every AddMember commit-wait go through it.
+func (n *Node) waitForCommit(ctx context.Context, index uint) error {
+	n.commitCond.L.Lock()
+	defer n.commitCond.L.Unlock()
+	for n.commitIndex < index && ctx.Err() == nil {
+		n.commitCond.Wait()
+	}
+	return ctx.Err()
 }
 
 // appendEntry builds a LogEntry with the next log index and the current term,
