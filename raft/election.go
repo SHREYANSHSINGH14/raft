@@ -84,29 +84,10 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	newTerm := currentTerm + 1
-	err = n.store.SetCurrentTerm(ctx, newTerm)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = ServerRole_Follower
-		electionRes.err = err
-
-		resCh <- electionRes
-
-		return
-	}
-
-	err = n.store.SetVotedFor(ctx, n.ID)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = ServerRole_Follower
-		electionRes.err = err
-
-		resCh <- electionRes
-
-		return
-	}
-
+	// The log state is read before the term bump because the pre-vote round needs
+	// it too — it asks the same up-to-date question the real vote does. Reading it
+	// once and reusing it for both rounds also guarantees the two rounds describe
+	// the same log, which a re-read between them would not.
 	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
@@ -140,6 +121,53 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		if peer.PeerState == PeerState_Voter {
 			votingPeers++
 		}
+	}
+
+	newTerm := currentTerm + 1
+
+	// Pre-vote round (Ongaro §9.6) — the gate in front of everything below.
+	//
+	// Ask whether we *could* win at newTerm before doing anything that costs the
+	// cluster something. Everything after this point is irreversible in the sense
+	// that matters: SetCurrentTerm persists a higher term, and the RequestVote
+	// fan-out spreads it to every peer, deposing a perfectly healthy leader. A
+	// node partitioned away from the cluster would otherwise loop through that
+	// sequence on every election timeout, inflating the term the whole time, and
+	// disrupt the cluster the moment it rejoined.
+	//
+	// Losing the pre-vote is a normal outcome, not an error: we simply go back to
+	// being a follower, having changed nothing — no term written, no vote spent,
+	// and no peer's state touched. The randomized election timer then decides when
+	// to try again.
+	if !n.preVote(ctx, peerStates, votingPeers, uint64(newTerm), uint64(lastLogIndex), lastLogTerm) {
+		zerolog.Ctx(ctx).Debug().Msgf("pre-vote for term %d not granted by a majority, staying follower", newTerm)
+		electionRes.transitonRole = ServerRole_Follower
+
+		resCh <- electionRes
+
+		return
+	}
+
+	err = n.store.SetCurrentTerm(ctx, newTerm)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
+		electionRes.transitonRole = ServerRole_Follower
+		electionRes.err = err
+
+		resCh <- electionRes
+
+		return
+	}
+
+	err = n.store.SetVotedFor(ctx, n.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
+		electionRes.transitonRole = ServerRole_Follower
+		electionRes.err = err
+
+		resCh <- electionRes
+
+		return
 	}
 	requestVoteResponses := make(chan responseRequestVote, votingPeers)
 	// defer close(requestVoteResponses)
@@ -208,6 +236,121 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	}
 	resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
 	return
+}
+
+// preVote runs the pre-vote round: it asks every voting peer whether it would
+// grant a vote at nextTerm and reports whether a majority would. Nothing here
+// writes to the store or changes any peer's state — that is the entire point of
+// the round, and it is what makes losing one free.
+//
+// The shape mirrors the real fan-out below it deliberately: one goroutine per
+// voter, responses collected on a channel buffered to exactly the number of
+// senders, and no wg.Wait. Same reasons, spelled out at the requestVoteResponses
+// comment — a WaitGroup ignores context cancellation and couples every peer to
+// the slowest one, which is what leaked goroutines and inflated terms in Bug 1.
+//
+// Self is counted as a granted pre-vote (we would obviously vote for ourselves),
+// matching majoritySize's assumption that the caller is itself a voter. A cluster
+// with no voting peers therefore passes on our own vote alone, exactly as the
+// real election does.
+func (n *Node) preVote(ctx context.Context, peerStates map[string]Peer, votingPeers int, nextTerm, lastLogIndex, lastLogTerm uint64) bool {
+	preVoteResponses := make(chan responsePreVote, votingPeers)
+
+	for id, peer := range peerStates {
+		if peer.PeerState == PeerState_Voter {
+			go n.sendPreVote(ctx, id, nextTerm, lastLogIndex, lastLogTerm, preVoteResponses)
+		}
+	}
+
+	responsesPending := votingPeers
+	majority := majoritySize(votingPeers)
+	granted := 1 // ourselves
+
+	if granted >= majority {
+		return true // single-voter cluster: nobody to ask
+	}
+
+	for responsesPending > 0 {
+		select {
+		case <-ctx.Done():
+			// The election was cancelled out from under us (timer fired, or the
+			// node is shutting down). Abandoning here is free precisely because
+			// the round changed nothing.
+			return false
+
+		case res := <-preVoteResponses:
+			responsesPending--
+			if res.err != nil {
+				// Unreachable peer. Treated as a withheld pre-vote rather than a
+				// failure: a minority being down must not stop a legitimate
+				// candidate, and a majority being down means we could not have won
+				// the real election either.
+				continue
+			}
+
+			// A peer answering with a term beyond the one we are probing knows
+			// something we do not — we cannot win at nextTerm. Note we do NOT adopt
+			// that term: a pre-vote response is not authority to move, and
+			// following it would reintroduce the disruption pre-vote prevents. We
+			// just stop, and learn the real term from the next AppendEntries.
+			//
+			// This is a fast path, not a guarantee: a majority can grant and trip
+			// the early return below before a higher-term response lands. That is
+			// fine — the real election checks terms again, and a peer being ahead
+			// does not stop a candidate a majority already agreed to.
+			if res.rpcRes.Term > nextTerm {
+				zerolog.Ctx(ctx).Debug().Msgf("pre-vote: peer %s reports term %d beyond our probe of %d", res.id, res.rpcRes.Term, nextTerm)
+				return false
+			}
+
+			if res.rpcRes.VoteGranted {
+				granted++
+				if granted >= majority {
+					// Enough. The outstanding goroutines still finish and send into
+					// the buffered channel, which is sized for all of them, so
+					// returning early strands nobody.
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+type responsePreVote struct {
+	rpcRes PreVoteResponse
+	id     string
+	err    error
+}
+
+func (n *Node) sendPreVote(ctx context.Context, peerID string, nextTerm, lastLogIndex, lastLogTerm uint64, responseCh chan<- responsePreVote) {
+	rpcReq := PreVoteArgs{
+		Term:         nextTerm,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+		CandidateID:  n.ID,
+	}
+
+	var res responsePreVote
+	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(n.cfg.RPCTimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	rpcRes, err := n.transport.PreVote(deadLineCtx, peerID, rpcReq)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending pre vote rpc to peer %s: %s", peerID, err.Error())
+		res.err = err
+		res.id = peerID
+
+		responseCh <- res
+
+		return
+	}
+
+	res.rpcRes = rpcRes
+	res.id = peerID
+
+	responseCh <- res
 }
 
 type responseRequestVote struct {
