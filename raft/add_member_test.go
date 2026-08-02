@@ -46,6 +46,7 @@ func newCatchUpTestNode(t *testing.T, store Storage) (*Node, *MockTransport) {
 	node := NewNodeMock(store, nil) // seeds node-2..5 into configurations.latest
 	node.transport = transport
 	node.Role = ServerRole_Leader
+	node.setLeaderCloseCh() // AddMember proposes; waitForCommit needs a live one
 	node.cfg.SnapshotDir = t.TempDir()
 	node.cfg.InstallSnapshotDeadlineScaleSizeByte = 1 << 20
 	node.cfg.InstallSnapshotDeadlineScaleTimeMs = 1

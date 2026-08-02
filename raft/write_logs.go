@@ -24,27 +24,58 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) er
 	}
 	n.clientMu.Unlock()
 
-	// TODO: add leaderCloseCh and select on that channel in case leader steps down while waiting for commit so that we can return early instead of waiting for commit indefinitely in that case
-
 	// TODO: we can optimize this by appending the log entry to store before acquiring the lock and then just waiting for commit after acquiring the lock, this way we can reduce the time we are holding the lock and allow other concurrent calls to Propose and HandleAppendEntries and HandleRequestVote to proceed without waiting for the log entry to be appended to store which can be a slow operation, but for simplicity we are doing it in this way for now
 	if err := n.waitForCommit(ctx, uint(entry.Index)); err != nil {
-		return fmt.Errorf("propose: context cancelled before commit")
+		return fmt.Errorf("propose: %w", err)
 	}
 	return nil
 }
 
-// waitForCommit blocks until commitIndex reaches index, or ctx is cancelled. It
-// returns ctx.Err() (non-nil) if cancelled before the entry committed, and nil
-// once committed. Callers decide what to do with the error — a proposer surfaces
-// it; a best-effort rollback ignores it. This is the single place the commitCond
-// wait loop lives; Propose and every AddMember commit-wait go through it.
+// waitForCommit blocks until commitIndex reaches index, the leadership term ends,
+// or ctx is cancelled. It returns nil once committed, ctx.Err() if the caller went
+// away first, and ErrLeadershipLost if we stopped being leader with the entry
+// still uncommitted. Callers decide what to do with the error — a proposer
+// surfaces it; a best-effort rollback ignores it. This is the single place the
+// commitCond wait loop lives; Propose and every AddMember commit-wait go through it.
 func (n *Node) waitForCommit(ctx context.Context, index uint) error {
+	// Read before commitMu is taken. getLeaderCloseCh needs mu, and taking mu
+	// while holding commitMu would create a lock ordering that exists nowhere
+	// else. A local copy is all we need: within a leadership term the channel is
+	// only ever closed, never swapped, and a step-down after this read still wakes
+	// us via the broadcast in clearLeaderCloseCh.
+	leaderCh := n.getLeaderCloseCh()
+
 	n.commitCond.L.Lock()
 	defer n.commitCond.L.Unlock()
-	for n.commitIndex < index && ctx.Err() == nil {
+	for n.commitIndex < index && ctx.Err() == nil && !leadershipEnded(leaderCh) {
 		n.commitCond.Wait()
 	}
-	return ctx.Err()
+
+	if n.commitIndex >= index {
+		// Committed. This wins over a step-down or a cancelled context that landed
+		// in the same wakeup: the entry is committed either way, so reporting a
+		// failure would be a lie the caller might act on by retrying.
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return ErrLeadershipLost
+}
+
+// leadershipEnded reports whether ch says this node is no longer leading: closed
+// (we stepped down) or nil (we were not leader when the wait began). Both mean
+// nothing will advance commitIndex on our behalf, so waiting is pointless.
+func leadershipEnded(ch <-chan struct{}) bool {
+	if ch == nil {
+		return true
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // appendEntry builds a LogEntry with the next log index and the current term,

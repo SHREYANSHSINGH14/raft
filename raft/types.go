@@ -9,6 +9,12 @@ import (
 // ErrNotFound is returned by Storage implementations when a key does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrLeadershipLost is returned by Propose when this node stopped being leader
+// while the proposed entry was still uncommitted. The entry stays in the local
+// log — the new leader decides whether it survives — so the caller must treat the
+// proposal as failed but not assume it was discarded.
+var ErrLeadershipLost = errors.New("leadership lost before commit")
+
 // EntryType distinguishes the kind of payload a LogEntry carries, so the raft
 // layer itself (not just the state machine) can react differently to entries
 // like cluster membership changes.

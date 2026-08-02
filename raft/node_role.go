@@ -17,6 +17,10 @@ import (
 
 func (n *Node) becomeFollower() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming follower")
+	// End the leadership term before anything else: any Propose still waiting on
+	// commit has to fail now rather than block on entries a new leader may never
+	// commit. A no-op when we were not leader (candidate losing, startup).
+	n.clearLeaderCloseCh()
 	n.SetRole(ServerRole_Follower)
 	n.startElectionOut(n.ctx)
 }
@@ -29,6 +33,12 @@ func (n *Node) becomeCandidate() {
 
 func (n *Node) becomeLeader() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
+	// Open this term's leadership channel BEFORE the role flips. Propose gates on
+	// role == Leader, and waitForCommit reads a nil channel as "not leading" — so
+	// setting the role first would leave a window where a proposal is accepted and
+	// then immediately fails with ErrLeadershipLost. In this order, role == Leader
+	// always implies a live leaderCloseCh.
+	n.setLeaderCloseCh()
 	n.SetRole(ServerRole_Leader)
 	n.SetLeaderID("")
 
@@ -72,6 +82,14 @@ func (n *Node) startElectionOut(ctx context.Context) {
 			case <-n.electionTimeoutCh:
 				ticker.Reset(timeOut)
 				continue
+			case <-n.timeoutNowCh:
+				// TimeoutNow: the leader is handing leadership to us, so skip the
+				// rest of the timer and campaign now. Identical to the ticker case
+				// on purpose — the point of the transfer is to reach the same
+				// place sooner, not to take a different path into the election.
+				ticker.Stop()
+				n.becomeCandidate()
+				return
 			case <-ticker.C:
 				ticker.Stop()
 				n.becomeCandidate()

@@ -57,6 +57,7 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 			ElectionMaxMs: 5000,
 		},
 		electionTimeoutCh: make(chan struct{}, 10),
+		timeoutNowCh:      make(chan struct{}, 1),
 		LeaderID:          "",
 		commitIndex:       0,
 		catchUpSignal:     make(chan struct{}, 1),

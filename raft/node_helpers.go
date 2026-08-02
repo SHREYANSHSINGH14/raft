@@ -166,6 +166,53 @@ func (n *Node) GetCommitIndex() uint {
 	return n.commitIndex
 }
 
+// setLeaderCloseCh opens a fresh leadership channel. Called by becomeLeader, so
+// each leadership term gets its own — a channel closed by a previous step-down
+// must never be reused.
+func (n *Node) setLeaderCloseCh() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.leaderCloseCh = make(chan struct{})
+}
+
+// clearLeaderCloseCh ends the current leadership term: it closes the channel and
+// clears the field, then wakes everything parked on commitCond so waiters get to
+// observe the close. Without that broadcast a Propose asleep in Cond.Wait would
+// never re-check and would hang until its own context expired.
+//
+// Taking the channel out of the field under mu before closing is what makes the
+// close happen exactly once — two concurrent step-downs cannot both see non-nil.
+// The broadcast is issued without mu held, matching SetCommitIndex.
+func (n *Node) clearLeaderCloseCh() {
+	n.mu.Lock()
+	ch := n.leaderCloseCh
+	n.leaderCloseCh = nil
+	n.mu.Unlock()
+
+	if ch == nil {
+		return // not leader; nothing to close and nobody to wake
+	}
+	close(ch)
+	n.commitCond.Broadcast()
+}
+
+func (n *Node) getLeaderCloseCh() chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderCloseCh
+}
+
+// signalTimeoutNow tells the election-timeout goroutine to campaign immediately
+// rather than wait out its timer — the receiving half of a leadership transfer.
+// Non-blocking: with a signal already pending there is nothing to add, since the
+// timer only needs to fire once.
+func (n *Node) signalTimeoutNow() {
+	select {
+	case n.timeoutNowCh <- struct{}{}:
+	default:
+	}
+}
+
 func (n *Node) SetLeaderID(id string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

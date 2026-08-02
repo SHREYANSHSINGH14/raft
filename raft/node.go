@@ -70,6 +70,30 @@ type Node struct {
 	// leader heartbeat or granted vote is received.
 	electionTimeoutCh chan struct{}
 
+	// timeoutNowCh carries the TimeoutNow signal (Ongaro §3.10, leadership
+	// transfer): the election-timeout goroutine selects on it and campaigns at
+	// once instead of waiting out its timer. Deliberately a signal rather than a
+	// context cancellation — the timer goroutine returns on its own and
+	// becomeFollower restarts it normally, whereas a cancelled context would stay
+	// cancelled and the node could never time out again.
+	//
+	// Buffered 1 so a sender never blocks; a second signal while one is pending is
+	// dropped, because the timer only needs to fire once.
+	timeoutNowCh chan struct{}
+
+	// leaderCloseCh is open for exactly as long as this node is leader:
+	// becomeLeader creates it, becomeFollower closes it and sets it back to nil.
+	// A Propose parked in waitForCommit watches it, so a step-down fails the
+	// proposal with ErrLeadershipLost instead of blocking until the caller's
+	// context expires — the entry we appended may never commit under the new
+	// leader, so there is nothing left to wait for.
+	//
+	// Guarded by mu; nil means "not leader", which waitForCommit treats the same
+	// as closed. Closing it MUST be paired with a commitCond.Broadcast, because a
+	// waiter asleep in Cond.Wait cannot observe a channel close — it has to be
+	// woken to re-check. clearLeaderCloseCh is the only correct way to close it.
+	leaderCloseCh chan struct{}
+
 	// when statemachine is taking a snapshot, this flag is set to prevent apply loop from applying new entries and
 	//potentially diverging lastApplied index from the snapshot index
 	snapShotInProgress atomic.Bool
@@ -102,6 +126,7 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 		lastApplied:         0,
 		LeaderID:            "",
 		electionTimeoutCh:   make(chan struct{}, 2),
+		timeoutNowCh:        make(chan struct{}, 1),
 		mu:                  sync.Mutex{},
 		commitMu:            sync.Mutex{},
 		clientMu:            sync.Mutex{},
@@ -162,6 +187,7 @@ func (n *Node) Start(ctx context.Context) {
 
 	n.startElectionOut(n.ctx)
 	n.startApplyLoop(n.ctx)
+	n.startSnapshotLoop(n.ctx)
 
 	<-n.ctx.Done()
 }

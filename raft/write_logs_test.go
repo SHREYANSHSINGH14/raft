@@ -19,6 +19,10 @@ func setupProposeTest(t *testing.T) (*Node, *MockStorage) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
 	node.Role = ServerRole_Leader
+	// Faking the role is not enough: waitForCommit reads a nil leaderCloseCh as
+	// "not leading" and fails the proposal. becomeLeader opens it for real; a test
+	// that skips becomeLeader has to open it itself.
+	node.setLeaderCloseCh()
 	return node, store
 }
 
@@ -187,7 +191,11 @@ func TestPropose_ContextCancelledWhileWaiting_ReturnsError(t *testing.T) {
 
 	err := <-errCh
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "context cancelled")
+	// Propose wraps rather than restating, so the cause survives — and this
+	// distinguishes cancellation from ErrLeadershipLost, which the old substring
+	// check could not.
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrLeadershipLost)
 	store.AssertExpectations(t)
 }
 
@@ -206,7 +214,63 @@ func TestPropose_ContextAlreadyCancelled_ReturnsError(t *testing.T) {
 	err := node.Propose(ctx, EntryType_Command, []byte("cmd"))
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "context cancelled")
+	// Propose wraps rather than restating, so the cause survives — and this
+	// distinguishes cancellation from ErrLeadershipLost, which the old substring
+	// check could not.
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrLeadershipLost)
+	store.AssertExpectations(t)
+}
+
+// ── leadership lost while waiting ─────────────────────────────────────────────
+
+// A Propose parked in waitForCommit must fail when we step down, not hang until
+// its caller's context expires — the entry it appended may never commit under the
+// next leader. This also pins the close/broadcast pairing in clearLeaderCloseCh:
+// a waiter asleep in Cond.Wait cannot observe a channel close on its own, so
+// dropping the Broadcast turns this test into a deadlock rather than a failure.
+func TestPropose_LeadershipLostWhileWaiting_ReturnsErrLeadershipLost(t *testing.T) {
+	node, store := setupProposeTest(t)
+
+	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
+	appended := make(chan struct{})
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).
+		Run(func(_ mock.Arguments) { close(appended) }).
+		Return(nil)
+
+	errCh := proposeAsync(node, context.Background(), []byte("cmd"))
+
+	awaitCall(t, appended, "AppendLogs")
+	time.Sleep(10 * time.Millisecond) // let the goroutine reach Wait
+
+	node.clearLeaderCloseCh() // what becomeFollower does on step-down
+
+	select {
+	case err := <-errCh:
+		assert.ErrorIs(t, err, ErrLeadershipLost)
+		assert.NotErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Propose did not return after step-down — the waiter was never woken")
+	}
+	store.AssertExpectations(t)
+}
+
+// Committed wins over a step-down landing in the same wakeup: the entry is
+// committed either way, so reporting failure would invite a pointless retry.
+func TestPropose_CommittedBeforeStepDown_ReturnsNil(t *testing.T) {
+	node, store := setupProposeTest(t)
+
+	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
+
+	node.SetCommitIndex(1)    // entry 1 is committed
+	node.clearLeaderCloseCh() // and we have since stepped down
+
+	assert.NoError(t, node.Propose(context.Background(), EntryType_Command, []byte("cmd")))
 	store.AssertExpectations(t)
 }
 
@@ -220,6 +284,7 @@ func TestPropose_ConcurrentCallers_ProduceConsistentLog(t *testing.T) {
 	store := NewMemStorage()
 	node := NewNodeMock(store, nil)
 	node.Role = ServerRole_Leader
+	node.setLeaderCloseCh()
 
 	const n = 50
 	ctx := context.Background()
