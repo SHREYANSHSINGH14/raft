@@ -201,6 +201,12 @@ func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.Pr
 	return raft.PreVoteResponse{}, fmt.Errorf("PreVote not implemented")
 }
 
+// TimeoutNow is a stub for the same reason as PreVote above: proto/rpc.proto has
+// no TimeoutNow RPC yet. The receiving side (Node.HandleTimeoutNow) is done.
+func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft.TimeoutNowArgs) (raft.TimeoutNowResponse, error) {
+	return raft.TimeoutNowResponse{}, fmt.Errorf("TimeoutNow not implemented")
+}
+
 // InstallSnapshot is a stub: proto/rpc.proto has no InstallSnapshot RPC yet, so
 // types.RaftRpcClient can't send one. Wire the streaming client call once the
 // proto exists. See STATE.md.

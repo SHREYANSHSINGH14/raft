@@ -28,6 +28,11 @@ func (m *MockTransport) PreVote(ctx context.Context, peerID string, args PreVote
 	return ret.Get(0).(PreVoteResponse), ret.Error(1)
 }
 
+func (m *MockTransport) TimeoutNow(ctx context.Context, peerID string, args TimeoutNowArgs) (TimeoutNowResponse, error) {
+	ret := m.Called(peerID, args)
+	return ret.Get(0).(TimeoutNowResponse), ret.Error(1)
+}
+
 func (m *MockTransport) InstallSnapshot(ctx context.Context, peerID string, args InstallSnapshotArgs) (InstallSnapshotResponse, error) {
 	ret := m.Called(peerID, args)
 	return ret.Get(0).(InstallSnapshotResponse), ret.Error(1)

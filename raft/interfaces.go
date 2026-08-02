@@ -15,6 +15,9 @@ type Transport interface {
 	// separate RPC from RequestVote because it must not be allowed to change any
 	// persistent state on the peer — see HandlePreVote.
 	PreVote(ctx context.Context, peerID string, args PreVoteArgs) (PreVoteResponse, error)
+	// TimeoutNow hands leadership to peerID: it tells that peer to campaign
+	// immediately rather than wait out its election timer. See HandleTimeoutNow.
+	TimeoutNow(ctx context.Context, peerID string, args TimeoutNowArgs) (TimeoutNowResponse, error)
 	InstallSnapshot(ctx context.Context, peerID string, args InstallSnapshotArgs) (InstallSnapshotResponse, error)
 }
 

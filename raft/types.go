@@ -79,6 +79,23 @@ type PreVoteResponse struct {
 	VoteGranted bool
 }
 
+// TimeoutNowArgs is the leadership-transfer RPC (Ongaro §3.10). The leader sends
+// it to the peer it has chosen as successor, once that peer's log has caught up.
+// Term is the leader's term; LeaderID identifies the sender so the recipient can
+// refuse a transfer from anyone that is not its current leader.
+type TimeoutNowArgs struct {
+	Term     uint64
+	LeaderID string
+}
+
+// TimeoutNowResponse reports whether the recipient accepted the transfer and will
+// campaign. Success is false when it declined (stale term, wrong sender, already
+// leader) — the transfer failed and the leader keeps leadership.
+type TimeoutNowResponse struct {
+	Term    uint64
+	Success bool
+}
+
 type SnapshotMetadata struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
