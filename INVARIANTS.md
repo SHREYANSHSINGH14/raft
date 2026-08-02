@@ -1,7 +1,10 @@
-# raft
+# raft — architecture, invariants, conventions
 
 A Raft consensus implementation built from the paper, structured as an importable Go library.
 `raft/` is the library; `db/` (PebbleDB), `server/` (gRPC), and `cmd/` are one concrete embedding of it.
+
+This file is the standing context for working on the repo: how the pieces fit, the
+invariants that are easy to break by accident, and the conventions to follow.
 
 - `README.md` — what it is and how to use it (the map)
 - `JOURNEY.md` — bugs hit, why they happened, what each fix taught (the travel log)

@@ -16,7 +16,7 @@ import (
 // The handler itself does not transition. It signals timeoutNowCh, which the
 // election-timeout goroutine is selecting on, and that goroutine calls
 // becomeCandidate — the same path a fired ticker takes. That is the invariant
-// from CLAUDE.md: only the goroutine that owns a lifecycle may end it. A handler
+// from INVARIANTS.md: only the goroutine that owns a lifecycle may end it. A handler
 // calling becomeCandidate directly would leave the timer goroutine alive
 // alongside the new candidate.
 //
