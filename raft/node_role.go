@@ -49,8 +49,13 @@ func (n *Node) becomeLeader() {
 		return
 	}
 
+	// Replication bookkeeping is per-peer; our own entry has no NextIndex to seed,
+	// and getMajorityMatchIndex substitutes our real last index for it anyway.
 	n.mu.Lock()
 	for id, peer := range n.configurations.latest {
+		if id == n.ID {
+			continue
+		}
 		peer.NextIndex = lastIndex + 1
 		peer.MatchIndex = 0
 		n.configurations.latest[id] = peer
@@ -124,8 +129,12 @@ func (n *Node) waitForQuorum(ctx context.Context) {
 	// voters to be reachable — a Staging or NonVoter peer being down must not hold
 	// up startup. Membership is fixed here (AddMember can't run before we've become
 	// leader), so it is safe to read the voter set once.
+	// voterIDs is who we ping (peers); voterCount is what the majority is taken
+	// over (peers + self). reachable counts responding peers only and is compared
+	// against the full-cluster majority, which is deliberately a touch strict —
+	// unchanged from before, just no longer relying on majoritySize's implicit +1.
 	voterIDs := n.voterPeerIDs()
-	majority := majoritySize(len(voterIDs))
+	majority := majoritySize(n.voterCount())
 
 	for {
 		select {

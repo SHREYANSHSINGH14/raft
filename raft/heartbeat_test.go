@@ -157,7 +157,7 @@ func TestSendLogs_NextIndexGreaterThanOne_CorrectPrevLog(t *testing.T) {
 		{Index: 3, Term: 5, Data: []byte("cmd-3")},
 	})
 
-	for id := range node.configurations.latest {
+	for _, id := range node.peerIDs() {
 		node.configurations.latest[id] = Peer{NextIndex: 3, MatchIndex: 2}
 	}
 
@@ -185,7 +185,7 @@ func TestSendLogs_AllSucceed_IndexesAdvance(t *testing.T) {
 	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for id := range node.configurations.latest {
+	for _, id := range node.peerIDs() {
 		assert.Equal(t, uint(3), node.GetPeerIndex(id).NextIndex,
 			"nextIndex should advance to 3 for %s", id)
 		assert.Equal(t, uint(2), node.GetPeerIndex(id).MatchIndex,
@@ -202,7 +202,7 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 		{Index: 1, Term: 5, Data: []byte("cmd-1")},
 	})
 
-	for id := range node.configurations.latest {
+	for _, id := range node.peerIDs() {
 		node.configurations.latest[id] = Peer{NextIndex: 2, MatchIndex: 0}
 	}
 
@@ -211,7 +211,7 @@ func TestSendLogs_AllFail_NextIndexDecrements(t *testing.T) {
 	_, err := runSendLogs(node)
 	assert.NoError(t, err)
 
-	for id := range node.configurations.latest {
+	for _, id := range node.peerIDs() {
 		assert.Equal(t, uint(1), node.GetPeerIndex(id).NextIndex,
 			"nextIndex should decrement to 1 for %s", id)
 		assert.Equal(t, uint(0), node.GetPeerIndex(id).MatchIndex,
@@ -229,7 +229,7 @@ func TestSendLogs_PartialSuccess_PerPeerIndexUpdates(t *testing.T) {
 		{Index: 2, Term: 5, Data: []byte("cmd-2")},
 	})
 
-	for id := range node.configurations.latest {
+	for _, id := range node.peerIDs() {
 		node.configurations.latest[id] = Peer{NextIndex: 2, MatchIndex: 1}
 	}
 
@@ -411,9 +411,12 @@ func TestGetMajorityMatchIndex_MajorityReplicated(t *testing.T) {
 		"node-3": {PeerState: PeerState_Voter, MatchIndex: 3},
 		"node-4": {PeerState: PeerState_Voter, MatchIndex: 4},
 		"node-5": {PeerState: PeerState_Voter, MatchIndex: 6},
+		// self is a member of the configuration now; its stored MatchIndex is
+		// ignored in favour of the selfLastIndex argument.
+		"node-1": {PeerState: PeerState_Voter},
 	}
 
-	result := getMajorityMatchIndex(peers, 7)
+	result := getMajorityMatchIndex(peers, "node-1", 7)
 	assert.Equal(t, uint(5), result)
 }
 
@@ -425,10 +428,11 @@ func TestGetMajorityMatchIndex_NoMajority(t *testing.T) {
 		"node-3": {PeerState: PeerState_Voter, MatchIndex: 0},
 		"node-4": {PeerState: PeerState_Voter, MatchIndex: 0},
 		"node-5": {PeerState: PeerState_Voter, MatchIndex: 0},
+		"node-1": {PeerState: PeerState_Voter},
 	}
 
 	// only self has index 1 — not a majority of 5
-	result := getMajorityMatchIndex(peers, 1)
+	result := getMajorityMatchIndex(peers, "node-1", 1)
 	assert.Equal(t, uint(0), result)
 }
 
@@ -440,9 +444,10 @@ func TestGetMajorityMatchIndex_AllSameIndex(t *testing.T) {
 		"node-3": {PeerState: PeerState_Voter, MatchIndex: 3},
 		"node-4": {PeerState: PeerState_Voter, MatchIndex: 3},
 		"node-5": {PeerState: PeerState_Voter, MatchIndex: 3},
+		"node-1": {PeerState: PeerState_Voter},
 	}
 
-	result := getMajorityMatchIndex(peers, 3)
+	result := getMajorityMatchIndex(peers, "node-1", 3)
 	assert.Equal(t, uint(3), result)
 }
 

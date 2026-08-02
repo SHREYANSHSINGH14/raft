@@ -114,13 +114,20 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		lastLogTerm = lastLog.Term
 	}
 
-	peerStates := n.peersSnapshot()
+	// voterPeers is who we ask (everyone but us); voterCount is what a majority is
+	// taken over (including us). A node the cluster has removed is absent from
+	// voterCount and must not campaign at all — it cannot win, and trying would
+	// disturb a cluster it is no longer part of.
+	voterPeers := n.voterPeerIDs()
+	voterCount := n.voterCount()
 
-	votingPeers := 0
-	for _, peer := range peerStates {
-		if peer.PeerState == PeerState_Voter {
-			votingPeers++
-		}
+	if !n.isVoter() {
+		zerolog.Ctx(ctx).Warn().Msg("not a voter in the live configuration, abandoning election")
+		electionRes.transitonRole = ServerRole_Follower
+
+		resCh <- electionRes
+
+		return
 	}
 
 	newTerm := currentTerm + 1
@@ -139,7 +146,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// being a follower, having changed nothing — no term written, no vote spent,
 	// and no peer's state touched. The randomized election timer then decides when
 	// to try again.
-	if !n.preVote(ctx, peerStates, votingPeers, uint64(newTerm), uint64(lastLogIndex), lastLogTerm) {
+	if !n.preVote(ctx, voterPeers, voterCount, uint64(newTerm), uint64(lastLogIndex), lastLogTerm) {
 		zerolog.Ctx(ctx).Debug().Msgf("pre-vote for term %d not granted by a majority, staying follower", newTerm)
 		electionRes.transitonRole = ServerRole_Follower
 
@@ -169,7 +176,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 
 		return
 	}
-	requestVoteResponses := make(chan responseRequestVote, votingPeers)
+	requestVoteResponses := make(chan responseRequestVote, len(voterPeers))
 	// defer close(requestVoteResponses)
 	// 1. closing is the sender's responsibility, and there are multiple senders (one goroutine
 	//    per peer) — no single goroutine can safely close without coordinating with others,
@@ -196,19 +203,17 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// ctx.Done(). this way, when cancel() is called, the goroutine exits immediately from the select
 	// without ever trying to send on resCh — so no leak, no blocking, no cascading term explosion.
 
-	for id, peer := range peerStates {
-		if peer.PeerState == PeerState_Voter {
-			// wg.Add(1)
-			go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
-		}
+	for _, id := range voterPeers {
+		// wg.Add(1)
+		go n.sendRequestVote(ctx, id, uint64(newTerm), uint64(lastLogIndex), lastLogTerm, requestVoteResponses)
 	}
 
 	// wg.Wait()
 
 	// responseReceived := 0
-	responsesPending := votingPeers
-	majority := majoritySize(votingPeers) // voters only; self is counted inside the helper
-	votesReceived := 1                    // we have already voted for ourselves so we start with 1 vote
+	responsesPending := len(voterPeers)
+	majority := majoritySize(voterCount) // voters incl. self, which is in the configuration
+	votesReceived := 1                   // we have already voted for ourselves so we start with 1 vote
 
 	for responsesPending > 0 {
 		select {
@@ -253,17 +258,15 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 // matching majoritySize's assumption that the caller is itself a voter. A cluster
 // with no voting peers therefore passes on our own vote alone, exactly as the
 // real election does.
-func (n *Node) preVote(ctx context.Context, peerStates map[string]Peer, votingPeers int, nextTerm, lastLogIndex, lastLogTerm uint64) bool {
-	preVoteResponses := make(chan responsePreVote, votingPeers)
+func (n *Node) preVote(ctx context.Context, voterPeers []string, voterCount int, nextTerm, lastLogIndex, lastLogTerm uint64) bool {
+	preVoteResponses := make(chan responsePreVote, len(voterPeers))
 
-	for id, peer := range peerStates {
-		if peer.PeerState == PeerState_Voter {
-			go n.sendPreVote(ctx, id, nextTerm, lastLogIndex, lastLogTerm, preVoteResponses)
-		}
+	for _, id := range voterPeers {
+		go n.sendPreVote(ctx, id, nextTerm, lastLogIndex, lastLogTerm, preVoteResponses)
 	}
 
-	responsesPending := votingPeers
-	majority := majoritySize(votingPeers)
+	responsesPending := len(voterPeers)
+	majority := majoritySize(voterCount)
 	granted := 1 // ourselves
 
 	if granted >= majority {

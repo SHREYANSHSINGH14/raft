@@ -143,10 +143,21 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 
 	// Seed both configuration views from the caller-supplied bootstrap peers at
 	// index 0. Until the first config entry is appended, latest == committed.
+	//
+	// cfg.Peers is the caller's view of the OTHER servers — server/ builds it from
+	// the peer file with its own id skipped — but configurations.latest holds the
+	// whole membership, so this node is added here if the caller left it out. It
+	// joins as a Voter: a bootstrapping server always votes, and anything else is
+	// reached through AddMember.
+	bootstrap := clonePeers(cfg.Peers)
+	if _, present := bootstrap[cfg.ID]; !present {
+		bootstrap[cfg.ID] = Peer{PeerState: PeerState_Voter}
+	}
+
 	node.configurations = configurations{
-		latest:         clonePeers(cfg.Peers),
+		latest:         clonePeers(bootstrap),
 		latestIndex:    0,
-		committed:      clonePeers(cfg.Peers),
+		committed:      clonePeers(bootstrap),
 		committedIndex: 0,
 	}
 

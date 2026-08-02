@@ -67,10 +67,13 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 		commitIndex:       0,
 		catchUpSignal:     make(chan struct{}, 1),
 	}
-	// Seed the operating configuration from the bootstrap peers, same as NewNode.
+	// Seed the operating configuration from the bootstrap peers, same as NewNode —
+	// including this node, since configurations.latest holds the whole membership.
+	bootstrap := clonePeers(node.cfg.Peers)
+	bootstrap[node.ID] = Peer{PeerState: PeerState_Voter}
 	node.configurations = configurations{
-		latest:    clonePeers(node.cfg.Peers),
-		committed: clonePeers(node.cfg.Peers),
+		latest:    clonePeers(bootstrap),
+		committed: clonePeers(bootstrap),
 	}
 	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
 	node.commitCond = *sync.NewCond(&node.commitMu)

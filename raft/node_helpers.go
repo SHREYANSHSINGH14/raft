@@ -29,6 +29,21 @@ func (n *Node) GetID() string {
 // NOTE: the peer helpers below all read and write n.configurations.latest — the
 // live operating configuration. cfg.Peers is only the bootstrap seed (copied into
 // configurations in NewNode) and must not be used at runtime.
+//
+// configurations.latest holds EVERY member of the cluster, this node included.
+// That is what lets a leader remove itself: membership becomes a property of the
+// map rather than something inferred from the map's silence. It also makes a
+// config log entry — which carries the whole map — mean the same thing on the
+// leader that wrote it and on every follower that applies it.
+//
+// The consequence is that the helpers split three ways, and reaching for the
+// wrong one is the easy mistake here:
+//
+//   - peerIDs / voterPeerIDs — everyone EXCEPT self. Use for anything that puts
+//     an RPC on the wire; we never send to ourselves.
+//   - voterCount — voters INCLUDING self. Use for majority math.
+//   - peersSnapshot — the whole map, self included. Use when the configuration
+//     itself is the subject: marshalling a config entry, match-index bookkeeping.
 
 func (n *Node) GetPeerIndex(id string) Peer {
 	n.mu.Lock()
@@ -70,39 +85,73 @@ func (n *Node) SetPeerState(id string, state PeerState) {
 	n.configurations.latest[id] = peer
 }
 
-// peerIDs returns a snapshot of peer IDs, safe to range over without racing
-// concurrent NextIndex/MatchIndex updates to n.configurations.latest.
+// peerIDs returns a snapshot of peer IDs — every member EXCEPT this node — safe
+// to range over without racing concurrent NextIndex/MatchIndex updates to
+// n.configurations.latest.
 func (n *Node) peerIDs() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	ids := make([]string, 0, len(n.configurations.latest))
 	for id := range n.configurations.latest {
+		if id == n.ID {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids
 }
 
-// voterPeerIDs returns the IDs of peers that count toward majorities. Only Voter
-// peers do — Staging (still catching up) and NonVoter (replica-only) peers are
-// excluded, so they neither raise the majority threshold nor get counted in it.
+// voterPeerIDs returns the IDs of the OTHER voters — the peers an election or a
+// quorum probe sends RPCs to. Only Voter members qualify: Staging (still catching
+// up) and NonVoter (replica-only) members are excluded, so they neither raise the
+// majority threshold nor get counted in it. Self is excluded because we never RPC
+// ourselves; use voterCount when you need the number a majority is taken over.
 func (n *Node) voterPeerIDs() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	ids := make([]string, 0, len(n.configurations.latest))
 	for id, peer := range n.configurations.latest {
-		if peer.PeerState == PeerState_Voter {
-			ids = append(ids, id)
+		if id == n.ID || peer.PeerState != PeerState_Voter {
+			continue
 		}
+		ids = append(ids, id)
 	}
 	return ids
 }
 
-// majoritySize returns how many nodes form a majority in a cluster made of
-// voterPeerCount voter peers plus this node. Self is always counted (the +1),
-// because every caller of this — election, commit-index, quorum wait — runs only
-// while this node is itself a voter. Only Voter peers count toward majorities.
-func majoritySize(voterPeerCount int) int {
-	return (voterPeerCount+1)/2 + 1
+// voterCount returns how many members vote, this node included if it is still one.
+// This is the number majoritySize is taken over. It reads self out of the map like
+// any other member, which is the whole point of keeping self in there: once a
+// configuration removes us, we stop counting ourselves without anyone having to
+// remember to special-case it.
+func (n *Node) voterCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	count := 0
+	for _, peer := range n.configurations.latest {
+		if peer.PeerState == PeerState_Voter {
+			count++
+		}
+	}
+	return count
+}
+
+// isVoter reports whether this node is itself a voting member of the live
+// configuration. False once a configuration that removed us takes effect —
+// Ongaro §4.2.2: a leader that has been removed keeps replicating until C_new
+// commits, but must not count itself in majorities while doing so.
+func (n *Node) isVoter() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.configurations.latest[n.ID].PeerState == PeerState_Voter
+}
+
+// majoritySize returns how many votes carry a cluster of voterCount voters.
+// voterCount includes this node when it is a voter — unlike the old signature,
+// which took a peer count and added self unconditionally, and so kept counting a
+// node the cluster had already removed.
+func majoritySize(voterCount int) int {
+	return voterCount/2 + 1
 }
 
 // peersSnapshot returns a copy of the latest peers map, safe to read without

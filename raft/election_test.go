@@ -24,7 +24,10 @@ func setupElectionTest(t *testing.T) (*Node, *MemStorage, *MockTransport) {
 
 	// Voters — election only counts and requests votes from PeerState_Voter peers,
 	// so the operating configuration (configurations.latest) must mark them as such.
+	// configurations.latest is the WHOLE membership, so node-1 is in here too:
+	// without it the node is not a voter and election() correctly refuses to run.
 	voters := map[string]Peer{
+		"node-1": {PeerState: PeerState_Voter},
 		"node-2": {PeerState: PeerState_Voter},
 		"node-3": {PeerState: PeerState_Voter},
 		"node-4": {PeerState: PeerState_Voter},
@@ -198,6 +201,12 @@ func TestElection_DBErr_GetCurrentTerm(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		cfg:               Config{Peers: map[string]Peer{}},
+		// A single-node configuration: enough to be a voter and reach the DB call
+		// under test without any peer RPCs.
+		configurations: configurations{
+			latest:    map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+			committed: map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+		},
 	}
 
 	res := runElection(node)
@@ -220,6 +229,12 @@ func TestElection_DBErr_SetCurrentTerm(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		cfg:               Config{Peers: map[string]Peer{}},
+		// A single-node configuration: enough to be a voter and reach the DB call
+		// under test without any peer RPCs.
+		configurations: configurations{
+			latest:    map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+			committed: map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+		},
 	}
 
 	res := runElection(node)
@@ -241,6 +256,12 @@ func TestElection_DBErr_SetVotedFor(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		cfg:               Config{Peers: map[string]Peer{}},
+		// A single-node configuration: enough to be a voter and reach the DB call
+		// under test without any peer RPCs.
+		configurations: configurations{
+			latest:    map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+			committed: map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+		},
 	}
 
 	res := runElection(node)
@@ -262,6 +283,12 @@ func TestElection_DBErr_GetLastLogIndex(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		cfg:               Config{Peers: map[string]Peer{}},
+		// A single-node configuration: enough to be a voter and reach the DB call
+		// under test without any peer RPCs.
+		configurations: configurations{
+			latest:    map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+			committed: map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+		},
 	}
 
 	res := runElection(node)
@@ -284,6 +311,12 @@ func TestElection_DBErr_GetLogByIndex(t *testing.T) {
 		store:             mockStore,
 		electionTimeoutCh: make(chan struct{}, 10),
 		cfg:               Config{Peers: map[string]Peer{}},
+		// A single-node configuration: enough to be a voter and reach the DB call
+		// under test without any peer RPCs.
+		configurations: configurations{
+			latest:    map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+			committed: map[string]Peer{"node-1": {PeerState: PeerState_Voter}},
+		},
 	}
 
 	res := runElection(node)
@@ -496,9 +529,11 @@ func TestElection_PreVoteArgs_CarryNextTermAndLogState(t *testing.T) {
 // sent, matching how the real election treats a cluster of one.
 func TestElection_PreVoteNoVotingPeers_PassesWithoutRPCs(t *testing.T) {
 	node, _, transport := setupElectionTest(t)
+	// A single-node cluster: the configuration holds us and nobody else.
+	solo := map[string]Peer{"node-1": {PeerState: PeerState_Voter}}
 	node.configurations = configurations{
-		latest:    map[string]Peer{},
-		committed: map[string]Peer{},
+		latest:    clonePeers(solo),
+		committed: clonePeers(solo),
 	}
 
 	res := runElection(node)

@@ -48,10 +48,14 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	// Voter/NonVoter. The normal heartbeat fan-out must skip them — otherwise it
 	// would race AddMember's catch-up and replicate to a peer that isn't a member
 	// of the cluster yet.
+	// peersSnapshot is the whole configuration, so self has to be filtered out here
+	// — a leader replicating to itself would spawn a goroutine heartbeating its own
+	// address forever.
+	selfID := n.GetID()
 	peers := n.peersSnapshot()
 	activePeerIDs := make([]string, 0, len(peers))
 	for id, peer := range peers {
-		if peer.PeerState == PeerState_Staging {
+		if id == selfID || peer.PeerState == PeerState_Staging {
 			continue
 		}
 		activePeerIDs = append(activePeerIDs, id)
@@ -111,7 +115,7 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 				continue
 			}
 
-			commitIndex := getMajorityMatchIndex(n.peersSnapshot(), lastLogIndex)
+			commitIndex := getMajorityMatchIndex(n.peersSnapshot(), n.GetID(), lastLogIndex)
 			if commitIndex == 0 {
 
 				continue
@@ -347,17 +351,28 @@ send_snapshot:
 // So matchIndexes[majorityCount-1] is the highest index replicated on a majority of servers.
 // Example 1 (no duplicates): n2:5, n3:3, n4:4, n5:6, self:7 → sorted [7,6,5,4,3], majorityCount=3 → matchIndexes[2]=5
 // Example 2 (with duplicates): n2:6, n3:5, n4:6, n5:5, self:7 → sorted [7,6,6,5,5], majorityCount=3 → matchIndexes[2]=6
-func getMajorityMatchIndex(peers map[string]Peer, selfLastIndex uint) uint {
+// members is the whole configuration, self included, so self is picked up by the
+// same loop as everyone else. Its stored MatchIndex is meaningless — that field is
+// leader-side bookkeeping about a *peer* — so selfLastIndex is substituted for it.
+// A configuration that no longer lists us as a voter simply contributes no entry,
+// which is exactly the §4.2.2 rule that a removed leader stops counting itself.
+func getMajorityMatchIndex(members map[string]Peer, selfID string, selfLastIndex uint) uint {
 	var matchIndexes []uint
 
-	for _, peer := range peers {
+	for id, peer := range members {
 		if peer.PeerState != PeerState_Voter {
+			continue
+		}
+		if id == selfID {
+			matchIndexes = append(matchIndexes, selfLastIndex)
 			continue
 		}
 		matchIndexes = append(matchIndexes, peer.MatchIndex)
 	}
 
-	matchIndexes = append(matchIndexes, selfLastIndex)
+	if len(matchIndexes) == 0 {
+		return 0
+	}
 
 	slices.SortFunc(matchIndexes, func(a, b uint) int {
 		if a > b {
@@ -368,10 +383,9 @@ func getMajorityMatchIndex(peers map[string]Peer, selfLastIndex uint) uint {
 		return 0
 	})
 
-	// majorityCount is over voters only: matchIndexes holds one entry per voter
-	// peer plus self, so its length is the voter count and len-1 is the voter-peer
-	// count. Using len(peers) here would be wrong once non-voters exist — it would
-	// overshoot the slice (the non-voters were filtered out above).
-	majorityCount := majoritySize(len(matchIndexes) - 1)
+	// matchIndexes holds exactly one entry per voter, so its length IS the voter
+	// count majoritySize wants. Using len(members) would be wrong once non-voters
+	// exist — they were filtered out above and would overshoot the slice.
+	majorityCount := majoritySize(len(matchIndexes))
 	return matchIndexes[majorityCount-1]
 }
