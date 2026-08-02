@@ -194,6 +194,13 @@ func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args r
 	}, nil
 }
 
+// PreVote is a stub, for the same reason as InstallSnapshot below: proto/rpc.proto
+// has no PreVote RPC yet, so types.RaftRpcClient can't send one. Wire the client
+// call once the proto exists — the receiving side (Node.HandlePreVote) is done.
+func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.PreVoteArgs) (raft.PreVoteResponse, error) {
+	return raft.PreVoteResponse{}, fmt.Errorf("PreVote not implemented")
+}
+
 // InstallSnapshot is a stub: proto/rpc.proto has no InstallSnapshot RPC yet, so
 // types.RaftRpcClient can't send one. Wire the streaming client call once the
 // proto exists. See STATE.md.

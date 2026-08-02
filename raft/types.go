@@ -54,6 +54,25 @@ type RequestVoteResponse struct {
 	VoteGranted bool
 }
 
+// PreVoteArgs is the §9.6 pre-vote probe. It carries exactly what
+// RequestVoteArgs carries, but Term is the term the candidate *would* run in
+// (currentTerm + 1) — it is a hypothetical, not a term the candidate has
+// entered. Nobody persists it.
+type PreVoteArgs struct {
+	Term         uint64
+	CandidateID  string
+	LastLogIndex uint64
+	LastLogTerm  uint64
+}
+
+// PreVoteResponse mirrors RequestVoteResponse. Term is the responder's view of
+// the term the vote was judged against — see HandlePreVote for why that is not
+// always the responder's own currentTerm.
+type PreVoteResponse struct {
+	Term        uint64
+	VoteGranted bool
+}
+
 type SnapshotMetadata struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64

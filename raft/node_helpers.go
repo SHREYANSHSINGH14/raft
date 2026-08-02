@@ -126,6 +126,17 @@ func (n *Node) removePeer(id string) {
 	delete(n.configurations.latest, id)
 }
 
+// lookupPeer returns the entry for id in the live operating configuration,
+// whether id is in it at all, and how many peers the configuration holds. All
+// three are read under one acquisition of mu so a caller making a sequence of
+// membership decisions (HandlePreVote) never sees two different configurations.
+func (n *Node) lookupPeer(id string) (peer Peer, ok bool, configSize int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	peer, ok = n.configurations.latest[id]
+	return peer, ok, len(n.configurations.latest)
+}
+
 func (n *Node) hasStagingPeer() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()

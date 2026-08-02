@@ -11,6 +11,10 @@ import (
 type Transport interface {
 	AppendEntries(ctx context.Context, peerID string, args AppendEntriesArgs) (AppendEntriesResponse, error)
 	RequestVote(ctx context.Context, peerID string, args RequestVoteArgs) (RequestVoteResponse, error)
+	// PreVote sends the pre-vote probe that precedes a real election. It is a
+	// separate RPC from RequestVote because it must not be allowed to change any
+	// persistent state on the peer — see HandlePreVote.
+	PreVote(ctx context.Context, peerID string, args PreVoteArgs) (PreVoteResponse, error)
 	InstallSnapshot(ctx context.Context, peerID string, args InstallSnapshotArgs) (InstallSnapshotResponse, error)
 }
 
