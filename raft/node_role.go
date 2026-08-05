@@ -21,6 +21,9 @@ func (n *Node) becomeFollower() {
 	// commit has to fail now rather than block on entries a new leader may never
 	// commit. A no-op when we were not leader (candidate losing, startup).
 	n.clearLeaderCloseCh()
+	// The fan-out channels belong to the leadership term that just ended; a later
+	// becomeLeader builds a fresh set.
+	n.clearMemberChannels()
 	n.SetRole(ServerRole_Follower)
 	n.startElectionOut(n.ctx)
 }
@@ -52,6 +55,10 @@ func (n *Node) becomeLeader() {
 	// Replication bookkeeping is per-peer; our own entry has no NextIndex to seed,
 	// and getMajorityMatchIndex substitutes our real last index for it anyway.
 	n.mu.Lock()
+	// Fresh fan-out bookkeeping for this term. The map is created ONCE, before the
+	// loop — creating it inside would reset it on every iteration and leave only
+	// the last peer with a stop channel.
+	n.memberRemovedCh = make(map[string]chan struct{})
 	for id, peer := range n.configurations.latest {
 		if id == n.ID {
 			continue
@@ -59,7 +66,13 @@ func (n *Node) becomeLeader() {
 		peer.NextIndex = lastIndex + 1
 		peer.MatchIndex = 0
 		n.configurations.latest[id] = peer
+		// Staging peers are driven by AddMember's catch-up, not the heartbeat
+		// fan-out, so they get no goroutine and need no way to stop one.
+		if peer.PeerState != PeerState_Staging {
+			n.memberRemovedCh[id] = make(chan struct{}, 1)
+		}
 	}
+	n.memberAddedCh = make(chan string, 1)
 	n.mu.Unlock()
 
 	n.startSendLogs(n.ctx)

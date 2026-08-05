@@ -80,6 +80,10 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 	if err := n.Propose(ctx, EntryType_Config, data); err != nil {
 		return fmt.Errorf("addMember: %w", err)
 	}
+
+	// The member is promoted and committed; tell the heartbeat orchestrator to
+	// start replicating to it, since it fixed its peer set when the term began.
+	n.notifyMemberAdded(ctx, peerID)
 	return nil
 }
 

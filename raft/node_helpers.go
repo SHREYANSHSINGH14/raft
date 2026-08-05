@@ -1,6 +1,10 @@
 package raft
 
-import "context"
+import (
+	"context"
+
+	"github.com/rs/zerolog"
+)
 
 // -------------------------------------------
 // Below are some helper functions to get and set server state like role, peer indexes, commit index etc
@@ -195,6 +199,94 @@ func (n *Node) hasStagingPeer() bool {
 		}
 	}
 	return false
+}
+
+// -------------------------------------------
+// Dynamic replication fan-out
+//
+// startSendLogs decides its peer set once, when a leadership term begins. These
+// channels are how membership changes reach it mid-term: memberAddedCh asks the
+// orchestrator to start replicating to a newly promoted member, and each peer's
+// entry in memberRemovedCh tells that peer's goroutine to stop.
+//
+// Both only exist for the duration of a leadership term — becomeLeader creates
+// them, becomeFollower clears them. Every accessor below therefore has to tolerate
+// their absence: a membership change racing a step-down must not block on a
+// channel nobody is reading, and must not panic on a map nobody has created. All
+// of them take mu, because the orchestrator mutates the same map from its own
+// goroutine.
+// -------------------------------------------
+
+// memberRemovedChFor returns the stop channel for a peer, or nil if it has none.
+// A nil receive-only channel blocks forever in a select, which is exactly the
+// right behaviour for a peer that can never be told to stop.
+func (n *Node) memberRemovedChFor(id string) <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.memberRemovedCh[id]
+}
+
+// ensureMemberRemovedCh returns the peer's stop channel, creating it if this is a
+// member that joined after the term began.
+func (n *Node) ensureMemberRemovedCh(id string) <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.memberRemovedCh == nil {
+		n.memberRemovedCh = make(map[string]chan struct{})
+	}
+	if _, ok := n.memberRemovedCh[id]; !ok {
+		n.memberRemovedCh[id] = make(chan struct{}, 1)
+	}
+	return n.memberRemovedCh[id]
+}
+
+// notifyMemberAdded asks the heartbeat orchestrator to start replicating to a
+// newly promoted member. It is a no-op when we are not leading, and never blocks:
+// a bare send would deadlock AddMember forever against a nil channel (we stepped
+// down) or an orchestrator that has already exited.
+func (n *Node) notifyMemberAdded(ctx context.Context, id string) {
+	n.mu.Lock()
+	ch := n.memberAddedCh
+	n.mu.Unlock()
+
+	if ch == nil {
+		return // not leading; there is no fan-out to update
+	}
+	select {
+	case ch <- id:
+	default:
+		// The buffer is sized 1 and AddMember is serialised by hasStagingPeer, so
+		// this should not happen. Log rather than drop silently: the consequence is
+		// a member that gets no replication until the next leadership term.
+		zerolog.Ctx(ctx).Warn().Msgf("member-added notification for %s dropped; it will not be replicated to until the next term", id)
+	}
+}
+
+// notifyMemberRemoved tells a peer's heartbeat goroutine to stop. Same no-op and
+// non-blocking rules as notifyMemberAdded — and note the goroutine may already
+// have exited on its own (step-down cancels heartbeatCtx), in which case nobody
+// reads this and the buffered slot is simply discarded with the term.
+func (n *Node) notifyMemberRemoved(id string) {
+	n.mu.Lock()
+	ch := n.memberRemovedCh[id]
+	n.mu.Unlock()
+
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// clearMemberChannels ends the fan-out bookkeeping for a leadership term. Called
+// by becomeFollower; becomeLeader builds a fresh set.
+func (n *Node) clearMemberChannels() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.memberAddedCh = nil
+	n.memberRemovedCh = nil
 }
 
 func (n *Node) SetCommitIndex(idx uint) {

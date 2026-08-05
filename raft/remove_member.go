@@ -74,6 +74,11 @@ func (n *Node) RemoveMember(ctx context.Context, peerID string) error {
 
 	if peerID == n.GetID() {
 		n.stepDownAfterSelfRemoval(ctx)
+	} else {
+		// Stop replicating to a peer that is no longer a member. Best-effort: if we
+		// have already stepped down the goroutine is gone and there is nothing to
+		// tell.
+		n.notifyMemberRemoved(peerID)
 	}
 
 	return nil

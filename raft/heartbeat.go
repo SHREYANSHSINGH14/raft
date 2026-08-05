@@ -67,10 +67,14 @@ func (n *Node) startSendLogs(ctx context.Context) {
 	started := make(chan struct{}, len(activePeerIDs))
 
 	for _, k := range activePeerIDs {
-		go func(id string) {
+		// Resolve the per-peer removal channel HERE, on the orchestrator goroutine,
+		// rather than inside the spawned one: the map is mutated under mu by the
+		// member-added case below, and reading it from a peer goroutine would race.
+		removeCh := n.memberRemovedChFor(k)
+		go func(id string, removeCh <-chan struct{}) {
 			started <- struct{}{}
-			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh)
-		}(k)
+			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh, removeCh)
+		}(k, removeCh)
 	}
 
 	// drain and count — blocks until all goroutines have actually started
@@ -80,22 +84,37 @@ func (n *Node) startSendLogs(ctx context.Context) {
 
 	go n.startCommitIndexUpdater(heartbeatCtx, updateCommitIndexCh)
 
-	select {
-	case <-stepDownCh:
-		// a peer responded with a higher term — we are no longer the legitimate leader.
-		// cancel heartbeatCtx first so all sendLogsPerPeer goroutines stop, then
-		// transition. order matters: cancel before becomeFollower so no zombie heartbeats
-		// race against the new follower state.
-		cancel()
-		n.becomeFollower()
-		return
-	case <-n.electionTimeoutCh:
-		cancel()
-		n.becomeFollower()
-		return
-	case <-ctx.Done():
-		cancel()
-		return
+	// The loop matters. Three of these cases END the leadership term and return;
+	// memberAddedCh does not — it is the one event the orchestrator handles and
+	// then keeps going. Without the loop, control would fall out of the select
+	// after the first member is added, the function would return, and the deferred
+	// cancel would tear down heartbeatCtx — killing every sendLogsPerPeer goroutine
+	// while the node still believes it is leader. Silent: no role change, no log,
+	// followers simply stop hearing from a leader that thinks it is leading.
+	for {
+		select {
+		case <-stepDownCh:
+			// a peer responded with a higher term — we are no longer the legitimate leader.
+			// cancel heartbeatCtx first so all sendLogsPerPeer goroutines stop, then
+			// transition. order matters: cancel before becomeFollower so no zombie heartbeats
+			// race against the new follower state.
+			cancel()
+			n.becomeFollower()
+			return
+		case <-n.electionTimeoutCh:
+			cancel()
+			n.becomeFollower()
+			return
+		case id := <-n.memberAddedCh:
+			// A member finished catching up and was promoted, so it now needs the
+			// ordinary heartbeat that startSendLogs only set up for the peers that
+			// existed when this term began. Non-terminal: no return.
+			removeCh := n.ensureMemberRemovedCh(id)
+			go n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh, removeCh)
+		case <-ctx.Done():
+			cancel()
+			return
+		}
 	}
 }
 
@@ -111,27 +130,23 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			lastLogIndex, err := n.store.GetLastLogIndex(ctx)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-
 				continue
 			}
 
 			commitIndex := getMajorityMatchIndex(n.peersSnapshot(), n.GetID(), lastLogIndex)
 			if commitIndex == 0 {
-
 				continue
 			}
 
 			commitIndexLog, err := n.store.GetLogByIndex(ctx, commitIndex)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-
 				continue
 			}
 
 			currentTerm, err := n.store.GetCurrentTerm(ctx)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
-
 				continue
 			}
 
@@ -143,7 +158,7 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 }
 
 // per peer heartbeat orchestrator
-func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}) {
+func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, updateCommitIndexCh chan<- struct{}, removeMemberCh <-chan struct{}) {
 	heartBeatTime := time.Duration(n.cfg.HeartbeatMs) * time.Millisecond
 	ticker := time.NewTicker(heartBeatTime)
 	sendLogErrChan := make(chan error, 1)
@@ -171,6 +186,11 @@ func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("send logs to peer %s failed, will retry on next heartbeat", peerID)
 			}
 			inFlight = false
+		case <-removeMemberCh:
+			zerolog.Ctx(ctx).Debug().Msgf("sendLogsPerPeer: peer %s removed from cluster, stopping heartbeat", peerID)
+			inFlight = false
+			cancel()
+			return
 		case <-ctx.Done():
 			cancel()
 			return

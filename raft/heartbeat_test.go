@@ -610,3 +610,332 @@ func TestStartCommitIndexUpdater_ContextCancelled_Exits(t *testing.T) {
 		t.Fatal("startCommitIndexUpdater did not exit after context cancellation")
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// startSendLogs — the orchestrator
+//
+// It owns the leadership term: it picks the peer set once, spawns one
+// sendLogsPerPeer per peer, and then sits in a select that ENDS the term on
+// step-down / election-timeout / cancellation, but keeps going when a member is
+// added mid-term. That asymmetry is the whole reason the select is inside a
+// loop, and it is what these tests pin.
+// ════════════════════════════════════════════════════════════════════════════
+
+// setupOrchestratorTest builds a leader with the per-term fan-out bookkeeping
+// becomeLeader would have created, so startSendLogs can be exercised on its own.
+func setupOrchestratorTest(t *testing.T) (*Node, *callRecorder, context.Context) {
+	t.Helper()
+
+	store := NewMemStorage()
+	store.SetCurrentTerm(context.Background(), 5)
+
+	rec := newCallRecorder()
+	transport := NewMockTransport()
+	transport.On(methodAppendEntries, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) { rec.add(args.String(0)) }).
+		Return(AppendEntriesResponse{Term: 5, Success: true}, nil)
+
+	node := NewNodeMock(store, nil)
+	node.transport = transport
+	node.Role = ServerRole_Leader
+	for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
+		node.addPeer(id, Peer{PeerState: PeerState_Voter, NextIndex: 1})
+	}
+
+	// What becomeLeader sets up for the term.
+	node.memberRemovedCh = map[string]chan struct{}{}
+	for _, id := range node.peerIDs() {
+		node.memberRemovedCh[id] = make(chan struct{}, 1)
+	}
+	node.memberAddedCh = make(chan string, 1)
+
+	// becomeFollower logs through n.ctx and starts an election timer on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	node.ctx, node.cancel = ctx, cancel
+	t.Cleanup(cancel)
+
+	return node, rec, ctx
+}
+
+// runOrchestrator runs startSendLogs on its own goroutine, returning a channel
+// closed when it returns — which is how these tests tell "still leading" from
+// "term over" without reaching into internal state.
+func runOrchestrator(n *Node, ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.startSendLogs(ctx)
+	}()
+	return done
+}
+
+func assertStillRunning(t *testing.T, done <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatal(msg)
+	default:
+	}
+}
+
+func assertReturned(t *testing.T, done <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(msg)
+	}
+}
+
+// callRecorder tracks which peers received an AppendEntries. testify appends to
+// mock.Calls from every peer goroutine, so reading that slice from the test
+// goroutine races; record through the Run hook into our own guarded set instead.
+type callRecorder struct {
+	mu   sync.Mutex
+	seen map[string]int
+}
+
+func newCallRecorder() *callRecorder {
+	return &callRecorder{seen: map[string]int{}}
+}
+
+func (r *callRecorder) add(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen[id]++
+}
+
+func (r *callRecorder) sawPeer(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seen[id] > 0
+}
+
+func (r *callRecorder) distinctPeers() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.seen)
+}
+
+// ── 20. A member added mid-term does NOT end the term ─────────────────────────
+//
+// The regression test for the missing loop: without it, control fell out of the
+// select on the first member-added, startSendLogs returned, and its deferred
+// cancel killed every peer goroutine — while the node still believed it was
+// leader. Silent, so the assertion has to be that the orchestrator is still
+// alive AND still able to end the term afterwards.
+
+func TestStartSendLogs_MemberAdded_TermContinues(t *testing.T) {
+	node, rec, ctx := setupOrchestratorTest(t)
+	done := runOrchestrator(node, ctx)
+
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter, NextIndex: 1})
+	node.memberAddedCh <- "node-99"
+
+	// The new member starts receiving heartbeats...
+	assert.Eventually(t, func() bool {
+		return rec.sawPeer("node-99")
+	}, 2*time.Second, 10*time.Millisecond,
+		"a member added mid-term should get its own replication goroutine")
+
+	// ...and the orchestrator is still running the term.
+	assertStillRunning(t, done, "startSendLogs returned after a member was added")
+
+	// Still able to end the term, which the pre-loop version could not do:
+	// it had already returned and nothing was reading electionTimeoutCh.
+	node.electionTimeoutCh <- struct{}{}
+	assertReturned(t, done, "orchestrator did not step down after a member was added")
+	assert.Equal(t, ServerRole_Follower, node.GetRole())
+}
+
+// ── 21. A member added mid-term gets a stop channel ──────────────────────────
+
+func TestStartSendLogs_MemberAdded_GetsStopChannel(t *testing.T) {
+	node, _, ctx := setupOrchestratorTest(t)
+	done := runOrchestrator(node, ctx)
+	t.Cleanup(func() { node.electionTimeoutCh <- struct{}{}; <-done })
+
+	assert.Nil(t, node.memberRemovedChFor("node-99"), "not a member yet")
+
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter, NextIndex: 1})
+	node.memberAddedCh <- "node-99"
+
+	assert.Eventually(t, func() bool {
+		return node.memberRemovedChFor("node-99") != nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"a member added mid-term must be stoppable like any other")
+}
+
+// ── 22. The peer set skips self and Staging members ──────────────────────────
+//
+// Self would heartbeat its own address forever; Staging members are driven by
+// AddMember's catch-up out of band, and a second replication stream would race it.
+
+func TestStartSendLogs_SkipsSelfAndStagingPeers(t *testing.T) {
+	node, rec, ctx := setupOrchestratorTest(t)
+	node.addPeer("node-staging", Peer{PeerState: PeerState_Staging, NextIndex: 1})
+
+	done := runOrchestrator(node, ctx)
+	t.Cleanup(func() { node.electionTimeoutCh <- struct{}{}; <-done })
+
+	assert.Eventually(t, func() bool {
+		return rec.distinctPeers() >= 4
+	}, 2*time.Second, 10*time.Millisecond, "the four voters should be replicated to")
+
+	assert.False(t, rec.sawPeer(node.GetID()), "a leader must never replicate to itself")
+	assert.False(t, rec.sawPeer("node-staging"), "Staging members are AddMember's job, not the fan-out's")
+}
+
+// ── 23. Terminal cases end the term ──────────────────────────────────────────
+
+func TestStartSendLogs_ContextCancelled_Returns(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runOrchestrator(node, ctx)
+
+	cancel()
+
+	assertReturned(t, done, "orchestrator did not return on context cancellation")
+	assert.Equal(t, ServerRole_Leader, node.GetRole(),
+		"cancellation is shutdown, not a step-down — the role is not touched")
+}
+
+func TestStartSendLogs_StepDownSignal_BecomesFollower(t *testing.T) {
+	node, _, ctx := setupOrchestratorTest(t)
+	done := runOrchestrator(node, ctx)
+
+	node.electionTimeoutCh <- struct{}{}
+
+	assertReturned(t, done, "orchestrator did not return on the step-down signal")
+	assert.Equal(t, ServerRole_Follower, node.GetRole())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// sendLogsPerPeer — the per-peer loop
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── 24. A removed peer's goroutine exits ─────────────────────────────────────
+
+func TestSendLogsPerPeer_MemberRemoved_Exits(t *testing.T) {
+	node, _, ctx := setupOrchestratorTest(t)
+
+	removeCh := make(chan struct{}, 1)
+	stepDownCh := make(chan struct{}, 1)
+	updateCommitCh := make(chan struct{}, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.sendLogsPerPeer(ctx, "node-2", stepDownCh, updateCommitCh, removeCh)
+	}()
+
+	removeCh <- struct{}{}
+
+	assertReturned(t, done, "peer goroutine did not stop after its member was removed")
+}
+
+func TestSendLogsPerPeer_ContextCancelled_Exits(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.sendLogsPerPeer(ctx, "node-2", make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1))
+	}()
+
+	cancel()
+
+	assertReturned(t, done, "peer goroutine did not exit on context cancellation")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Fan-out notifications
+//
+// The channels exist only for a leadership term, so every notification has to
+// survive their absence. A bare send here is what hung the whole suite: nil
+// channel, blocked forever, and AddMember never returned.
+// ════════════════════════════════════════════════════════════════════════════
+
+func TestNotifyMemberAdded_NotLeading_IsNoOp(t *testing.T) {
+	node := NewNodeMock(NewMemStorage(), nil) // memberAddedCh is nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.notifyMemberAdded(context.Background(), "node-99")
+	}()
+
+	assertReturned(t, done, "notifyMemberAdded blocked on a nil channel")
+}
+
+func TestNotifyMemberRemoved_UnknownPeer_IsNoOp(t *testing.T) {
+	node := NewNodeMock(NewMemStorage(), nil) // memberRemovedCh is nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.notifyMemberRemoved("node-99")
+	}()
+
+	assertReturned(t, done, "notifyMemberRemoved blocked on a nil channel")
+}
+
+func TestNotifyMemberRemoved_DeliversToThatPeerOnly(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
+
+	node.notifyMemberRemoved("node-3")
+
+	assert.Len(t, node.memberRemovedCh["node-3"], 1, "node-3 should have been told to stop")
+	assert.Empty(t, node.memberRemovedCh["node-2"], "no other peer should be disturbed")
+}
+
+// A second notification while one is pending is dropped rather than blocking —
+// the peer only needs telling once.
+func TestNotifyMemberRemoved_RepeatedIsNonBlocking(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 5; i++ {
+			node.notifyMemberRemoved("node-3")
+		}
+	}()
+
+	assertReturned(t, done, "repeated notifyMemberRemoved blocked once the buffer filled")
+	assert.Len(t, node.memberRemovedCh["node-3"], 1)
+}
+
+// ── becomeLeader's per-term bookkeeping ──────────────────────────────────────
+//
+// The map is built once, before the loop. Building it inside would reset it on
+// every iteration and leave only the last peer with a stop channel.
+
+func TestBecomeLeader_StopChannelForEveryNonStagingPeer(t *testing.T) {
+	node, _, ctx := setupOrchestratorTest(t)
+	node.memberRemovedCh = nil
+	node.memberAddedCh = nil
+	node.addPeer("node-staging", Peer{PeerState: PeerState_Staging, NextIndex: 1})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		node.becomeLeader() // blocks in startSendLogs for the rest of the term
+	}()
+	t.Cleanup(func() { node.electionTimeoutCh <- struct{}{}; <-done })
+	_ = ctx
+
+	assert.Eventually(t, func() bool {
+		for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
+			if node.memberRemovedChFor(id) == nil {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 10*time.Millisecond,
+		"every non-Staging peer needs its own stop channel, not just the last one")
+
+	assert.Nil(t, node.memberRemovedChFor("node-staging"), "Staging peers get no fan-out goroutine")
+	assert.Nil(t, node.memberRemovedChFor(node.GetID()), "self is never replicated to")
+}
