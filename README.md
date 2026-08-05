@@ -31,10 +31,18 @@ The three core problems Raft solves:
 │   ├── node.go           # Node struct, NewNode, Start/Stop
 │   ├── interfaces.go     # Transport, Storage, StateMachine interfaces
 │   ├── types.go          # Plain Go structs (LogEntry, RequestVoteArgs, …)
-│   ├── election.go       # Candidate election loop
+│   ├── election.go       # Pre-vote round + candidate election loop
 │   ├── heartbeat.go      # Leader heartbeat / log replication
+│   ├── apply_loop.go     # Applies committed entries to the StateMachine
+│   ├── write_logs.go     # Propose — append and wait for commit
 │   ├── request_vote.go   # RequestVote RPC handler
-│   └── append_entries.go # AppendEntries RPC handler
+│   ├── pre_vote.go       # PreVote RPC handler (Ongaro §9.6)
+│   ├── timeout_now.go    # TimeoutNow RPC handler (leadership transfer)
+│   ├── append_entries.go # AppendEntries RPC handler
+│   ├── install_snapshot.go # InstallSnapshot RPC handler
+│   ├── snapshot.go       # Snapshot capture + log compaction
+│   ├── add_member.go     # AddMember — stage, catch up, promote
+│   └── remove_member.go  # RemoveMember — incl. self-removal handoff
 ├── server/               # gRPC server + HTTP debug server
 │   ├── server.go         # grpcTransport adapter wires gRPC → raft.Transport
 │   └── debug_server.go
@@ -221,20 +229,28 @@ peers:
 
 - [x] Leader election with randomized timeouts
 - [x] Vote safety (one vote per term, log up-to-date check)
-- [x] Log replication via `AppendEntries`
+- [x] **Pre-vote** — a probe round before the term bump, so a partitioned node can't inflate terms
+- [x] **Leadership transfer** (`TimeoutNow`), receiving half
+- [x] Log replication via `AppendEntries`, one independent goroutine per peer
 - [x] Heartbeat / leader keepalive
-- [x] Commit index advancement (majority match)
+- [x] Commit index advancement (majority match, Voters only)
 - [x] Persistent state (`currentTerm`, `votedFor`, log entries)
+- [x] Apply loop — committed entries reach the `StateMachine`
+- [x] `Propose` waits for commit, and fails fast with `ErrLeadershipLost` on step-down
+- [x] Snapshots — creation, on-disk format, `InstallSnapshot` send + receive, log compaction
+- [x] **Cluster membership changes** — `AddMember` and `RemoveMember`, single-server changes
+      (Ongaro §4.1), including a leader removing itself
 - [x] Client `WriteLog` / `ReadLog` RPCs
 - [x] Graceful shutdown via context cancellation
 - [x] Debug HTTP server
 
 ## What's Not Yet Implemented
 
-- [ ] Apply loop (state machine execution after commit)
-- [ ] Wait-for-commit on `WriteLog` (currently returns after local append)
-- [ ] Log compaction / snapshots
-- [ ] Cluster membership changes (joint consensus)
+- [ ] **`PreVote` / `TimeoutNow` / `InstallSnapshot` over gRPC** — the handlers and the `Transport`
+      methods exist, but `proto/rpc.proto` has no such RPCs, so `grpcTransport` stubs all three.
+      Since elections are gated behind pre-vote, this currently prevents a *real* cluster from
+      electing a leader — the library's own tests pass because they mock the transport. See `STATE.md`.
+- [ ] `Propose` returning a future instead of blocking (design in `STATE.md`)
 - [ ] Linearizable reads
 
 ---

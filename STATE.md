@@ -1,87 +1,117 @@
 # Where I am
 
-**Last updated: 2026-07-31.** This file is short-lived by design — rewrite it, don't append to it.
+**Last updated: 2026-08-03.** This file is short-lived by design — rewrite it, don't append to it.
 It answers one question: if I sat down right now, what would I need to know?
 
 ## Just committed
 
-The membership-change milestone. `AddMember` is now an end-to-end flow, and the InstallSnapshot
-**send** path exists (it was receive-only before). Recent commits on `main`:
+The **RPC-surface milestone**: pre-vote, leadership transfer, and `RemoveMember`. Membership changes
+are now symmetric (add *and* remove), and elections are gated behind a round that costs nothing to
+lose. On `main`:
 
-- membership config tracking (`configurations` latest/committed, §5.3 conflict-only append).
-- exclude non-voters from replication + majority math.
-- `AddMember` + InstallSnapshot send path + catch-up + deadline scaling.
-- **latest (`5991a3d`)** — anchor the prevLog check on the snapshot boundary, both sides
-  (`logTermAt` + cached `snapshotLatestTerm`), which unblocks catch-up against a real follower.
+- `HandlePreVote` + `Transport.PreVote` — the receiving half of §9.6.
+- `timeoutNowCh` + `leaderCloseCh` — the two channels the rest of the milestone needed.
+- `HandleTimeoutNow` + `Transport.TimeoutNow` — leadership transfer, receiving half.
+- **elections gated behind the pre-vote round** — `election()` now probes before it bumps the term.
+- **this node lives inside its own configuration** — the refactor that made self-removal expressible.
+- `RemoveMember` with self-removal handoff.
+- docs: `CLAUDE.md` → `INVARIANTS.md`.
 
-`go build ./...`, `go vet ./...`, `go test ./...`, **and `go test ./... -race`** are all green — the
-long-standing `Persist`-goroutine race is fixed (`runSnapshotOnce` now joins the goroutine).
+On branch `feat/dynamic-fanout` (not merged): replication to members added or removed mid-term.
 
-## In flight: membership changes (`AddMember`)
+`go build ./...`, `go vet ./...`, `go test ./...` and `go test ./... -race` are all green.
 
-### What landed this milestone
+## The one thing that will bite you first
 
-- **`AddMember` full flow** ([add_member.go](raft/add_member.go)): add peer as `Staging` → append
-  full-config `EntryType_Config` entry → wait commit → InstallSnapshot → **catch-up rounds** → promote
-  to Voter/NonVoter → wait commit. On any failure it **rolls back** (removes the staging peer, replicates
-  the removal). Single outstanding change enforced by `hasStagingPeer`.
-- **Catch-up loop** — sends `nextIndex..end` whole each round (per the paper), bounded by
-  `maxCatchUpRounds`. Caught-up decision is Ongaro §4.2.1: a round finishing within an election timeout
-  ⇒ keeping pace ⇒ promote; still slow after the last round ⇒ abort.
-- **InstallSnapshot send path**: `Transport.InstallSnapshot`, `callInstallSnapshot` (streams the file,
-  size-scaled deadline, returns full `SnapshotMeta`), `sendInstallSnapshot` (heartbeat fallback).
-- **Delay-compaction retain floor**: `catchingUpIdx` (atomic) is the lowest index a catching-up member
-  still needs; `runSnapshotOnce` **parks** in `waitForCatchUpFloor` (channel `catchUpSignal`, not a
-  busy-wait) until the floor clears, then compacts. `setCatchingUpIdx` stores + signals.
-- **AppendEntries deadline scaling** by entry count (`AppendEntriesDeadlineScaleCount/TimeMs`), shared by
-  heartbeat and catch-up. Entries aren't serialized at this layer, so it's count-based not byte-based.
-- Staging peers skipped in the heartbeat fan-out (`startSendLogs`); `getMajorityMatchIndex`/election/
-  `waitForQuorum` count Voters only (`majoritySize`, `voterPeerIDs`).
-- **Snapshot-boundary prevLog anchor** (commit `5991a3d`): `logTermAt` treats `prevLogIndex ==
-  snapshotLatestIndex` as a valid anchor (validated against a cached `snapshotLatestTerm`, set on both
-  create and install), so replication survives compaction. Used on **both** sides — the follower
-  (`HandleAppendEntries`) and the leader (`sendLogs` + AddMember catch-up). This closed the "catch-up
-  rejected by a real follower" blocker.
+**Three `Transport` methods are stubs in `grpcTransport`** ([server/server.go](server/server.go)) —
+`PreVote`, `TimeoutNow`, `InstallSnapshot` — because `proto/rpc.proto` has no such RPCs. They return
+`"not implemented"`.
 
-### Blocking / broken — do these first
+This used to be harmless. It is not any more: since elections went through the pre-vote gate, every
+pre-vote against a real cluster errors out, which the round counts as a withheld vote — so **no node
+in a multi-node deployment can win an election**. (A single-node cluster still works: with one voter
+the round needs no RPCs and passes on its own vote.) The library tests all pass because they mock the
+transport. Adding the three RPCs to the proto plus the `server/rpc.go` conversions is the single
+highest-value next task.
 
-1. **`db.Store.CompactLogs`/`DeleteLogs` prefix path** — confirm the production store actually deletes
-   the prefix (the mocks do). Compaction being a no-op in prod would mask the whole retain-floor design.
+Second-order effects of the same gap: the `RemoveMember` leadership handoff always fails and falls
+through to the bare step-down, and a lagging follower can never be caught up by snapshot.
 
-### Not wired at all
+## What landed this milestone
 
-- **Snapshot creation never runs.** `startSnapshotLoop` ([snapshot.go:34](raft/snapshot.go#L34)) is
-  called from nowhere; `Node.Start` doesn't start it, and `server/server.go` sets no `SnapshotDir`/
-  interval/threshold and passes `nil` as the `StateMachine`.
-- **`AddMember` is untested** — no `add_member_test.go`. It's now the largest untested path (locks,
-  commit waits, InstallSnapshot, catch-up rounds, rollback, promotion).
-- **Dynamic fan-out gap**: `startSendLogs` snapshots its peer set at `becomeLeader`, so a freshly
-  promoted Voter gets no `sendLogsPerPeer` goroutine until the next leadership term — yet it now counts
-  toward quorum. Close this or promotion is only half-real.
-- **`RemoveMember` doesn't exist**; the config payload only models add/promote.
-- `setCommittedConfiguration` is defined but never called — `committed` only ever holds the bootstrap
-  config, so `rollbackLatestIfTruncated` reverts to bootstrap, not the true last-committed config.
+- **Pre-vote (Ongaro §9.6)**, both halves. `HandlePreVote` is side-effect free by design — no term
+  persisted, no vote spent, no election timer reset — and `election()` runs the round *before*
+  `SetCurrentTerm`, so losing it costs nothing. A higher-term response stops the round but is never
+  adopted.
+- **Leadership transfer (§3.10)**, receiving half. `HandleTimeoutNow` does not transition; it signals
+  `timeoutNowCh` and the election-timer goroutine campaigns, keeping the "only the goroutine that owns
+  a lifecycle may end it" rule intact.
+- **`leaderCloseCh`** — a `Propose` parked in `waitForCommit` now fails with `ErrLeadershipLost` on
+  step-down instead of blocking until its caller's context expires. Closing it must be paired with a
+  `commitCond.Broadcast`; see INVARIANTS.md.
+- **`configurations.latest` holds the whole membership, self included.** This replaced a
+  peers-only map plus a hardcoded `+1` in `majoritySize`. It is what makes "the leader is no longer a
+  member" expressible at all, and it fixed a liveness bug where a removed leader kept counting itself
+  in majorities (§4.2.2). Helpers now split three ways — see INVARIANTS.md before touching them.
+- **`RemoveMember`** with the same shape as `AddMember`, plus a self-removal branch: hand off via
+  `TimeoutNow` to the most caught-up voter, then step down **whether or not that worked** (§4.2.2
+  prescribes the step-down; the handoff is only an optimisation on top).
+- **Dynamic fan-out** (on the branch) — closes the long-standing gap where a freshly promoted Voter
+  counted toward quorum but received no replication until the next leadership term.
+
+## Not wired at all
+
+- **The three proto RPCs**, above. Everything else is downstream of this.
+- **`server/server.go` still passes `nil` as the `StateMachine`** and sets no `SnapshotDir` /
+  interval / threshold, so although `Node.Start` now calls `startSnapshotLoop`, a real node still
+  never snapshots.
+
+## Decided but not built
+
+**`Propose` as a future.** Design worked out in full; nothing written yet. The shape:
+
+```go
+type future struct {
+    idx        uint
+    done       chan struct{}   // CLOSED on commit — never sent to
+    leaderLost <-chan struct{} // node's leaderCloseCh, captured at creation
+}
+```
+
+The waiter selects on `done` / `leaderLost` / `ctx.Done()`. Points that took a while to reach:
+
+- **Capture `leaderCloseCh` in the future**, don't have step-down walk a queue. Otherwise a `Propose`
+  enqueuing between the drain and the role flip is never woken.
+- **`done` must be closed, not sent to**, so an abandoned waiter can't block the updater.
+- **The waiter list is a `[]*future` under `commitMu`, not a `chan *future`.** A channel can't be
+  peeked (you'd need a pending-head slot) and, worse, can't be cleared — a full buffer would block
+  `Propose` while it holds `clientMu`, which is a deadlock.
+- **Enqueue inside `clientMu`**, next to `appendEntry`, or append order stops matching index order and
+  the prefix drain silently strands a waiter.
+- **Cap the list** (`MaxPendingProposals`, ~1000) as admission control — reject with a sentinel, never
+  evict. Evicting either hangs the victim or reports a false success. The cap exists for the
+  lost-quorum case, where `commitIndex` freezes and nothing drains.
+
+Note this only removes one of `commitCond`'s two clients — the apply loop, `install_snapshot.go` and
+`snapshot.go` still use it.
 
 ## Open questions worth resolving
 
-- The catch-up now anchors at `meta.Index/meta.Term` (the snapshot's own last-included) and the backoff
-  uses `logTermAt`, so the boundary is handled correctly. `SnapshotMeta.PrevIndex/PrevTerm`
-  (= `meta.Index-1`'s entry) is now unused by the catch-up — likely vestigial; remove it or find it a
-  purpose.
-- Why streaming InstallSnapshot rather than the paper's chunked/offset form?
-- Why `clientMu` in the library rather than `server/rpc.go`? (Answer reconstructed in chat: the
-  check-then-act on term/votedFor/log isn't transactional; the lock must not depend on every caller
-  remembering it. Worth writing into JOURNEY.md.)
+- `SnapshotMeta.PrevIndex/PrevTerm` is unused by the catch-up now that it anchors at
+  `meta.Index/meta.Term` — vestigial. Remove it or find it a purpose.
+- Why streaming `InstallSnapshot` rather than the paper's chunked/offset form?
+- Confirm `db.Store.DeleteLogs` actually deletes the prefix in the production store (the mocks do).
+  Compaction being a no-op in prod would mask the whole retain-floor design.
 
 ## Known open TODOs in code
 
-- `write_logs.go` — return a future from `Propose` instead of blocking; a blocked `Propose` can hang if
-  the leader steps down (needs `leaderCloseCh`).
 - `snapshot.go` — collapse apply loop + snapshot into one goroutine with channels.
 - `add_member.go` / `heartbeat.go` — the `> 5` snapshot-retry and `maxCatchUpRounds = 10` should be
   configurable.
 
 ## Housekeeping
 
-- Leftover debug print: [heartbeat.go:210](raft/heartbeat.go#L210) `fmt.Printf` sprays
-  `CurrentTerm / Res Term` into every test run. Same in `server/rpc_concurrency_test.go`.
+- Leftover debug print in `heartbeat.go` sprays `CurrentTerm / Res Term` into every test run. Same in
+  `server/rpc_concurrency_test.go`.
+- `refs/original/*` from the commit-history rewrite are still around locally; delete them once you are
+  happy with the history.

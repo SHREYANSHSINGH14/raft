@@ -62,11 +62,14 @@ starts the heartbeat fan-out.
 ```mermaid
 stateDiagram-v2
     [*] --> Follower
-    Follower --> Candidate: election timeout, no valid heartbeat
+    Follower --> Candidate: election timeout AND pre-vote won
+    Follower --> Candidate: TimeoutNow (timeoutNowCh)
+    Follower --> Follower: pre-vote lost — nothing persisted
     Candidate --> Leader: wins majority of VOTERS
     Candidate --> Follower: loses or sees higher term
     Candidate --> Candidate: split vote, new randomized timeout
     Leader --> Follower: sees higher term (stepDownCh)
+    Leader --> Follower: removed itself (electionTimeoutCh)
     Follower --> Follower: valid heartbeat resets timer
     Leader --> Leader: heartbeat tick replicates to peers
 ```
@@ -74,6 +77,16 @@ stateDiagram-v2
 **Invariant:** only the goroutine that owns a lifecycle ends it. A child (`sendLogs`) that sees a
 higher term signals `stepDownCh` and returns; `startSendLogs` cancels the heartbeat context and calls
 `becomeFollower` exactly once. Failure always retreats to **Follower** (never an immediate retry).
+
+That rule is why two of the transitions above are drawn as signals. `HandleTimeoutNow` does not call
+`becomeCandidate` — it pokes `timeoutNowCh` and the election-timer goroutine campaigns, the same path
+a fired ticker takes. `RemoveMember`, after removing this node, pokes `electionTimeoutCh` rather than
+calling `becomeFollower`, so `startSendLogs` remains the single owner of ending a term.
+
+**The pre-vote gate** sits in front of `Follower → Candidate`. `election()` probes whether it *could*
+win at `currentTerm + 1` before persisting anything; losing is a normal outcome that returns to
+Follower having written no term, spent no vote and touched no peer. Everything after the gate is
+irreversible in the way that matters — a persisted higher term, fanned out, deposes a healthy leader.
 
 ---
 
@@ -94,10 +107,10 @@ flowchart LR
     end
 
     subgraph locks["shared state, by lock"]
-        mu["mu: role, leaderID,<br/>configurations.latest/committed,<br/>snapshotLatestIndex/Term"]
+        mu["mu: role, leaderID,<br/>configurations.latest/committed,<br/>snapshotLatestIndex/Term,<br/>leaderCloseCh, memberAdded/RemovedCh"]
         cm["commitMu + commitCond:<br/>commitIndex"]
-        clm["clientMu: serializes<br/>Propose / HandleAppendEntries /<br/>HandleRequestVote / AddMember"]
-        at["atomics + chans:<br/>snapShotInProgress, catchingUpIdx,<br/>catchUpSignal, electionTimeoutCh"]
+        clm["clientMu: serializes<br/>Propose / HandleAppendEntries /<br/>HandleRequestVote / HandlePreVote /<br/>HandleTimeoutNow / AddMember / RemoveMember"]
+        at["atomics + chans:<br/>snapShotInProgress, catchingUpIdx,<br/>catchUpSignal, electionTimeoutCh,<br/>timeoutNowCh"]
     end
 
     et --> at
@@ -115,6 +128,12 @@ flowchart LR
 (term, votedFor, log) that isn't transactional. Two concurrent `RequestVote`s could otherwise both
 read `votedFor == ""` and both grant — two votes in one term. The lock lives in the library so no
 caller can forget it.
+
+**Membership and the peer set.** `configurations.latest` holds every member *including this node*, so
+each reader has to be explicit about self: RPC fan-out uses `peerIDs`/`voterPeerIDs` (self excluded),
+majority math uses `voterCount`/`isVoter` (self included). `startSendLogs` fixes its peer set when a
+term begins and learns about later changes through `memberAddedCh` and the per-peer `memberRemovedCh`
+— both live only for the duration of that term, which is why every notification is non-blocking.
 
 ---
 
@@ -274,12 +293,17 @@ must always change through `setCatchingUpIdx` (store **and** signal) or the loop
 
 ## How it all connects, in one breath
 
-`Node.Start` brings up the **election timer**; on timeout → **Candidate** → RequestVote to voters →
-majority → **Leader** → **heartbeat fan-out** (one `sendLogsPerPeer` per non-Staging peer).
-Replication and `startCommitIndexUpdater` push `commitIndex` up through `SetCommitIndex`, which
-broadcasts **commitCond** — waking the **apply loop** (applies to the StateMachine) and any blocked
-`Propose`/`AddMember`. When the log grows, the **snapshot loop** captures state, then compacts —
-**delaying** compaction via the `catchingUpIdx` retain floor whenever **AddMember** is catching a new
-member up. Catch-up and normal replication both survive compaction because `logTermAt` accepts the
-**snapshot boundary** as a valid prevLog anchor. Membership lives in `configurations.latest`
-(Voter/NonVoter/Staging); only **Voters** count toward the majorities election and commit use.
+`Node.Start` brings up the **election timer**; on timeout the node runs a **pre-vote** round and only
+if a majority would vote for it does it become **Candidate** → RequestVote to voters → majority →
+**Leader** → **heartbeat fan-out** (one `sendLogsPerPeer` per non-Staging peer). Replication and
+`startCommitIndexUpdater` push `commitIndex` up through `SetCommitIndex`, which broadcasts
+**commitCond** — waking the **apply loop** (applies to the StateMachine) and any blocked
+`Propose`/`AddMember`; a step-down instead closes **leaderCloseCh**, failing those waiters with
+`ErrLeadershipLost` rather than leaving them parked. When the log grows, the **snapshot loop** captures
+state, then compacts — **delaying** compaction via the `catchingUpIdx` retain floor whenever
+**AddMember** is catching a new member up. Catch-up and normal replication both survive compaction
+because `logTermAt` accepts the **snapshot boundary** as a valid prevLog anchor. Membership lives in
+`configurations.latest` (Voter/NonVoter/Staging, **including this node**); only **Voters** count toward
+the majorities election and commit use. `AddMember`/`RemoveMember` change it through the normal log,
+tell the running fan-out via `memberAddedCh`/`memberRemovedCh`, and — when the leader removes
+itself — hand leadership on with **TimeoutNow** before stepping down anyway.
