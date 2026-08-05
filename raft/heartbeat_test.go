@@ -939,3 +939,270 @@ func TestBecomeLeader_StopChannelForEveryNonStagingPeer(t *testing.T) {
 	assert.Nil(t, node.memberRemovedChFor("node-staging"), "Staging peers get no fan-out goroutine")
 	assert.Nil(t, node.memberRemovedChFor(node.GetID()), "self is never replicated to")
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Committed configuration
+//
+// A config change replicates as an ordinary log entry, so `latest` can point at
+// a configuration that has not committed yet. `committed` is the safe fallback a
+// truncation rolls back to, and it only advances once the entry that produced
+// `latest` is actually committed — which is what startCommitIndexUpdater does
+// after it moves commitIndex.
+// ════════════════════════════════════════════════════════════════════════════
+
+// committedConfig reads the committed view under mu, so assertions do not race
+// the updater goroutine that writes it.
+func committedConfig(n *Node) (map[string]Peer, uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return clonePeers(n.configurations.committed), n.configurations.committedIndex
+}
+
+func latestConfig(n *Node) (map[string]Peer, uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return clonePeers(n.configurations.latest), n.configurations.latestIndex
+}
+
+// setupCommittedConfigTest builds a leader whose four voter peers have all
+// replicated up to matchIndex, so the majority match index is matchIndex.
+func setupCommittedConfigTest(t *testing.T, matchIndex uint, entries []LogEntry) *Node {
+	t.Helper()
+
+	store := NewMemStorage()
+	store.SetCurrentTerm(context.Background(), 5)
+	store.AppendLogs(context.Background(), entries)
+
+	node := NewNodeMock(store, nil)
+	for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
+		node.addPeer(id, Peer{PeerState: PeerState_Voter, MatchIndex: matchIndex})
+	}
+	return node
+}
+
+func runCommitIndexUpdaterOnce(t *testing.T, node *Node) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	updateCommitCh := make(chan struct{}, 1)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{}
+}
+
+// ── 25. The entry that produced `latest` commits → `committed` catches up ────
+
+func TestCommitIndexUpdater_ConfigEntryCommitted_AdvancesCommitted(t *testing.T) {
+	node := setupCommittedConfigTest(t, 2, []LogEntry{
+		{Index: 1, Term: 5, Data: []byte("cmd-1")},
+		{Index: 2, Term: 5, Type: EntryType_Config},
+	})
+
+	// A config entry at index 2 is live but not yet known committed. This mirrors
+	// what the leader's appendEntry does: mutate latest, then record the index the
+	// config entry landed at.
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter})
+	node.setLatestConfiguration(node.peersSnapshot(), 2)
+
+	before, _ := committedConfig(node)
+	assert.NotContains(t, before, "node-99", "committed should still be the bootstrap config")
+
+	runCommitIndexUpdaterOnce(t, node)
+
+	assert.Eventually(t, func() bool {
+		_, idx := committedConfig(node)
+		return idx == 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"committed should advance once the config entry commits")
+
+	got, _ := committedConfig(node)
+	assert.Contains(t, got, "node-99", "committed should now hold the live membership")
+}
+
+// ── 26. A config entry still uncommitted leaves `committed` alone ────────────
+
+func TestCommitIndexUpdater_ConfigEntryNotYetCommitted_LeavesCommitted(t *testing.T) {
+	// Peers have only replicated up to index 1, but the config entry is at 3.
+	node := setupCommittedConfigTest(t, 1, []LogEntry{
+		{Index: 1, Term: 5, Data: []byte("cmd-1")},
+		{Index: 2, Term: 5, Data: []byte("cmd-2")},
+		{Index: 3, Term: 5, Type: EntryType_Config},
+	})
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter})
+	node.setLatestConfiguration(node.peersSnapshot(), 3)
+
+	runCommitIndexUpdaterOnce(t, node)
+
+	assert.Eventually(t, func() bool {
+		return node.GetCommitIndex() == 1
+	}, 2*time.Second, 10*time.Millisecond, "commitIndex should reach 1")
+
+	got, idx := committedConfig(node)
+	assert.Equal(t, uint64(0), idx, "the config entry at 3 has not committed")
+	assert.NotContains(t, got, "node-99", "committed must not adopt an uncommitted configuration")
+}
+
+// ── 27. A previous-term entry advances neither (Raft §5.4.2) ─────────────────
+
+func TestCommitIndexUpdater_PreviousTermEntry_AdvancesNeither(t *testing.T) {
+	node := setupCommittedConfigTest(t, 1, []LogEntry{
+		{Index: 1, Term: 4, Type: EntryType_Config}, // term 4, current term is 5
+	})
+	node.setLatestConfiguration(node.peersSnapshot(), 1)
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	updateCommitCh := make(chan struct{}, 1)
+	go node.startCommitIndexUpdater(ctx, updateCommitCh)
+	updateCommitCh <- struct{}{}
+
+	<-ctx.Done()
+
+	assert.Equal(t, uint(0), node.GetCommitIndex(), "§5.4.2: no commit from a previous term")
+	_, idx := committedConfig(node)
+	assert.Equal(t, uint64(0), idx, "and therefore no committed configuration either")
+}
+
+// ── 28. committed must not alias latest ──────────────────────────────────────
+//
+// They are separate views on purpose. If a mutation to one showed up in the
+// other, rollbackLatestIfTruncated would roll back to the configuration it was
+// supposed to be escaping.
+
+func TestSetCommittedConfiguration_DoesNotAliasLatest(t *testing.T) {
+	node := NewNodeMock(NewMemStorage(), nil)
+	node.addPeer("node-2", Peer{PeerState: PeerState_Voter})
+
+	snapshot, _ := latestConfig(node)
+	node.setCommittedConfiguration(snapshot, 7)
+
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter}) // mutate latest afterwards
+
+	got, idx := committedConfig(node)
+	assert.Equal(t, uint64(7), idx)
+	assert.NotContains(t, got, "node-99", "committed must be a deep copy, not a view of latest")
+}
+
+// ── 29. The payoff: a rollback reverts to the last committed config ──────────
+//
+// Before committed advanced, a truncation that invalidated `latest` rolled back
+// all the way to the bootstrap configuration — losing every membership change
+// that had legitimately committed in between.
+
+func TestRollback_RevertsToLastCommittedConfig_NotBootstrap(t *testing.T) {
+	node := NewNodeMock(NewMemStorage(), nil)
+
+	// A membership change commits at index 4.
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter})
+	committedSnapshot, _ := latestConfig(node)
+	node.setCommittedConfiguration(committedSnapshot, 4)
+	node.setLatestConfiguration(committedSnapshot, 4)
+
+	// A later, still-uncommitted config entry at index 7 adds another member.
+	node.addPeer("node-100", Peer{PeerState: PeerState_Voter})
+	uncommitted, _ := latestConfig(node)
+	node.setLatestConfiguration(uncommitted, 7)
+
+	// That suffix turns out to conflict and is truncated from index 7.
+	node.rollbackLatestIfTruncated(7)
+
+	got, idx := latestConfig(node)
+	assert.Equal(t, uint64(4), idx, "latest should revert to the committed config's index")
+	assert.Contains(t, got, "node-99", "a membership change that DID commit must survive the rollback")
+	assert.NotContains(t, got, "node-100", "the uncommitted one must not")
+}
+
+// ── 30. The leader records which index produced `latest` ─────────────────────
+//
+// The follower does this in processConfigurationLogEntry. The leader mutates
+// configurations.latest directly (addPeer/removePeer/SetPeerState), so if it did
+// not record the index here, latestIndex would stay 0 for the node's whole life —
+// and "has the entry behind latest committed yet?" would answer yes to
+// everything, letting an uncommitted configuration be marked committed.
+
+func TestAppendEntry_ConfigEntry_RecordsLatestIndex(t *testing.T) {
+	store := NewMemStorage()
+	store.SetCurrentTerm(context.Background(), 5)
+	node := NewNodeMock(store, nil)
+
+	_, idx := latestConfig(node)
+	assert.Equal(t, uint64(0), idx, "nothing has produced a configuration yet")
+
+	node.addPeer("node-99", Peer{PeerState: PeerState_Staging}) // what AddMember does
+	entry, err := node.appendEntry(context.Background(), EntryType_Config, []byte("{}"))
+	assert.NoError(t, err)
+
+	got, gotIdx := latestConfig(node)
+	assert.Equal(t, entry.Index, gotIdx, "latestIndex must be the config entry's index")
+	assert.Contains(t, got, "node-99")
+}
+
+func TestAppendEntry_OrdinaryEntry_LeavesLatestIndexAlone(t *testing.T) {
+	store := NewMemStorage()
+	store.SetCurrentTerm(context.Background(), 5)
+	node := NewNodeMock(store, nil)
+
+	_, err := node.appendEntry(context.Background(), EntryType_Command, []byte("cmd"))
+	assert.NoError(t, err)
+
+	_, idx := latestConfig(node)
+	assert.Equal(t, uint64(0), idx, "an ordinary command does not produce a configuration")
+}
+
+// ── 31. An uncommitted configuration is never marked committed ───────────────
+//
+// The case that motivated all of the above: AddMember stages a peer locally and
+// only then replicates the config entry. If an unrelated client entry commits in
+// that window, `committed` must not adopt the staged membership — a later
+// rollback would otherwise revert to a configuration that never committed.
+
+func TestCommitIndexUpdater_UncommittedConfig_NotAdopted(t *testing.T) {
+	// Peers have replicated index 1 only; the config entry sits at index 2.
+	node := setupCommittedConfigTest(t, 1, []LogEntry{
+		{Index: 1, Term: 5, Data: []byte("ordinary client command")},
+		{Index: 2, Term: 5, Type: EntryType_Config},
+	})
+	node.addPeer("node-99", Peer{PeerState: PeerState_Staging})
+	node.setLatestConfiguration(node.peersSnapshot(), 2)
+
+	runCommitIndexUpdaterOnce(t, node)
+
+	assert.Eventually(t, func() bool {
+		return node.GetCommitIndex() == 1
+	}, 2*time.Second, 10*time.Millisecond, "the client entry at 1 commits")
+
+	got, idx := committedConfig(node)
+	assert.NotContains(t, got, "node-99",
+		"a staged peer whose config entry has not committed must not enter committed")
+	assert.Equal(t, uint64(0), idx)
+}
+
+// ── 32. committedIndex is the config's index, not the commit index ───────────
+//
+// They are different facts: commitIndex is how far the log has got, latestIndex
+// is where this configuration came from. rollbackLatestIfTruncated compares
+// truncation points against the latter, so conflating them mis-sizes the window
+// in which a rollback fires.
+
+func TestCommitIndexUpdater_CommittedIndexIsTheConfigsIndex(t *testing.T) {
+	node := setupCommittedConfigTest(t, 3, []LogEntry{
+		{Index: 1, Term: 5, Data: []byte("cmd-1")},
+		{Index: 2, Term: 5, Type: EntryType_Config},
+		{Index: 3, Term: 5, Data: []byte("cmd-3")},
+	})
+	node.addPeer("node-99", Peer{PeerState: PeerState_Voter})
+	node.setLatestConfiguration(node.peersSnapshot(), 2)
+
+	runCommitIndexUpdaterOnce(t, node)
+
+	assert.Eventually(t, func() bool {
+		_, idx := committedConfig(node)
+		return idx != 0
+	}, 2*time.Second, 10*time.Millisecond, "committed should advance")
+
+	got, idx := committedConfig(node)
+	assert.Equal(t, uint(3), node.GetCommitIndex(), "the log committed up to 3")
+	assert.Equal(t, uint64(2), idx, "but the configuration came from index 2")
+	assert.Contains(t, got, "node-99")
+}

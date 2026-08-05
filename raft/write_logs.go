@@ -102,5 +102,17 @@ func (n *Node) appendEntry(ctx context.Context, entryType EntryType, data []byte
 		return LogEntry{}, fmt.Errorf("failed to append log: %w", err)
 	}
 
+	// Record which log index produced the live configuration. The follower does
+	// this in processConfigurationLogEntry; the leader has to do it here, because
+	// it mutates configurations.latest directly (addPeer/removePeer/SetPeerState)
+	// and would otherwise leave latestIndex at 0 for its whole life — making
+	// "has the entry behind latest committed yet?" answer yes to everything.
+	//
+	// latest itself is already correct: AddMember/RemoveMember mutate it under
+	// clientMu before calling Propose, and we still hold clientMu here.
+	if entryType == EntryType_Config {
+		n.setLatestConfiguration(n.peersSnapshot(), entry.Index)
+	}
+
 	return entry, nil
 }

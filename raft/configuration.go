@@ -22,12 +22,40 @@ func (n *Node) setLatestConfiguration(peers map[string]Peer, index uint64) {
 }
 
 // setCommittedConfiguration advances the committed view once a config entry has
-// committed. Not wired into the apply loop yet — see JOURNEY.md / STATE.md.
+// committed.
 func (n *Node) setCommittedConfiguration(peers map[string]Peer, index uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.configurations.committed = clonePeers(peers)
 	n.configurations.committedIndex = index
+}
+
+// advanceCommittedConfiguration promotes latest into committed once the log entry
+// that produced latest has committed. Called by the commit-index updater every
+// time commitIndex moves.
+//
+// Both halves are read under ONE mu hold. Reading latestIndex and then snapshotting
+// latest separately can tear: a config entry appended in between would pair a new
+// map with an old index, which is exactly the (index, map) invariant the
+// configurations type documents.
+//
+// committedIndex becomes latestIndex, NOT commitIndex. They are different facts —
+// commitIndex is merely where the log has got to, while latestIndex is where this
+// configuration came from, and it is the latter that rollbackLatestIfTruncated
+// compares truncation points against.
+func (n *Node) advanceCommittedConfiguration(commitIndex uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.configurations.latestIndex > commitIndex {
+		return // the entry behind latest has not committed yet
+	}
+	if n.configurations.latestIndex <= n.configurations.committedIndex {
+		return // already promoted; nothing new has committed
+	}
+
+	n.configurations.committed = clonePeers(n.configurations.latest)
+	n.configurations.committedIndex = n.configurations.latestIndex
 }
 
 // rollbackLatestIfTruncated rolls the latest configuration back to the committed
@@ -69,4 +97,16 @@ func (n *Node) processConfigurationLogEntry(entry LogEntry) error {
 
 	n.setLatestConfiguration(peers, entry.Index)
 	return nil
+}
+
+func (n *Node) getLatestConfigurationIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.configurations.latestIndex
+}
+
+func (n *Node) getCommittedConfigurationIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.configurations.committedIndex
 }
