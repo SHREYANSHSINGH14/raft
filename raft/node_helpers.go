@@ -328,17 +328,13 @@ func (n *Node) SetMatchPeerIndex(id string, idx uint) {
 // goroutine.
 // =============================================================================
 
-// memberRemovedChFor returns the stop channel for a peer, or nil if it has none.
-// A nil receive-only channel blocks forever in a select, which is exactly the
-// right behaviour for a peer that can never be told to stop.
-func (n *Node) memberRemovedChFor(id string) <-chan struct{} {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.memberRemovedCh[id]
-}
-
-// ensureMemberRemovedCh returns the peer's stop channel, creating it if this is a
-// member that joined after the term began.
+// ensureMemberRemovedCh returns the peer's stop channel, creating it if absent.
+//
+// This is the only accessor, used for both the peers that existed when the term
+// began (becomeLeader has already made their channels, so this just reads them)
+// and for a member promoted mid-term (which has none yet). A separate read-only
+// variant existed briefly; nothing in production needed one, since a peer being
+// replicated to must always be stoppable.
 func (n *Node) ensureMemberRemovedCh(id string) <-chan struct{} {
 	n.mu.Lock()
 	defer n.mu.Unlock()

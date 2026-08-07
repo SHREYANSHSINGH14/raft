@@ -755,13 +755,13 @@ func TestStartSendLogs_MemberAdded_GetsStopChannel(t *testing.T) {
 	done := runOrchestrator(node, ctx)
 	t.Cleanup(func() { node.electionTimeoutCh <- struct{}{}; <-done })
 
-	assert.Nil(t, node.memberRemovedChFor("node-99"), "not a member yet")
+	assert.Nil(t, removedChFor(node, "node-99"), "not a member yet")
 
 	node.addPeer("node-99", Peer{PeerState: PeerState_Voter, NextIndex: 1})
 	node.memberAddedCh <- "node-99"
 
 	assert.Eventually(t, func() bool {
-		return node.memberRemovedChFor("node-99") != nil
+		return removedChFor(node, "node-99") != nil
 	}, 2*time.Second, 10*time.Millisecond,
 		"a member added mid-term must be stoppable like any other")
 }
@@ -907,37 +907,43 @@ func TestNotifyMemberRemoved_RepeatedIsNonBlocking(t *testing.T) {
 	assert.Len(t, node.memberRemovedCh["node-3"], 1)
 }
 
-// ── becomeLeader's per-term bookkeeping ──────────────────────────────────────
+// ── The per-term bookkeeping behind becomeLeader ─────────────────────────────
 //
-// The map is built once, before the loop. Building it inside would reset it on
-// every iteration and leave only the last peer with a stop channel.
+// This targets initLeaderTermState directly rather than going through
+// becomeLeader, and that is load-bearing. becomeLeader ends in startSendLogs,
+// which backfills any missing stop channel via ensureMemberRemovedCh — so a test
+// driven through becomeLeader cannot distinguish correct bookkeeping here from
+// bookkeeping startSendLogs quietly repaired, and passes even with the map
+// created inside the loop.
 
-func TestBecomeLeader_StopChannelForEveryNonStagingPeer(t *testing.T) {
-	node, _, ctx := setupOrchestratorTest(t)
+func TestInitLeaderTermState_StopChannelForEveryNonStagingPeer(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
 	node.memberRemovedCh = nil
 	node.memberAddedCh = nil
 	node.addPeer("node-staging", Peer{PeerState: PeerState_Staging, NextIndex: 1})
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		node.becomeLeader() // blocks in startSendLogs for the rest of the term
-	}()
-	t.Cleanup(func() { node.electionTimeoutCh <- struct{}{}; <-done })
-	_ = ctx
+	node.initLeaderTermState(7)
 
-	assert.Eventually(t, func() bool {
-		for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
-			if node.memberRemovedChFor(id) == nil {
-				return false
-			}
-		}
-		return true
-	}, 2*time.Second, 10*time.Millisecond,
-		"every non-Staging peer needs its own stop channel, not just the last one")
+	for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
+		assert.NotNil(t, removedChFor(node, id),
+			"every non-Staging peer needs its own stop channel, not just the last one: %s", id)
+	}
+	assert.Nil(t, removedChFor(node, "node-staging"), "Staging peers get no fan-out goroutine")
+	assert.Nil(t, removedChFor(node, node.GetID()), "self is never replicated to")
+}
 
-	assert.Nil(t, node.memberRemovedChFor("node-staging"), "Staging peers get no fan-out goroutine")
-	assert.Nil(t, node.memberRemovedChFor(node.GetID()), "self is never replicated to")
+func TestInitLeaderTermState_SeedsReplicationIndexes(t *testing.T) {
+	node, _, _ := setupOrchestratorTest(t)
+	node.SetMatchPeerIndex("node-2", 99) // stale state from a previous term
+
+	node.initLeaderTermState(7)
+
+	for _, id := range node.peerIDs() {
+		assert.Equal(t, uint(8), node.GetPeerIndex(id).NextIndex, "nextIndex = lastIndex+1 for %s", id)
+		assert.Equal(t, uint(0), node.GetPeerIndex(id).MatchIndex, "matchIndex resets for %s", id)
+	}
+	assert.Equal(t, uint(0), node.GetPeerIndex(node.GetID()).NextIndex,
+		"our own entry has no replication index to seed")
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -949,6 +955,16 @@ func TestBecomeLeader_StopChannelForEveryNonStagingPeer(t *testing.T) {
 // `latest` is actually committed — which is what startCommitIndexUpdater does
 // after it moves commitIndex.
 // ════════════════════════════════════════════════════════════════════════════
+
+// removedChFor reads a peer's stop channel WITHOUT creating one. Production has
+// only ensureMemberRemovedCh, which would manufacture the very channel these
+// assertions check for the absence of — so the non-creating read lives here,
+// where it is the only thing that needs it.
+func removedChFor(n *Node, id string) <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.memberRemovedCh[id]
+}
 
 // committedConfig reads the committed view under mu, so assertions do not race
 // the updater goroutine that writes it.

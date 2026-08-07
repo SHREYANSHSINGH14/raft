@@ -70,7 +70,7 @@ func (n *Node) startSendLogs(ctx context.Context) {
 		// Resolve the per-peer removal channel HERE, on the orchestrator goroutine,
 		// rather than inside the spawned one: the map is mutated under mu by the
 		// member-added case below, and reading it from a peer goroutine would race.
-		removeCh := n.memberRemovedChFor(k)
+		removeCh := n.ensureMemberRemovedCh(k)
 		go func(id string, removeCh <-chan struct{}) {
 			started <- struct{}{}
 			n.sendLogsPerPeer(heartbeatCtx, id, stepDownCh, updateCommitIndexCh, removeCh)
@@ -190,6 +190,9 @@ func (n *Node) sendLogsPerPeer(ctx context.Context, peerID string, stepDownCh, u
 		case <-removeMemberCh:
 			zerolog.Ctx(ctx).Debug().Msgf("sendLogsPerPeer: peer %s removed from cluster, stopping heartbeat", peerID)
 			inFlight = false
+			n.mu.Lock()
+			delete(n.memberRemovedCh, peerID)
+			n.mu.Unlock()
 			cancel()
 			return
 		case <-ctx.Done():
