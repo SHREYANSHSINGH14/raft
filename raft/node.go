@@ -94,6 +94,9 @@ type Node struct {
 	// woken to re-check. clearLeaderCloseCh is the only correct way to close it.
 	leaderCloseCh chan struct{}
 
+	memberAddedCh   chan string
+	memberRemovedCh map[string]chan struct{}
+
 	// when statemachine is taking a snapshot, this flag is set to prevent apply loop from applying new entries and
 	//potentially diverging lastApplied index from the snapshot index
 	snapShotInProgress atomic.Bool

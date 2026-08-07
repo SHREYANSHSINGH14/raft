@@ -243,9 +243,11 @@ The forward direction is live too: a config entry carries the **whole** configur
 `map[string]Peer` (deciding to ship the full set rather than a per-member delta makes applying it a
 straight replace, and sidesteps having to replay deltas in order), so
 `processConfigurationLogEntry` just decodes it into `latest`. What's still missing is the third leg:
-advancing `committed` when a config entry commits, which belongs in the apply loop. Until that lands,
-`committed` only holds the bootstrap config, so a rollback reverts to bootstrap rather than to the true
-last-committed configuration. See `STATE.md`.
+advancing `committed` when a config entry commits. That has since landed
+(`advanceCommittedConfiguration`, driven by the commit-index updater), and getting it right needed a
+piece that wasn't obvious: the *leader* also has to record which log index produced `latest`. Only the
+follower did, so on a leader `latestIndex` sat at 0 forever and every uncommitted configuration looked
+committed.
 
 ---
 
@@ -277,6 +279,61 @@ forever, waiting for a catch-up that will never release a floor nobody set. This
 because the snapshot loop isn't wired into a running node yet. The general rule: when a zero value is a
 legal domain value, the "none" state needs its own sentinel *and* explicit initialisation — the type's
 default can't carry that meaning for you.
+
+---
+
+## Bug 6: A `select` that was only ever meant to end
+
+Replication used to fix its peer set once, when a leadership term began. A member promoted by
+`AddMember` therefore counted toward quorum immediately but received no log entries until the next
+election — half-promoted. Closing that meant telling the running orchestrator about a membership
+change, so `startSendLogs` grew a fourth case:
+
+```go
+select {
+case <-stepDownCh:          cancel(); n.becomeFollower(); return
+case <-n.electionTimeoutCh: cancel(); n.becomeFollower(); return
+case <-ctx.Done():          cancel(); return
+case id := <-n.memberAddedCh:
+    go n.sendLogsPerPeer(heartbeatCtx, id, ...)   // ← no return
+}
+```
+
+Every case in that select had been **terminal**. Each one ended the leadership term, so there was no
+loop around it and no need for one — the function was written to make exactly one decision and exit.
+`memberAddedCh` was the first case that wasn't terminal, and without a loop the consequence isn't
+"the case runs and we wait for the next event", it's: control falls out of the select, the function
+*returns*, and its `defer cancel()` tears down `heartbeatCtx` — stopping every `sendLogsPerPeer`
+goroutine.
+
+The failure is silent, which is what makes it nasty. The role never changes, nothing is logged,
+`GetRole()` still says `Leader`. The node simply stops replicating. Followers time out and elect
+someone else, and the old leader carries on believing it leads a cluster that has moved on. Adding a
+member — a routine administrative action — disabled the leader.
+
+Two smaller bugs came in the same change and are worth recording because they're the same *kind* of
+mistake, an assumption that quietly stopped holding:
+
+- `becomeLeader` created the per-peer channel map **inside** the peer loop, so every iteration threw
+  away the previous peer's channel and only the last peer ended up stoppable. Fine when the loop body
+  had nothing to accumulate; wrong the moment it did.
+- `AddMember` and `RemoveMember` sent directly on those channels. They only exist during a leadership
+  term, so any membership change after a step-down blocked its caller forever on a nil channel. This
+  is what hung the entire test suite — `go test` stopped terminating.
+
+**The lesson:** *a control structure encodes an assumption about its cases, and adding a case can
+violate it without any type error.* A `select` with no loop is a statement that every branch is
+terminal. That statement was true and unwritten, so nothing pushed back when it stopped being true.
+The fix is one `for`, but the durable fix was writing the asymmetry down in `INVARIANTS.md` next to
+the code, because the next non-terminal case will look just as harmless.
+
+A footnote on the nil-channel fix, because I got the reasoning wrong first and a mutation test caught
+it. I "fixed" the hang with an `if ch == nil { return }` guard *and* a non-blocking select, then
+verified by deleting the guard — and the test still passed. The guard isn't what prevents the hang: a
+send to a nil channel inside a `select` with a `default:` just falls through. The `default:` is
+load-bearing; the nil check only suppresses a spurious "notification dropped" warning when we aren't
+leading. Worth knowing that a passing mutation is information too — it told me which line was actually
+doing the work.
 
 ---
 
@@ -381,14 +438,19 @@ the entry is genuinely committed rather than merely appended locally.
 
 ## What Remains
 
-**In progress (uncommitted):** snapshotting and log compaction. The on-disk format and the follower's
-`HandleInstallSnapshot` exist; neither snapshot creation nor snapshot *sending* is wired to a running
-node yet. See `STATE.md` for the precise state and the next steps.
+Snapshotting, membership changes (both directions), pre-vote and leadership transfer have all landed
+since this section was last written. What is left:
 
-- **Membership changes**: the cluster topology is fixed at startup. Design is decided and written up
-  in `docs/membership-change.md`; it depends on snapshotting landing first.
+- **The gRPC surface has not kept up with the library.** `PreVote`, `TimeoutNow` and
+  `InstallSnapshot` are stubs in `grpcTransport` because `proto/rpc.proto` has no such RPCs. That was
+  cosmetic until elections went through the pre-vote gate — now every pre-vote against a real cluster
+  errors out, which the round counts as a withheld vote, so **no node can win an election in a real
+  deployment**. Every library test passes, because they all mock the transport. A good reminder that
+  "all green" is scoped to what the tests actually exercise.
 - **Linearizable reads**: reads currently go through the log; read leases or heartbeat-based reads
   would allow bypassing the log for non-mutating queries.
-- **Propose as a future**: `Propose` blocks until commit. Returning a future would let the caller do
-  other work while waiting — and would fix the fact that a blocked `Propose` currently hangs
-  indefinitely if the leader steps down.
+- **Propose as a future**: `Propose` still blocks until commit. `leaderCloseCh` fixed the worst of it
+  — a blocked `Propose` now fails with `ErrLeadershipLost` on step-down instead of hanging — but the
+  caller still can't do other work while waiting. The design is worked out in `STATE.md`; the part
+  that took longest to get right was realising the waiter list wants to be a slice under `commitMu`
+  rather than a channel, because a channel can neither be peeked nor cleared.

@@ -7,12 +7,12 @@ flowchart TB
     subgraph NODE["raft.Node"]
         direction TB
         ROLES["Role engine<br/>Follower · Candidate · Leader"]
-        ELECT["Election<br/>request votes from voters"]
-        REPL["Replication (leader)<br/>heartbeat · commit-index updater"]
-        HAND["Inbound handlers<br/>AppendEntries · RequestVote · InstallSnapshot"]
-        MEMB["AddMember<br/>stage · snapshot · catch-up · promote"]
+        ELECT["Election<br/>pre-vote gate, then request votes"]
+        REPL["Replication (leader)<br/>heartbeat · commit-index updater<br/>dynamic fan-out"]
+        HAND["Inbound handlers<br/>AppendEntries · RequestVote<br/>PreVote · TimeoutNow · InstallSnapshot"]
+        MEMB["Membership<br/>AddMember · RemoveMember"]
         CMT["Commit + Apply<br/>commitCond · apply loop"]
-        SNAP["Snapshot (NOT wired to Start)<br/>capture · delay-compact"]
+        SNAP["Snapshot<br/>capture · delay-compact"]
     end
 
     subgraph BND["caller-implemented boundary"]
@@ -27,8 +27,14 @@ flowchart TB
 
     %% who calls in
     CLIENT -->|Propose| CMT
-    CLIENT -->|AddMember| MEMB
+    CLIENT -->|AddMember / RemoveMember| MEMB
     PEERS -->|inbound RPC| HAND
+
+    %% TimeoutNow and step-down are signals, never direct transitions
+    HAND -.->|"timeoutNowCh"| ELECT
+    MEMB -.->|"electionTimeoutCh (self-removal)"| REPL
+    MEMB -.->|"memberAddedCh · memberRemovedCh"| REPL
+    REPL -.->|"leaderCloseCh (step-down)"| CMT
 
     %% RPCs out
     ELECT --> TR

@@ -21,6 +21,9 @@ func (n *Node) becomeFollower() {
 	// commit has to fail now rather than block on entries a new leader may never
 	// commit. A no-op when we were not leader (candidate losing, startup).
 	n.clearLeaderCloseCh()
+	// The fan-out channels belong to the leadership term that just ended; a later
+	// becomeLeader builds a fresh set.
+	n.clearMemberChannels()
 	n.SetRole(ServerRole_Follower)
 	n.startElectionOut(n.ctx)
 }
@@ -29,6 +32,40 @@ func (n *Node) becomeCandidate() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming candidate")
 	n.SetRole(ServerRole_Candidate)
 	n.startElection(n.ctx)
+}
+
+// initLeaderTermState seeds everything a fresh leadership term needs: per-peer
+// replication indexes, a stop channel for each peer the heartbeat will replicate
+// to, and the member-added channel.
+//
+// Split out of becomeLeader so it can be tested on its own. becomeLeader ends by
+// calling startSendLogs, which blocks for the rest of the term AND backfills any
+// missing stop channel through ensureMemberRemovedCh — so a test that went through
+// becomeLeader could not tell correct bookkeeping here from bookkeeping that
+// startSendLogs quietly repaired.
+func (n *Node) initLeaderTermState(lastIndex uint) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// The map is created ONCE, before the loop — creating it inside would reset it
+	// on every iteration and leave only the last peer with a stop channel.
+	n.memberRemovedCh = make(map[string]chan struct{})
+	for id, peer := range n.configurations.latest {
+		// Replication bookkeeping is per-peer; our own entry has no NextIndex to
+		// seed, and getMajorityMatchIndex substitutes our real last index for it.
+		if id == n.ID {
+			continue
+		}
+		peer.NextIndex = lastIndex + 1
+		peer.MatchIndex = 0
+		n.configurations.latest[id] = peer
+		// Staging peers are driven by AddMember's catch-up, not the heartbeat
+		// fan-out, so they get no goroutine and need no way to stop one.
+		if peer.PeerState != PeerState_Staging {
+			n.memberRemovedCh[id] = make(chan struct{}, 1)
+		}
+	}
+	n.memberAddedCh = make(chan string, 1)
 }
 
 func (n *Node) becomeLeader() {
@@ -49,18 +86,7 @@ func (n *Node) becomeLeader() {
 		return
 	}
 
-	// Replication bookkeeping is per-peer; our own entry has no NextIndex to seed,
-	// and getMajorityMatchIndex substitutes our real last index for it anyway.
-	n.mu.Lock()
-	for id, peer := range n.configurations.latest {
-		if id == n.ID {
-			continue
-		}
-		peer.NextIndex = lastIndex + 1
-		peer.MatchIndex = 0
-		n.configurations.latest[id] = peer
-	}
-	n.mu.Unlock()
+	n.initLeaderTermState(lastIndex)
 
 	n.startSendLogs(n.ctx)
 }

@@ -58,6 +58,13 @@ heartbeat context) reads the signal, cancels the context to stop every `sendLogs
 the first signal and the others noticing cancellation, any peer goroutine may also reach the step-down
 line. Buffering all of them guarantees no goroutine blocks on send.
 
+The same rule covers the caller-facing handlers. `HandleTimeoutNow` does **not** call
+`becomeCandidate()` — it signals `timeoutNowCh` and the election-timer goroutine campaigns, which is
+the same path a fired ticker takes. Transitioning from the handler would leave the timer goroutine
+alive alongside the new candidate. `RemoveMember` likewise signals `electionTimeoutCh` via
+`stepDownAsLeader()` rather than calling `becomeFollower()` itself, so `startSendLogs` stays the single
+owner of ending a leadership term.
+
 ### Follower is the safe default.
 
 Any role that fails its responsibility retreats to follower, never to an immediate retry:
@@ -96,8 +103,77 @@ JOURNEY.md Bug 4.
 
 Config entries carry the **whole** configuration as a JSON `map[string]Peer` (AddMember marshals
 `n.peersSnapshot()`), so `processConfigurationLogEntry` on the follower is a straight replace of
-`latest`. `committed` still only advances on commit (`setCommittedConfiguration`), which is not yet
-wired into the apply loop — see STATE.md.
+`latest`. `committed` advances separately, once the entry that produced `latest` has committed —
+`advanceCommittedConfiguration`, called by the commit-index updater. Note it stamps `committedIndex`
+with `latestIndex`, **not** the commit index: they are different facts, and the truncation check
+compares against the former.
+
+The leader records `latestIndex` in `appendEntry` when it appends an `EntryType_Config` entry; the
+follower does it in `processConfigurationLogEntry`. Both are needed. The leader mutates `latest`
+directly through `addPeer`/`removePeer`, so without its half `latestIndex` stays 0 forever and
+"has the entry behind `latest` committed?" answers yes to everything — marking a staged, uncommitted
+membership as committed.
+
+### `configurations.latest` includes **this node**. Pick the right helper.
+
+Membership is a property of the map, not something inferred from the map's silence. That is what makes
+"the leader has been removed" expressible at all, and it means a config entry says the same thing on
+the leader that wrote it and on every follower that applies it.
+
+The cost is that the helpers split three ways, and reaching for the wrong one is the easy mistake:
+
+| helper | includes self? | use for |
+|---|---|---|
+| `peerIDs`, `voterPeerIDs` | no | anything that puts an RPC on the wire |
+| `voterCount`, `isVoter` | yes | majority math |
+| `peersSnapshot` | yes | the configuration as subject: marshalling an entry, match-index bookkeeping |
+
+`majoritySize(voterCount)` is `voterCount/2 + 1` and takes a count that **already includes self**. It
+used to take a peer count and add self unconditionally, which kept counting a node the cluster had
+already dropped — Ongaro §4.2.2 requires a removed leader to keep replicating C_new while *not*
+counting itself, and the old form made a 4-voter cluster demand 3 of the 3 survivors.
+
+Anything that walks `latest` must decide about self explicitly: `startSendLogs` filters it out (a
+leader would otherwise heartbeat its own address forever), `becomeLeader` skips seeding replication
+indexes for it, and `getMajorityMatchIndex` substitutes our real last log index for our meaningless
+stored `MatchIndex`.
+
+### Pre-vote runs before anything irreversible.
+
+`election()` reads term and log state, runs the pre-vote round, and only then calls `SetCurrentTerm`
+and fans out `RequestVote`. Never reorder that. Everything after the gate costs the cluster something:
+a persisted higher term, spread to every peer, deposes a healthy leader. Losing the round is a normal
+outcome returning `Follower` with a **nil** error — nothing written, no vote spent, no peer touched.
+
+`HandlePreVote` must stay side-effect free for the same reason: no `SetCurrentTerm`, no `SetVotedFor`,
+no `electionTimeoutCh` signal. A partitioned node's probes must not move us, or pre-vote buys nothing.
+A higher-term response ends the round but is **never adopted** — a probe reply is not authority to
+move; the real term arrives via the next AppendEntries.
+
+### `leaderCloseCh`: open before the role, and never close it without a broadcast.
+
+`becomeLeader` opens the channel **before** `SetRole(Leader)`. `Propose` gates on `role == Leader`
+while `waitForCommit` reads a nil channel as "not leading", so the other order leaves a window where a
+proposal is accepted and instantly fails with `ErrLeadershipLost`.
+
+`clearLeaderCloseCh` is the only correct way to end a leadership term. It must `close()` **and**
+`commitCond.Broadcast()`: a `Propose` asleep in `Cond.Wait()` cannot observe a channel close, so
+without the broadcast it never re-checks and hangs exactly as the old TODO described. A bare `close()`
+elsewhere reintroduces that.
+
+### The heartbeat orchestrator's `select` is inside a loop, and membership notifications never block.
+
+`startSendLogs` has three cases that **end** the leadership term and `return`, and one —
+`memberAddedCh` — that does not. Without the enclosing loop, control falls out of the select on the
+first member added, the function returns, and its deferred `cancel()` tears down `heartbeatCtx`,
+stopping every `sendLogsPerPeer` while the node still believes it is leader. Silent: no role change,
+no log line. If you add another non-terminal case, it must not `return` either.
+
+`memberAddedCh` and the per-peer `memberRemovedCh` exist only for the duration of a leadership term
+(`becomeLeader` creates them, `becomeFollower` clears them), so every notification goes through
+`notifyMemberAdded` / `notifyMemberRemoved`, which are non-blocking. A bare send blocks forever on a
+nil channel once we have stepped down. Note it is the `default:` clause that makes this safe — a send
+to a nil channel simply falls through — not the nil check, which only suppresses a spurious warning.
 
 ### Compaction is *delayed* for a catching-up member, never bounded — via a channel, not a spin.
 
