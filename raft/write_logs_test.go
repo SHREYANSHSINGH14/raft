@@ -471,3 +471,89 @@ func TestPropose_ConcurrentCallers_ProduceConsistentLog(t *testing.T) {
 
 	assert.Empty(t, pendingFutures(node), "every future should have been drained once its entry committed")
 }
+
+// ── admission control ─────────────────────────────────────────────────────────
+
+// 15. Past MaxPendingProposals, Propose rejects — and rejects having written
+// nothing. The order matters more than the limit: a rejection issued after the
+// append would leave a durable entry that replicates and commits while its caller
+// was told the proposal failed.
+func TestPropose_PendingLimitReached_RejectsWithoutAppending(t *testing.T) {
+	node, store := setupProposeTest(t)
+	node.cfg.MaxPendingProposals = 3
+
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
+
+	for i := 0; i < 3; i++ {
+		_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+		require.NoErrorf(t, err, "proposal %d is within the limit", i)
+	}
+	appendsAtLimit := len(store.Calls)
+
+	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+
+	assert.ErrorIs(t, err, ErrTooManyPendingProposals)
+	assert.Len(t, pendingFutures(node), 3, "a rejected proposal must not register a waiter")
+	assert.Equal(t, appendsAtLimit, len(store.Calls),
+		"a rejected proposal must not touch the store at all — no append, no reads")
+}
+
+// 16. Draining the pending list admits proposals again: the limit is on entries
+// in flight, not on total throughput.
+func TestPropose_PendingLimitClearsAfterCommit_AdmitsAgain(t *testing.T) {
+	node, store := setupProposeTest(t)
+	node.cfg.MaxPendingProposals = 2
+
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
+
+	for i := 0; i < 2; i++ {
+		_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+		require.NoError(t, err)
+	}
+	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+	require.ErrorIs(t, err, ErrTooManyPendingProposals)
+
+	commitTo(node, 1) // MockStorage always reports lastLogIndex 0, so every entry is idx 1
+
+	_, err = node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+	assert.NoError(t, err, "the list drained, so there is room again")
+}
+
+// 17. Config entries bypass the limit. The list only fills when commitIndex has
+// stalled, which usually means lost quorum — rejecting the membership change that
+// could restore it would be exactly the wrong moment to apply backpressure.
+func TestPropose_PendingLimitReached_ConfigEntryStillAdmitted(t *testing.T) {
+	node, store := setupProposeTest(t)
+	node.cfg.MaxPendingProposals = 1
+
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
+
+	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+	require.NoError(t, err)
+
+	_, err = node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+	require.ErrorIs(t, err, ErrTooManyPendingProposals, "a command is over the limit")
+
+	_, err = node.Propose(context.Background(), EntryType_Config, []byte("{}"))
+	assert.NoError(t, err, "a config entry is exempt")
+}
+
+// 18. An unset limit falls back to the default rather than rejecting everything —
+// a zero-valued Config must not mean "admit nothing".
+func TestPropose_UnsetLimit_UsesDefault(t *testing.T) {
+	node, store := setupProposeTest(t)
+	node.cfg.MaxPendingProposals = 0
+
+	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
+	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
+
+	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
+	assert.NoError(t, err)
+}

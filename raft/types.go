@@ -15,6 +15,18 @@ var ErrNotFound = errors.New("not found")
 // proposal as failed but not assume it was discarded.
 var ErrLeadershipLost = errors.New("leadership lost before commit")
 
+// ErrTooManyPendingProposals is returned by Propose when too many entries are
+// already appended and waiting to commit. Nothing was written to the log, so
+// unlike ErrLeadershipLost this one is unambiguous: the proposal did not happen
+// and retrying it is safe.
+//
+// It means commitIndex has stopped moving — lost quorum, or a partitioned leader
+// that has not noticed yet — because that is the only situation in which the
+// pending list has no drain. Backpressure is deliberately pushed to the caller,
+// which is the only layer that can decide between retrying, shedding, and
+// telling its own client.
+var ErrTooManyPendingProposals = errors.New("too many proposals awaiting commit")
+
 // EntryType distinguishes the kind of payload a LogEntry carries, so the raft
 // layer itself (not just the state machine) can react differently to entries
 // like cluster membership changes.

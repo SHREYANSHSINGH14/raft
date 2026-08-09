@@ -1,6 +1,9 @@
 package raft
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 type Future struct {
 	idx uint64
@@ -44,10 +47,48 @@ func (n *Node) newFuture(idx uint64, errCh chan error) *Future {
 	return future
 }
 
-// futureListInitialCap is the capacity a fresh leadership term starts with. The
-// list only ever holds proposals between append and commit, so this is a headroom
-// figure, not a bound — append grows it if a burst outruns replication.
+// futureListInitialCap is the capacity a fresh leadership term starts with. It is
+// preallocation, NOT a limit — append grows past it. The limit is
+// Config.MaxPendingProposals, enforced by admitProposal.
 const futureListInitialCap = 1024
+
+// DefaultMaxPendingProposals bounds entries appended but not yet committed when
+// Config.MaxPendingProposals is unset.
+const DefaultMaxPendingProposals = 1024
+
+// admitProposal reports whether another proposal may be appended, and must be
+// called BEFORE appendEntry — under the same clientMu hold, so the count cannot
+// rise between the two. Nothing else can append while we hold clientMu, and
+// processFutures only removes, so a passing check stays true until we register.
+//
+// The ordering is the whole point. Rejecting after the append would leave an entry
+// that is already durable, will replicate, and will very likely commit, while its
+// caller was told the proposal failed — a false negative with a live entry behind
+// it, which is worse than the unbounded list this limit exists to prevent.
+//
+// EntryType_Config is exempt. The list only fills when commitIndex has stopped
+// moving, which usually means quorum is lost — and AddMember/RemoveMember propose
+// through this same path. Capping them uniformly would reject the membership
+// change most likely to restore quorum at exactly the moment it is needed.
+// Config entries are also bounded by other means: Raft permits one membership
+// change at a time, and hasStagingPeer enforces it.
+func (n *Node) admitProposal(entryType EntryType) error {
+	if entryType == EntryType_Config {
+		return nil
+	}
+
+	limit := n.cfg.MaxPendingProposals
+	if limit <= 0 {
+		limit = DefaultMaxPendingProposals
+	}
+
+	n.commitMu.Lock()
+	defer n.commitMu.Unlock()
+	if len(n.futureList) >= limit {
+		return fmt.Errorf("%w: %d awaiting commit", ErrTooManyPendingProposals, len(n.futureList))
+	}
+	return nil
+}
 
 // initFutureList gives the new leadership term an empty list, and clearFutureList
 // drops the one the term that just ended was using.

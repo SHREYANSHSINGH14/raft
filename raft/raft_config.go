@@ -26,6 +26,17 @@ type Config struct {
 	// will only be used by snapshot loop
 	SnapshotInterval  uint // in seconds
 	SnapshotThreshold uint // in number of log entries
+
+	// MaxPendingProposals bounds how many entries may be appended and awaiting
+	// commit at once. Past it, Propose rejects with ErrTooManyPendingProposals
+	// having written nothing. Zero means DefaultMaxPendingProposals.
+	//
+	// The list only grows without bound when commitIndex stops moving, so this is
+	// really a bound on how long a stalled leader may keep accepting work. Size it
+	// against what the application can have in flight, not against throughput —
+	// under healthy replication the list drains continuously and never approaches
+	// the limit.
+	MaxPendingProposals int
 }
 
 type PeerState int

@@ -24,6 +24,14 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) (F
 		return Future{}, fmt.Errorf("not the leader: current leader is %q", n.GetLeaderID())
 	}
 
+	// Admission before the append, never after: a rejection that follows a durable
+	// entry tells the caller the proposal failed while the entry goes on to commit.
+	// See admitProposal.
+	if err := n.admitProposal(entryType); err != nil {
+		n.clientMu.Unlock()
+		return Future{}, fmt.Errorf("propose: %w", err)
+	}
+
 	entry, err := n.appendEntry(ctx, entryType, data)
 	if err != nil {
 		n.clientMu.Unlock()
