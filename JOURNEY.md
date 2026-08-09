@@ -414,25 +414,29 @@ tracked locally to keep the DB out of the hot path.
 The lesson that generalizes: when three mechanisms are load-bearing for each other, the problem is
 usually the first one. Removing the bridge channel removed the need for the other two.
 
+The `sync.Cond` was later replaced by a plain buffered channel, `commitCh`, so that the loop could
+select over the wake-up and `ctx.Done()` together instead of needing a broadcast on every cancellation
+path. That swap cost more than it looked like it would — see Bug 8.
+
 ### Why `commitMu` is not `mu`
 
-`sync.Cond.Wait()` holds its lock while sleeping. If `commitCond` had been built on `mu` — the
-node's general state lock — then the apply loop sleeping in `Wait()` would hold `mu` for as long as
-there was nothing to apply, blocking the election timer, the heartbeat loop, and every role
-transition. The cluster would deadlock while idle.
+The original reason was specific to `sync.Cond`: `Wait()` holds its lock while sleeping, so a
+`commitCond` built on `mu` would have had the apply loop holding the node's general state lock for as
+long as there was nothing to apply — blocking the election timer, the heartbeat loop and every role
+transition. The cluster would have seized up while idle.
 
-So `commitMu` is a second, independent mutex whose only job is to be `commitCond`'s lock.
-`SetCommitIndex` writes `commitIndex` under `mu`, then broadcasts *without* holding it.
+That reason is gone. A channel receive holds nothing, and the loop releases `commitMu` before it waits.
+Worth being honest that the justification changed rather than pretending the original still applies.
 
-This is also why the lock is required around `Wait()` at all, which is worth stating because it
-looks like ceremony: `sync.Cond` keeps a list of sleeping goroutines, and a goroutine must register
-itself on that list before it sleeps. The lock makes "register on the list" and "release the lock and
-sleep" atomic. Without it, a `Broadcast()` firing in between would walk the list, not find the
-goroutine that had already decided to wait, and leave it asleep forever with nothing left to wake it.
+The lock stays split for two reasons that survive. `commitMu` now guards `futureList` as well as
+`commitIndex`, a concern genuinely separate from role and peer state. And the apply loop still holds it
+across every condition check, so merging would put the RPC surface behind a lock the loop touches on
+every iteration. Neither is ever acquired while holding the other, in either direction — that is the
+property to preserve if these are ever revisited.
 
-Once the apply loop existed, `Propose` could wait on the same condition variable — it appends, then
-blocks until `commitIndex` reaches its entry's index. That's what makes `Propose` return only after
-the entry is genuinely committed rather than merely appended locally.
+Once the apply loop existed, `Propose` could wait on the same condition variable — it appended, then
+blocked until `commitIndex` reached its entry's index. That is no longer how `Propose` works either;
+see Bug 7.
 
 ---
 
@@ -496,6 +500,60 @@ The corollary showed up later. A future is keyed by index alone, so the follower
 deliberately does **not** drain: a new leader may have truncated our entry and put its own at that
 index, and completing on index alone would report success for a proposal that was discarded.
 `ErrLeadershipLost` is wrong-but-safe there; `nil` would be wrong-and-unsafe.
+
+---
+
+## Bug 8: four hangs from replacing a condition variable with a channel
+
+`sync.Cond` cannot be selected on, so shutting the apply loop down meant broadcasting on every
+cancellation path. Replacing `commitCond` with a buffered `commitCh` fixed that — the loop selects over
+the wake-up and `ctx.Done()` together — and produced four distinct hangs on the way, in one function.
+
+**`Wait()` is lock-neutral. A channel receive is not.** That single sentence is the whole bug. `Wait()`
+releases the lock, sleeps, and reacquires before returning, so a caller that held the lock going in
+still holds it coming out, and the condition is always re-evaluated under it. Every broken version was
+an attempt to re-create that property by hand:
+
+```go
+select { case <-ctx.Done(): ...; case <-n.commitCh: ; default: }
+```
+
+*A spin.* The `default:` means the select never blocks, and `commitMu` — taken above the outer loop —
+is never released. The loop burns a core while holding the one lock `SetCommitIndex` needs, so the
+condition can never change. Livelock, and it survived the test suite because every test advanced the
+commit index *before* the goroutine was scheduled.
+
+*Unlock with no reacquire.* `fatal error: sync: unlock of unlocked mutex` on the first wake-up, plus a
+data race on `commitIndex` at the condition check.
+
+*Reacquire after the inner loop.* Correct for the path that waited, fatal for the path that did not:
+skipping the inner loop reaches a `Lock()` on a mutex already held, and Go mutexes are not reentrant.
+Three tests hung. The tell was that the top of the inner loop had **two predecessors that disagreed
+about the lock** — from the outer loop it was held, from a wake-up it was not — so no placement outside
+the loop could be right for both.
+
+The fix is *unlock, receive, lock*, all inside the inner loop.
+
+**And then the fourth, on the sender side.** Every sender did `Lock(commitMu)` → `commitCh <- struct{}{}`
+→ `Unlock`. The loop only receives when it has nothing to apply, so during `applyEntries` there is no
+consumer at all. A burst fills the buffer, the next sender blocks *mid-send while holding `commitMu`*,
+and the loop then blocks acquiring `commitMu` on its way back to the receive that would have released
+that sender. A cycle, not a race — deterministic, and no scheduling can break it.
+
+Two independent fixes, and the difference between them is the lesson. Draining the buffer before
+sending works, but only because *every* sender holds `commitMu` — a rule nothing enforces, and which
+two of the three call sites broke, so the deadlock survived the "fix". Sending after releasing the lock
+also works, and is local: you can read `SetCommitIndex` alone and see it. What landed is a non-blocking
+send into a size-1 buffer, which needs no rule at all — the send cannot block whoever calls it, and the
+channel's own capacity provides the coalescing the drain loop was doing by hand.
+
+One more, found while cleaning up: removing the drain also removed the `defer`, and the early return in
+`SetCommitIndex` for a lower index started leaking `commitMu` outright. No test took that branch —
+they all advance monotonically — while `HandleAppendEntries` reaches it routinely.
+
+Both scenarios are now pinned by tests. Both need a gate proving the loop is parked before the burst
+starts: the first version of the deadlock test passed in 14ms because the burst finished before the
+goroutine ever ran.
 
 ---
 

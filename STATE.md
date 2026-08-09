@@ -17,6 +17,23 @@ built" section of the previous STATE.md, and it is now built:
   leadership — because a `select` picks among ready cases at random. That tie-break was free in the old
   blocking version and had to be rebuilt; see JOURNEY.md Bug 7 for the three wrong turns.
 
+**And `commitCond` is gone.** The apply loop now waits on `commitCh` so it can select over the wake-up
+and `ctx.Done()` together, instead of needing a broadcast on every cancellation path. `sync.Cond` is no
+longer used anywhere in the package.
+
+Two things about it are worth keeping in mind before touching that code, because getting either wrong
+hangs the node rather than failing a test:
+
+- The wait is **lock-neutral** — unlock, receive, lock, all inside the inner loop — because a channel
+  receive does not restore the lock the way `Cond.Wait` did.
+- `commitCh` is **buffered 1** and written only through `signalCommit`, which is **non-blocking**. A
+  blocking send under `commitMu` deadlocks against the loop.
+
+Four separate hangs came out of that swap; JOURNEY.md Bug 8 has them. Two are now pinned by tests
+(`TestApplyLoop_CommitBurstDuringSlowApply_DoesNotWedge`,
+`TestSetCommitIndex_LowerIndex_IgnoredAndReleasesLock`), both of which need a gate proving the loop is
+parked before the burst starts — without it they pass in milliseconds without testing anything.
+
 Alongside it, in the same pass:
 
 - `becomeLeader` reordered so the role flips **last**, after `initLeaderTermState` and the appends.

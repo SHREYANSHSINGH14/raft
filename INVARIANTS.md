@@ -34,18 +34,43 @@ would be a cycle.
 ### The three mutexes are deliberately separate. Do not merge them.
 
 - **`mu`** — general node state (role, leaderID, peer NextIndex/MatchIndex).
-- **`commitMu`** — guards `commitIndex`. It is the lock behind `commitCond`.
+- **`commitMu`** — guards `commitIndex` and `futureList`.
 - **`clientMu`** — serializes the caller-facing entry points (`Propose`, `HandleAppendEntries`,
   `HandleRequestVote`). Lives in the library so callers like `server/rpc.go` don't need their own lock.
 
-`commitMu` is separate from `mu` because **`sync.Cond.Wait()` holds its lock while sleeping**. If
-`commitCond` used `mu`, the apply loop sleeping in `Wait()` would block every internal goroutine that
-needs `mu` — election, heartbeat, role transitions. `SetCommitIndex` updates `commitIndex` under `mu`,
-then broadcasts on `commitCond` *without* holding `mu`. The long-form explanation lives at
-[node.go:35-57](raft/node.go#L35-L57).
+`commitMu` is separate from `mu` because the apply loop holds it while evaluating its wait condition.
+A shared lock would block every internal goroutine that needs `mu` — election, heartbeat, role
+transitions — for as long as the loop had nothing to do. Neither lock is ever taken while holding the
+other, in either direction.
 
-`commitCond` is what makes `Propose` block until commit and what wakes the apply loop.
-`Wait()` must be called with `commitMu` held; `Broadcast()` needs no lock.
+### The apply loop waits on `commitCh`, and the wait must be lock-neutral.
+
+`commitCh` replaced a `sync.Cond`. The `Cond` could not be selected on, so every cancellation path
+needed a broadcast to unstick the sleeper; the loop can now select over `commitCh` and `ctx.Done()`
+together. That is the only thing the swap bought, and it is worth knowing, because the `Cond` gave one
+property away for free that the channel does not.
+
+**`Wait()` is lock-neutral: it releases the lock, sleeps, and reacquires before returning.** A channel
+receive does none of that, so the loop has to do it by hand — *unlock, receive, lock*, all inside the
+inner loop. That way the condition at the top is always evaluated with `commitMu` held whichever path
+reached it, and the inner loop leaves the lock exactly as it found it. Every other arrangement of those
+three lines has been tried and each produced a hang: the reacquire placed after the inner loop
+self-deadlocks on the non-reentrant `Lock`; omitted entirely, it unlocks an unlocked mutex; replaced
+with a `default:` clause, it spins at 100% holding the lock nothing else can get. See JOURNEY.md Bug 8.
+The `ctx.Done()` exit returns holding nothing, which is correct only because it leaves before the
+reacquire.
+
+**`commitCh` is buffered 1 and written only through `signalCommit`, which never blocks.** The signal is
+a level, not a queue: it says "state moved, go look", and the loop re-reads `commitIndex` and
+`snapShotInProgress` when it wakes, so a second queued signal says nothing the first did not. One slot
+is enough, and a dropped signal costs nothing.
+
+The non-blocking send is not an optimisation. A blocking send made while holding `commitMu` deadlocks
+the node permanently: the loop is outside its receive for the whole of `applyEntries`, a busy leader
+commits more than a bufferful in that time, and the sender then sits on the very lock the loop needs to
+reach the receive that would release it. Releasing the lock before sending also fixes that — but it is a
+rule every caller must remember, and it was broken at two call sites out of three. Not blocking is a
+property of the send itself, so there is nothing to remember.
 
 ### Child goroutines never drive role transitions.
 
@@ -162,9 +187,10 @@ complete. That window used to be two instructions; it now spans two disk writes.
 
 `clearLeaderCloseCh` is the only correct way to end a leadership term. The `close()` is what releases
 every `Future` in flight — each captured this channel at registration, so one close answers all of them,
-O(1) regardless of how many proposals are outstanding. The `commitCond.Broadcast()` is for the apply
-loop and anything else parked on the cond. A bare `close()` elsewhere breaks the exactly-once property
-that comes from lifting the channel out of the field under `mu` first.
+O(1) regardless of how many proposals are outstanding. It also pokes `signalCommit`, which is a no-op
+wake in practice since nothing the apply loop waits on depends on leadership — kept because a step-down
+is not the moment to assume that. A bare `close()` elsewhere breaks the exactly-once property that comes
+from lifting the channel out of the field under `mu` first.
 
 ### Futures: `commitMu` guards the list, and only `processFutures` completes one.
 
