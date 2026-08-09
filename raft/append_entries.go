@@ -143,9 +143,10 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 			return AppendEntriesResponse{}, err
 		}
 
-		// React to any membership changes carried by the newly appended entries.
-		// processConfigurationLogEntry is a no-op today; the wiring lives here so
-		// the config path is already exercised once it learns to mutate latest.
+		// React to any membership changes carried by the newly appended entries. A
+		// config entry carries the whole membership, so applying it replaces
+		// configurations.latest outright — the follower's half of what the leader does
+		// in appendEntry.
 		for _, entry := range newEntries {
 			if entry.Type == EntryType_Config {
 				if err := n.processConfigurationLogEntry(entry); err != nil {
@@ -173,7 +174,7 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 		n.SetLeaderID(args.LeaderID)
 	}
 
-	n.electionTimeoutCh <- struct{}{} // reset election timeout
+	n.signalElectionTimeout() // a live leader has spoken; hold off on campaigning
 
 	return AppendEntriesResponse{
 		Term:    uint64(currentTerm),

@@ -83,19 +83,25 @@ type Node struct {
 
 	// leaderCloseCh is open for exactly as long as this node is leader:
 	// becomeLeader creates it, becomeFollower closes it and sets it back to nil.
-	// A Propose parked in waitForCommit watches it, so a step-down fails the
-	// proposal with ErrLeadershipLost instead of blocking until the caller's
-	// context expires — the entry we appended may never commit under the new
-	// leader, so there is nothing left to wait for.
+	// Every Future registered during the term captures it, so a step-down fails the
+	// waiters with ErrLeadershipLost instead of leaving them blocked until their
+	// contexts expire — the entries we appended may never commit under the new
+	// leader, so there is nothing left to wait for. One close answers all of them.
 	//
-	// Guarded by mu; nil means "not leader", which waitForCommit treats the same
-	// as closed. Closing it MUST be paired with a commitCond.Broadcast, because a
-	// waiter asleep in Cond.Wait cannot observe a channel close — it has to be
-	// woken to re-check. clearLeaderCloseCh is the only correct way to close it.
+	// Guarded by mu; nil means "not leader", which Future.Wait treats the same as
+	// closed. clearLeaderCloseCh is the only correct way to close it.
 	leaderCloseCh chan struct{}
 
 	memberAddedCh   chan string
 	memberRemovedCh map[string]chan struct{}
+
+	// futureList holds one entry per proposal appended but not yet committed, kept
+	// sorted by log index so processFutures can drain it as a prefix.
+	//
+	// Guarded by commitMu, NOT mu — it is read and written next to commitIndex, by
+	// newFuture and processFutures. The role transitions that create and drop it go
+	// through initFutureList/clearFutureList for the same reason.
+	futureList []*Future
 
 	// when statemachine is taking a snapshot, this flag is set to prevent apply loop from applying new entries and
 	//potentially diverging lastApplied index from the snapshot index

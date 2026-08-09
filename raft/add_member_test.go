@@ -46,7 +46,11 @@ func newCatchUpTestNode(t *testing.T, store Storage) (*Node, *MockTransport) {
 	node := NewNodeMock(store, nil) // seeds node-2..5 into configurations.latest
 	node.transport = transport
 	node.Role = ServerRole_Leader
-	node.setLeaderCloseCh() // AddMember proposes; waitForCommit needs a live one
+	node.setLeaderCloseCh() // AddMember proposes; newFuture captures this channel
+	// Nothing replicates here, so no commit-index updater runs and no future would
+	// ever be completed; AddMember would park in Future.Wait. The tests that propose
+	// pair this with a large SetCommitIndex.
+	startAutoCommitter(t, node)
 	node.cfg.SnapshotDir = t.TempDir()
 	node.cfg.InstallSnapshotDeadlineScaleSizeByte = 1 << 20
 	node.cfg.InstallSnapshotDeadlineScaleTimeMs = 1

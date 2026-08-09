@@ -67,9 +67,14 @@ func (n *Node) RemoveMember(ctx context.Context, peerID string) error {
 	// counting us, and the commit is decided by the remaining voters alone —
 	// Ongaro §4.2.2, a leader being removed keeps replicating C_new but does not
 	// count itself toward it.
-	if err := n.Propose(ctx, EntryType_Config, data); err != nil {
+	if future, err := n.Propose(ctx, EntryType_Config, data); err != nil {
 		n.addPeer(peerID, removed)
 		return fmt.Errorf("removeMember: %w", err)
+	} else {
+		if err := future.Wait(ctx); err != nil {
+			n.addPeer(peerID, removed)
+			return fmt.Errorf("removeMember: %w", err)
+		}
 	}
 
 	if peerID == n.GetID() {
@@ -174,11 +179,8 @@ func (n *Node) sendTimeoutNow(ctx context.Context, peerID string) error {
 // electionTimeoutCh is how that orchestrator is already told to stand down: it
 // cancels the heartbeat context first, then calls becomeFollower exactly once.
 //
-// The send is non-blocking. If the buffer is full a step-down is already pending,
-// which is all we wanted.
+// The send is non-blocking — see signalElectionTimeout. If the buffer is full a
+// step-down is already pending, which is all we wanted.
 func (n *Node) stepDownAsLeader() {
-	select {
-	case n.electionTimeoutCh <- struct{}{}:
-	default:
-	}
+	n.signalElectionTimeout()
 }

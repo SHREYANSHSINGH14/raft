@@ -32,8 +32,19 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 	}
 
 	// 1 + 2. Replicate the staging config change and wait for it to commit.
-	if err := n.Propose(ctx, EntryType_Config, data); err != nil {
+	if future, err := n.Propose(ctx, EntryType_Config, data); err != nil {
 		return fmt.Errorf("addMember: %w", err)
+	} else {
+		if err := future.Wait(ctx); err != nil {
+			return fmt.Errorf("addMember: %w", err)
+		}
+	}
+
+	if !n.IsLeader() {
+		// The member addition was committed, but we are no longer the leader. The
+		// new member is still Staging, and the next leader will either finish the
+		// addition or roll it back. We are done here.
+		return nil
 	}
 
 	// NOTE: we keep a single addition path that handles both Voter and NonVoter
@@ -61,8 +72,13 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 		// Replicate the removal. Best effort: the original failure is what we
 		// return; a Propose failure (e.g. we already stepped down) just leaves the
 		// staging peer to be cleaned up later, so we log it rather than mask err.
-		if pErr := n.Propose(ctx, EntryType_Config, data); pErr != nil {
+		if pFuture, pErr := n.Propose(ctx, EntryType_Config, data); pErr != nil {
 			zerolog.Ctx(ctx).Warn().Err(pErr).Msg("addMember: rollback propose failed; staging peer may remain")
+		} else if wErr := pFuture.Wait(ctx); wErr != nil {
+			// Named wErr, not err: shadowing here would lose the catch-up failure this
+			// whole branch exists to report. Logged and not returned, for the same
+			// reason the propose failure above is — the rollback is best effort.
+			zerolog.Ctx(ctx).Warn().Err(wErr).Msg("addMember: rollback did not commit; staging peer may remain")
 		}
 		return fmt.Errorf("addMember: %w", err)
 	}
@@ -77,8 +93,12 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 		zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: failed to marshal promotion config")
 		return fmt.Errorf("addMember: %w", err)
 	}
-	if err := n.Propose(ctx, EntryType_Config, data); err != nil {
+	if future, err := n.Propose(ctx, EntryType_Config, data); err != nil {
 		return fmt.Errorf("addMember: %w", err)
+	} else {
+		if err := future.Wait(ctx); err != nil {
+			return fmt.Errorf("addMember: %w", err)
+		}
 	}
 
 	// The member is promoted and committed; tell the heartbeat orchestrator to
@@ -97,6 +117,9 @@ func (n *Node) catchUpMember(ctx context.Context, peerID string) error {
 	// 3. Send snapshot
 	sendSnapshotCount := 0
 send_snapshot:
+	if !n.IsLeader() {
+		return fmt.Errorf("addMember: stepped down while catching up member %q", peerID)
+	}
 	if sendSnapshotCount > 5 { // TODO: make 5 configurable
 		err := fmt.Errorf("install snapshot is slow and node not able to catchup aborting")
 		zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: " + err.Error())
@@ -144,6 +167,9 @@ send_snapshot:
 	caughtUp := false
 
 	for i := range maxCatchUpRounds {
+		if !n.IsLeader() {
+			return fmt.Errorf("addMember: stepped down while catching up member %q", peerID)
+		}
 		// Publish the retain floor first so the snapshot loop won't compact away
 		// the entries this round is about to read and send.
 		n.setCatchingUpIdx(int64(startIdx))

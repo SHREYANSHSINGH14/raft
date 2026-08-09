@@ -69,9 +69,9 @@ func (n *Node) GetLeaderID() string {
 // =============================================================================
 // 2. Leadership term — leaderCloseCh
 //
-// The channel is open for exactly as long as this node leads. A Propose parked in
-// waitForCommit watches it, so a step-down fails the proposal with
-// ErrLeadershipLost rather than leaving it blocked on an entry the next leader may
+// The channel is open for exactly as long as this node leads. Every Future
+// registered during the term captures it, so a step-down fails those waiters with
+// ErrLeadershipLost rather than leaving them blocked on entries the next leader may
 // never commit.
 // =============================================================================
 
@@ -85,9 +85,9 @@ func (n *Node) setLeaderCloseCh() {
 }
 
 // clearLeaderCloseCh ends the current leadership term: it closes the channel and
-// clears the field, then wakes everything parked on commitCond so waiters get to
-// observe the close. Without that broadcast a Propose asleep in Cond.Wait would
-// never re-check and would hang until its own context expired.
+// clears the field, then wakes everything parked on commitCond. Closing is what
+// releases the Futures — each one selects on the channel it captured — while the
+// broadcast covers the apply loop and anything else sleeping on commitCond.
 //
 // Taking the channel out of the field under mu before closing is what makes the
 // close happen exactly once — two concurrent step-downs cannot both see non-nil.
@@ -109,6 +109,12 @@ func (n *Node) getLeaderCloseCh() chan struct{} {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.leaderCloseCh
+}
+
+func (n *Node) IsLeader() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.Role == ServerRole_Leader
 }
 
 // =============================================================================
@@ -470,6 +476,27 @@ func (n *Node) GetSnapshotLatestTerm() uint {
 func (n *Node) signalTimeoutNow() {
 	select {
 	case n.timeoutNowCh <- struct{}{}:
+	default:
+	}
+}
+
+// signalElectionTimeout resets the election timer: we have heard from someone
+// entitled to keep us a follower — a leader's AppendEntries, or a candidate whose
+// vote we just granted. stepDownAsLeader sends the same signal for the opposite
+// purpose; the leader's orchestrator reads it as "stand down".
+//
+// Non-blocking, and that is the whole point. The channel carries a level, not a
+// queue: a second pending signal says nothing the first did not, so a full buffer
+// means the sender has already got what it wanted. The callers are RPC handlers
+// holding clientMu, and exactly one goroutine receives from this channel — the one
+// that owns the current role's timer. A blocking send would tie their liveness to
+// that goroutine happening to be in its select, which is true today only because
+// of arguments made in three other files: stale-term AppendEntries return before
+// reaching us, pre-vote is leader-sticky, and a vote is spent for its term. None of
+// those mention this channel. Not blocking needs no argument.
+func (n *Node) signalElectionTimeout() {
+	select {
+	case n.electionTimeoutCh <- struct{}{}:
 	default:
 	}
 }

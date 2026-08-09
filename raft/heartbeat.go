@@ -153,6 +153,7 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			if commitIndexLog.Term == uint64(currentTerm) {
 				n.SetCommitIndex(commitIndex)
 				n.advanceCommittedConfiguration(uint64(commitIndex))
+				n.processFutures(uint64(commitIndex))
 			}
 		}
 	}
