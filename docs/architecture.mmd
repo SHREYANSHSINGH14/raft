@@ -11,7 +11,7 @@ flowchart TB
         REPL["Replication (leader)<br/>heartbeat · commit-index updater<br/>dynamic fan-out"]
         HAND["Inbound handlers<br/>AppendEntries · RequestVote<br/>PreVote · TimeoutNow · InstallSnapshot"]
         MEMB["Membership<br/>AddMember · RemoveMember"]
-        CMT["Commit + Apply<br/>commitCond · apply loop"]
+        CMT["Commit + Apply<br/>commitCh · futures · apply loop"]
         SNAP["Snapshot<br/>capture · delay-compact"]
     end
 

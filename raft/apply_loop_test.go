@@ -168,15 +168,15 @@ func TestApplyLoop_SpuriousWakeup_NothingApplied(t *testing.T) {
 
 	node.startApplyLoop(ctx)
 
-	// commitIndex is still 0 — broadcast should not trigger an apply
-	node.commitCond.Broadcast()
+	// commitIndex is still 0 — a wake-up should not trigger an apply
+	node.signalCommit()
 	time.Sleep(50 * time.Millisecond)
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 
 	cancel()
-	node.commitCond.Broadcast() // unblock Wait so goroutine can see ctx.Err
+	node.signalCommit() // wake the loop so it can observe ctx.Err
 	time.Sleep(20 * time.Millisecond)
 }
 
@@ -272,7 +272,7 @@ func TestApplyLoop_ContextCancelledWhileWaiting_GoroutineExits(t *testing.T) {
 	time.Sleep(20 * time.Millisecond) // let goroutine reach Wait()
 
 	cancel()
-	node.commitCond.Broadcast() // unblock Wait so goroutine can observe ctx.Err
+	node.signalCommit() // wake the loop so it can observe ctx.Err
 	time.Sleep(20 * time.Millisecond)
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
@@ -306,7 +306,7 @@ func TestApplyLoop_ContextCancelledBetweenIterations_GoroutineExits(t *testing.T
 	// cancel between iterations; advance commitIndex to show it won't be applied
 	cancel()
 	node.SetCommitIndex(6)
-	node.commitCond.Broadcast() // unblock Wait if the goroutine re-entered it
+	node.signalCommit() // wake the loop in case it went back to waiting
 	time.Sleep(20 * time.Millisecond)
 
 	assert.Equal(t, 1, len(sm.Calls))
@@ -316,9 +316,9 @@ func TestApplyLoop_ContextCancelledBetweenIterations_GoroutineExits(t *testing.T
 
 // ── Boundary ──────────────────────────────────────────────────────────────────
 
-// 11. commitIndex=0, lastApplied=0 → broadcast fires, inner loop blocks correctly,
+// 11. commitIndex=0, lastApplied=0 → a wake-up fires, inner loop blocks correctly,
 // nothing applied
-func TestApplyLoop_CommitIndexZero_BroadcastDoesNotApply(t *testing.T) {
+func TestApplyLoop_CommitIndexZero_WakeDoesNotApply(t *testing.T) {
 	store := new(MockStorage)
 	sm := new(MockStateMachine)
 	node := NewNodeMock(store, sm)
@@ -328,8 +328,8 @@ func TestApplyLoop_CommitIndexZero_BroadcastDoesNotApply(t *testing.T) {
 
 	node.startApplyLoop(ctx)
 
-	// broadcast with commitIndex still 0 — inner loop condition (0 <= 0) stays true
-	node.commitCond.Broadcast()
+	// wake with commitIndex still 0 — inner loop condition (0 <= 0) stays true
+	node.signalCommit()
 	time.Sleep(50 * time.Millisecond)
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
@@ -337,6 +337,92 @@ func TestApplyLoop_CommitIndexZero_BroadcastDoesNotApply(t *testing.T) {
 	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 
 	cancel()
-	node.commitCond.Broadcast()
+	node.signalCommit()
 	time.Sleep(20 * time.Millisecond)
+}
+
+// ── Signalling: the sender must never be able to wedge the loop ───────────────
+//
+// Both of these guard the commitMu/commitCh interaction, which has now produced
+// four distinct hangs: a spin holding the lock, a double unlock, a self-deadlock
+// on a non-reentrant Lock, and a blocking send made while holding the very lock
+// the loop needs to drain the channel. None of the tests above catch any of them,
+// because they all advance the commit index before the loop has parked — the one
+// ordering a real node never has.
+
+// 12. Commits keep arriving while the loop is inside a slow Apply. commitCh is
+// buffered, so a burst fills it; the senders must not wedge, and the loop must
+// still finish. The gate matters: without proof that the loop is inside Apply,
+// the burst can complete before the goroutine is even scheduled and the test
+// passes without exercising anything.
+func TestApplyLoop_CommitBurstDuringSlowApply_DoesNotWedge(t *testing.T) {
+	store := new(MockStorage)
+	sm := new(MockStateMachine)
+	node := NewNodeMock(store, sm)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applying := make(chan struct{})
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLogs, mock.Anything, mock.Anything, mock.Anything).
+		Return([]LogEntry{{Index: 1, Term: 1}}, nil)
+	sm.On(methodApply, mock.Anything, mock.Anything).
+		Run(func(_ mock.Arguments) {
+			select {
+			case applying <- struct{}{}: // only the first Apply reports in
+			default:
+			}
+			time.Sleep(300 * time.Millisecond)
+		}).
+		Return(nil)
+	store.On(methodSetLastApplied, mock.Anything, mock.Anything).Return(nil)
+
+	node.startApplyLoop(ctx)
+	node.SetCommitIndex(1)
+
+	<-applying // the loop is now provably inside Apply, not at its receive
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// more commits than commitCh can hold
+		for i := 2; i <= 40; i++ {
+			node.SetCommitIndex(uint(i))
+		}
+		// the other two senders: a step-down and a finished snapshot
+		for i := 0; i < 20; i++ {
+			node.setLeaderCloseCh()
+			node.clearLeaderCloseCh()
+			node.signalCommit()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a sender wedged: commitCh filled while the loop could not reach its receive")
+	}
+}
+
+// 13. A commit index below the current one is ignored — and the early return must
+// still release commitMu. Leaking it there wedges every commit, every apply and
+// every future for the life of the process, and no other test takes that branch
+// because they all advance monotonically.
+func TestSetCommitIndex_LowerIndex_IgnoredAndReleasesLock(t *testing.T) {
+	node := NewNodeMock(new(MockStorage), nil)
+
+	node.SetCommitIndex(5)
+	node.SetCommitIndex(3) // lower — takes the early return
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assert.Equal(t, uint(5), node.GetCommitIndex(), "a lower index must not move commitIndex")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("commitMu was leaked by the early return in SetCommitIndex")
+	}
 }

@@ -1,99 +1,90 @@
 # Where I am
 
-**Last updated: 2026-08-03.** This file is short-lived by design — rewrite it, don't append to it.
+**Last updated: 2026-08-09.** This file is short-lived by design — rewrite it, don't append to it.
 It answers one question: if I sat down right now, what would I need to know?
 
-## Just committed
+## Just finished
 
-The **RPC-surface milestone**: pre-vote, leadership transfer, and `RemoveMember`. Membership changes
-are now symmetric (add *and* remove), and elections are gated behind a round that costs nothing to
-lose. On `main`:
+**`Propose` returns a `Future` instead of blocking.** This was the last item in the "decided but not
+built" section of the previous STATE.md, and it is now built:
 
-- `HandlePreVote` + `Transport.PreVote` — the receiving half of §9.6.
-- `timeoutNowCh` + `leaderCloseCh` — the two channels the rest of the milestone needed.
-- `HandleTimeoutNow` + `Transport.TimeoutNow` — leadership transfer, receiving half.
-- **elections gated behind the pre-vote round** — `election()` now probes before it bumps the term.
-- **this node lives inside its own configuration** — the refactor that made self-removal expressible.
-- `RemoveMember` with self-removal handoff.
-- docs: `CLAUDE.md` → `INVARIANTS.md`.
+- `Propose` appends and returns; `Future.Wait(ctx)` is the commit-wait. `AddMember`, `RemoveMember`
+  and the debug HTTP endpoint all propose-then-wait, so their behaviour is unchanged.
+- `futureList` is a `[]*Future` under **`commitMu`**, drained as a sorted prefix by `processFutures`,
+  which the commit-index updater calls after `SetCommitIndex` and `advanceCommittedConfiguration`.
+- `newFuture` captures `leaderCloseCh`, so a step-down releases every waiter with one `close()`.
+- `Future.Wait` re-derives its verdict below the `select` in priority order — committed, context,
+  leadership — because a `select` picks among ready cases at random. That tie-break was free in the old
+  blocking version and had to be rebuilt; see JOURNEY.md Bug 7 for the three wrong turns.
 
-On branch `feat/dynamic-fanout` (not merged): replication to members added or removed mid-term.
+**And `commitCond` is gone.** The apply loop now waits on `commitCh` so it can select over the wake-up
+and `ctx.Done()` together, instead of needing a broadcast on every cancellation path. `sync.Cond` is no
+longer used anywhere in the package.
+
+Two things about it are worth keeping in mind before touching that code, because getting either wrong
+hangs the node rather than failing a test:
+
+- The wait is **lock-neutral** — unlock, receive, lock, all inside the inner loop — because a channel
+  receive does not restore the lock the way `Cond.Wait` did.
+- `commitCh` is **buffered 1** and written only through `signalCommit`, which is **non-blocking**. A
+  blocking send under `commitMu` deadlocks against the loop.
+
+Four separate hangs came out of that swap; JOURNEY.md Bug 8 has them. Two are now pinned by tests
+(`TestApplyLoop_CommitBurstDuringSlowApply_DoesNotWedge`,
+`TestSetCommitIndex_LowerIndex_IgnoredAndReleasesLock`), both of which need a gate proving the loop is
+parked before the burst starts — without it they pass in milliseconds without testing anything.
+
+Alongside it, in the same pass:
+
+- `becomeLeader` reordered so the role flips **last**, after `initLeaderTermState` and the appends.
+  A staging peer left behind by a dead leader's `AddMember` is now aborted through the log (a config
+  entry without it), not by mutating `latest` in memory.
+- `becomeLeader` appends a **no-op entry** on election win.
+- All sends to `electionTimeoutCh` go through `signalElectionTimeout` (non-blocking), matching
+  `signalTimeoutNow` and `notifyMember*`.
+- Dead code removed: `waitForCommit`, `leadershipEnded`, `getLatestConfigurationIndex`,
+  `getCommittedConfigurationIndex`.
 
 `go build ./...`, `go vet ./...`, `go test ./...` and `go test ./... -race` are all green.
 
 ## The one thing that will bite you first
 
-**Three `Transport` methods are stubs in `grpcTransport`** ([server/server.go](server/server.go)) —
-`PreVote`, `TimeoutNow`, `InstallSnapshot` — because `proto/rpc.proto` has no such RPCs. They return
+**Three `Transport` methods are still stubs in `grpcTransport`** ([server/server.go](server/server.go))
+— `PreVote`, `TimeoutNow`, `InstallSnapshot` — because `proto/rpc.proto` has no such RPCs. They return
 `"not implemented"`.
 
-This used to be harmless. It is not any more: since elections went through the pre-vote gate, every
-pre-vote against a real cluster errors out, which the round counts as a withheld vote — so **no node
-in a multi-node deployment can win an election**. (A single-node cluster still works: with one voter
-the round needs no RPCs and passes on its own vote.) The library tests all pass because they mock the
-transport. Adding the three RPCs to the proto plus the `server/rpc.go` conversions is the single
-highest-value next task.
+Since elections went through the pre-vote gate, every pre-vote against a real cluster errors out, which
+the round counts as a withheld vote, so **no node in a multi-node deployment can win an election**. A
+single-node cluster still works: with one voter the round needs no RPCs and passes on its own vote. The
+library tests all pass because they mock the transport.
+
+Adding the three RPCs to the proto plus the `server/rpc.go` conversions is the highest-value next task,
+and it is the prerequisite for running any real application against this.
 
 Second-order effects of the same gap: the `RemoveMember` leadership handoff always fails and falls
 through to the bare step-down, and a lagging follower can never be caught up by snapshot.
 
-## What landed this milestone
-
-- **Pre-vote (Ongaro §9.6)**, both halves. `HandlePreVote` is side-effect free by design — no term
-  persisted, no vote spent, no election timer reset — and `election()` runs the round *before*
-  `SetCurrentTerm`, so losing it costs nothing. A higher-term response stops the round but is never
-  adopted.
-- **Leadership transfer (§3.10)**, receiving half. `HandleTimeoutNow` does not transition; it signals
-  `timeoutNowCh` and the election-timer goroutine campaigns, keeping the "only the goroutine that owns
-  a lifecycle may end it" rule intact.
-- **`leaderCloseCh`** — a `Propose` parked in `waitForCommit` now fails with `ErrLeadershipLost` on
-  step-down instead of blocking until its caller's context expires. Closing it must be paired with a
-  `commitCond.Broadcast`; see INVARIANTS.md.
-- **`configurations.latest` holds the whole membership, self included.** This replaced a
-  peers-only map plus a hardcoded `+1` in `majoritySize`. It is what makes "the leader is no longer a
-  member" expressible at all, and it fixed a liveness bug where a removed leader kept counting itself
-  in majorities (§4.2.2). Helpers now split three ways — see INVARIANTS.md before touching them.
-- **`RemoveMember`** with the same shape as `AddMember`, plus a self-removal branch: hand off via
-  `TimeoutNow` to the most caught-up voter, then step down **whether or not that worked** (§4.2.2
-  prescribes the step-down; the handoff is only an optimisation on top).
-- **Dynamic fan-out** (on the branch) — closes the long-standing gap where a freshly promoted Voter
-  counted toward quorum but received no replication until the next leadership term.
-
 ## Not wired at all
 
-- **The three proto RPCs**, above. Everything else is downstream of this.
-- **`server/server.go` still passes `nil` as the `StateMachine`** and sets no `SnapshotDir` /
-  interval / threshold, so although `Node.Start` now calls `startSnapshotLoop`, a real node still
-  never snapshots.
+- **The three proto RPCs**, above. Everything else is downstream of it.
+- **`server/server.go:75` passes `nil` as the `StateMachine`** and sets no `SnapshotDir` / interval /
+  threshold, so although `Node.Start` calls `startSnapshotLoop`, a real node still never snapshots.
+- **`Future.errCh`** — the field is allocated on every `Propose` and nothing ever sends on it, so that
+  case in `Wait` is unreachable. Decide: wire it (an entry truncated out from under a waiter is the
+  obvious candidate) or delete the field.
 
 ## Decided but not built
 
-**`Propose` as a future.** Design worked out in full; nothing written yet. The shape:
+**Admission control on `futureList`.** The list is created with capacity 1024 but has no cap. If quorum
+is lost, `commitIndex` freezes, nothing drains, and the list grows without bound while every waiter
+sits there. The decision from the original design still stands: cap it (`MaxPendingProposals`, ~1000)
+and reject new proposals with a sentinel — **never evict**, since evicting either hangs the victim or
+reports a false success.
 
-```go
-type future struct {
-    idx        uint
-    done       chan struct{}   // CLOSED on commit — never sent to
-    leaderLost <-chan struct{} // node's leaderCloseCh, captured at creation
-}
-```
-
-The waiter selects on `done` / `leaderLost` / `ctx.Done()`. Points that took a while to reach:
-
-- **Capture `leaderCloseCh` in the future**, don't have step-down walk a queue. Otherwise a `Propose`
-  enqueuing between the drain and the role flip is never woken.
-- **`done` must be closed, not sent to**, so an abandoned waiter can't block the updater.
-- **The waiter list is a `[]*future` under `commitMu`, not a `chan *future`.** A channel can't be
-  peeked (you'd need a pending-head slot) and, worse, can't be cleared — a full buffer would block
-  `Propose` while it holds `clientMu`, which is a deadlock.
-- **Enqueue inside `clientMu`**, next to `appendEntry`, or append order stops matching index order and
-  the prefix drain silently strands a waiter.
-- **Cap the list** (`MaxPendingProposals`, ~1000) as admission control — reject with a sentinel, never
-  evict. Evicting either hangs the victim or reports a false success. The cap exists for the
-  lost-quorum case, where `commitIndex` freezes and nothing drains.
-
-Note this only removes one of `commitCond`'s two clients — the apply loop, `install_snapshot.go` and
-`snapshot.go` still use it.
+**`(index, term)` keying for futures.** A `Future` is keyed by index alone, so a proposal whose entry a
+new leader truncated is indistinguishable from one that committed. Handled conservatively today: the
+follower commit path deliberately does not drain, so such a waiter gets `ErrLeadershipLost` rather than
+a false success. Carrying the term would make it precise. See INVARIANTS.md.
 
 ## Open questions worth resolving
 
@@ -105,13 +96,16 @@ Note this only removes one of `commitCond`'s two clients — the apply loop, `in
 
 ## Known open TODOs in code
 
+- `write_logs.go` — `clientMu` is held across the append's disk write, so a slow store blocks every
+  caller-facing entry point. Fixing it means handing out log indexes without holding the lock, and the
+  index handed out must stay in order with `futureList`.
 - `snapshot.go` — collapse apply loop + snapshot into one goroutine with channels.
 - `add_member.go` / `heartbeat.go` — the `> 5` snapshot-retry and `maxCatchUpRounds = 10` should be
   configurable.
+- `append_entries.go` — the leader-side replication fallback is still the naive decrement-by-one.
 
 ## Housekeeping
 
-- Leftover debug print in `heartbeat.go` sprays `CurrentTerm / Res Term` into every test run. Same in
-  `server/rpc_concurrency_test.go`.
-- `refs/original/*` from the commit-history rewrite are still around locally; delete them once you are
-  happy with the history.
+- Leftover debug print at `heartbeat.go:257` sprays `CurrentTerm / Res Term` into every test run.
+- `refs/original/*` from the commit-history rewrite are still around locally (3 of them); delete them
+  once you are happy with the history.

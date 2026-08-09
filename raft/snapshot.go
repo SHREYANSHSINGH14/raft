@@ -68,7 +68,11 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		return fmt.Errorf("getting latest applied index: %w", err)
 	}
 	n.snapShotInProgress.Store(false)
-	n.commitCond.Broadcast()
+
+	// snapShotInProgress just went false, and that flag is half of the apply loop's
+	// wait condition — without this the loop stays parked until the next commit.
+	n.signalCommit()
+
 	latestAppliedLog, err := n.store.GetLogByIndex(ctx, latestAppliedIndex)
 	if err != nil {
 		return fmt.Errorf("getting latest log entry: %w", err)

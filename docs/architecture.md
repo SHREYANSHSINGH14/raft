@@ -7,7 +7,7 @@ Diagrams:
 1. [Layering](#1-layering--library-vs-embedding) — library vs. the concrete deployment
 2. [Roles](#2-role-state-machine) — Follower / Candidate / Leader lifecycle
 3. [Goroutines & shared state](#3-goroutines--shared-state) — what runs, what locks it touches
-4. [commitCond](#4-commitcond--the-central-rendezvous) — the wait/signal hub
+4. [Waiting for a commit](#4-waiting-for-a-commit--two-mechanisms-not-one) — commitCh and futures
 5. [HandleAppendEntries](#5-handleappendentries-follower-side) — the follower's core path
 6. [logTermAt](#6-logtermat--the-snapshot-boundary-anchor) — the prevLog anchor
 7. [AddMember](#7-addmember-end-to-end) — membership change, end to end
@@ -92,8 +92,9 @@ irreversible in the way that matters — a persisted higher term, fanned out, de
 
 ## 3. Goroutines & shared state
 
-Three separate mutexes, deliberately not merged. `commitMu` is separate because `sync.Cond.Wait()`
-holds its lock while sleeping — if it used `mu`, the apply loop would freeze every internal goroutine.
+Three separate mutexes, deliberately not merged. `commitMu` is separate because the apply loop holds
+it across every condition check and `futureList` lives behind it — merging would put the RPC surface
+behind a lock the loop touches on every iteration. Neither lock is ever taken while holding the other.
 
 ```mermaid
 flowchart LR
@@ -108,9 +109,9 @@ flowchart LR
 
     subgraph locks["shared state, by lock"]
         mu["mu: role, leaderID,<br/>configurations.latest/committed,<br/>snapshotLatestIndex/Term,<br/>leaderCloseCh, memberAdded/RemovedCh"]
-        cm["commitMu + commitCond:<br/>commitIndex"]
+        cm["commitMu: commitIndex,<br/>futureList"]
         clm["clientMu: serializes<br/>Propose / HandleAppendEntries /<br/>HandleRequestVote / HandlePreVote /<br/>HandleTimeoutNow / AddMember / RemoveMember"]
-        at["atomics + chans:<br/>snapShotInProgress, catchingUpIdx,<br/>catchUpSignal, electionTimeoutCh,<br/>timeoutNowCh"]
+        at["atomics + chans:<br/>snapShotInProgress, catchingUpIdx,<br/>catchUpSignal, commitCh,<br/>electionTimeoutCh, timeoutNowCh"]
     end
 
     et --> at
@@ -137,19 +138,28 @@ term begins and learns about later changes through `memberAddedCh` and the per-p
 
 ---
 
-## 4. commitCond — the central rendezvous
+## 4. Waiting for a commit — two mechanisms, not one
 
-`commitIndex` only ever advances through `SetCommitIndex`, which broadcasts. Everything that must
-"wait until committed" parks here. This is what makes `Propose`/`AddMember` block until durable.
+`commitIndex` only ever advances through `SetCommitIndex`. Two different things care, and they are
+woken by two different means: the **apply loop** by a signal on `commitCh`, and **proposers** by their
+`Future`, which `processFutures` completes by closing a per-entry channel.
+
+`signalCommit` is the only writer to `commitCh`. It is non-blocking and the buffer is 1: the signal is
+a level ("state moved, go look"), not a queue, and the loop re-reads `commitIndex` and
+`snapShotInProgress` when it wakes.
 
 ```mermaid
 flowchart LR
     ae["HandleAppendEntries<br/>(follower learns leaderCommit)"] --> setci["SetCommitIndex"]
     ciu["startCommitIndexUpdater<br/>(leader: majority matchIndex)"] --> setci
     hi["HandleInstallSnapshot"] -.-> setci
-    setci -- "broadcast (no lock held)" --> cond((commitCond))
-    cond -- wakes --> al["apply loop:<br/>apply lastApplied+1 .. commitIndex to StateMachine"]
-    cond -- wakes --> pr["Propose / AddMember:<br/>unblock when commitIndex >= my entry"]
+    setci -- "signalCommit (lock released,<br/>non-blocking, buffer 1)" --> cch((commitCh))
+    snap["snapshot loop<br/>(snapShotInProgress -> false)"] --> cch
+    sd["clearLeaderCloseCh<br/>(step-down)"] -.-> cch
+    cch -- wakes --> al["apply loop:<br/>apply lastApplied+1 .. commitIndex to StateMachine"]
+    ciu -- "processFutures(commitIndex)" --> fl["futureList (sorted prefix drain):<br/>close doneCh for every committed entry"]
+    fl -- releases --> pr["Future.Wait in Propose / AddMember / RemoveMember"]
+    lcc["step-down: close(leaderCloseCh)"] -- "releases all waiters at once" --> pr
 ```
 
 ---
@@ -222,7 +232,7 @@ sequenceDiagram
     C->>L: AddMember(peerID, Voter/NonVoter)
     Note over L: clientMu; must be leader; reject if another Staging exists
     L->>S: addPeer(Staging), append full-config entry
-    L->>L: wait commit (commitCond)
+    L->>L: future.Wait (commitCh -> processFutures)
 
     rect rgb(225,238,255)
     Note over L,N: 3. InstallSnapshot the new member
@@ -296,10 +306,10 @@ must always change through `setCatchingUpIdx` (store **and** signal) or the loop
 `Node.Start` brings up the **election timer**; on timeout the node runs a **pre-vote** round and only
 if a majority would vote for it does it become **Candidate** → RequestVote to voters → majority →
 **Leader** → **heartbeat fan-out** (one `sendLogsPerPeer` per non-Staging peer). Replication and
-`startCommitIndexUpdater` push `commitIndex` up through `SetCommitIndex`, which broadcasts
-**commitCond** — waking the **apply loop** (applies to the StateMachine) and any blocked
-`Propose`/`AddMember`; a step-down instead closes **leaderCloseCh**, failing those waiters with
-`ErrLeadershipLost` rather than leaving them parked. When the log grows, the **snapshot loop** captures
+`startCommitIndexUpdater` push `commitIndex` up through `SetCommitIndex`, which signals **commitCh** —
+waking the **apply loop** (applies to the StateMachine) — and then drains **futureList**, releasing the
+`Future` every `Propose`/`AddMember` is waiting on; a step-down instead closes **leaderCloseCh**,
+failing all those waiters at once with `ErrLeadershipLost` rather than leaving them parked. When the log grows, the **snapshot loop** captures
 state, then compacts — **delaying** compaction via the `catchingUpIdx` retain floor whenever
 **AddMember** is catching a new member up. Catch-up and normal replication both survive compaction
 because `logTermAt` accepts the **snapshot boundary** as a valid prevLog anchor. Membership lives in

@@ -414,25 +414,146 @@ tracked locally to keep the DB out of the hot path.
 The lesson that generalizes: when three mechanisms are load-bearing for each other, the problem is
 usually the first one. Removing the bridge channel removed the need for the other two.
 
+The `sync.Cond` was later replaced by a plain buffered channel, `commitCh`, so that the loop could
+select over the wake-up and `ctx.Done()` together instead of needing a broadcast on every cancellation
+path. That swap cost more than it looked like it would — see Bug 8.
+
 ### Why `commitMu` is not `mu`
 
-`sync.Cond.Wait()` holds its lock while sleeping. If `commitCond` had been built on `mu` — the
-node's general state lock — then the apply loop sleeping in `Wait()` would hold `mu` for as long as
-there was nothing to apply, blocking the election timer, the heartbeat loop, and every role
-transition. The cluster would deadlock while idle.
+The original reason was specific to `sync.Cond`: `Wait()` holds its lock while sleeping, so a
+`commitCond` built on `mu` would have had the apply loop holding the node's general state lock for as
+long as there was nothing to apply — blocking the election timer, the heartbeat loop and every role
+transition. The cluster would have seized up while idle.
 
-So `commitMu` is a second, independent mutex whose only job is to be `commitCond`'s lock.
-`SetCommitIndex` writes `commitIndex` under `mu`, then broadcasts *without* holding it.
+That reason is gone. A channel receive holds nothing, and the loop releases `commitMu` before it waits.
+Worth being honest that the justification changed rather than pretending the original still applies.
 
-This is also why the lock is required around `Wait()` at all, which is worth stating because it
-looks like ceremony: `sync.Cond` keeps a list of sleeping goroutines, and a goroutine must register
-itself on that list before it sleeps. The lock makes "register on the list" and "release the lock and
-sleep" atomic. Without it, a `Broadcast()` firing in between would walk the list, not find the
-goroutine that had already decided to wait, and leave it asleep forever with nothing left to wake it.
+The lock stays split for two reasons that survive. `commitMu` now guards `futureList` as well as
+`commitIndex`, a concern genuinely separate from role and peer state. And the apply loop still holds it
+across every condition check, so merging would put the RPC surface behind a lock the loop touches on
+every iteration. Neither is ever acquired while holding the other, in either direction — that is the
+property to preserve if these are ever revisited.
 
-Once the apply loop existed, `Propose` could wait on the same condition variable — it appends, then
-blocks until `commitIndex` reaches its entry's index. That's what makes `Propose` return only after
-the entry is genuinely committed rather than merely appended locally.
+Once the apply loop existed, `Propose` could wait on the same condition variable — it appended, then
+blocked until `commitIndex` reached its entry's index. That is no longer how `Propose` works either;
+see Bug 7.
+
+---
+
+## Bug 7: `select` has no notion of priority, and the refactor that discovered it
+
+`Propose` used to block. `waitForCommit` did the waiting, and it had a shape worth looking at before
+the bug makes sense:
+
+```go
+for n.commitIndex < index && ctx.Err() == nil && !leadershipEnded(leaderCh) {
+    n.commitCond.Wait()
+}
+
+if n.commitIndex >= index { return nil }   // committed wins
+if ctx.Err() != nil       { return ctx.Err() }
+return ErrLeadershipLost
+```
+
+Two separate questions, answered in two separate places. The loop asks *should I still be asleep?*
+The `if`s below ask *what is true now?* It never asks who woke it — the wake-up reason is thrown away
+and the verdict re-derived from state. That is why the tie between "committed" and "stepped down"
+always resolved the same way: committed, because the entry is in the log for good and reporting failure
+invites a retry that appends it twice.
+
+Turning `Propose` into a future fused those two questions into one `select`:
+
+```go
+select {
+case <-f.doneCh:      return nil
+case <-f.leaderClose: return ErrLeadershipLost
+...
+}
+```
+
+Now the case that fires *is* the verdict. That coincides with the truth only when exactly one thing is
+true. When the entry committed **and** the term ended, both channels are ready — and Go's `select`
+chooses among ready cases uniformly at random. That is a spec guarantee, not an implementation quirk;
+it exists to prevent starvation. So no ordering of the cases and no restructuring inside a single
+`select` can express a preference. **Priority has to live somewhere a `select` isn't.**
+
+The test that caught it loops 100 times, because a single attempt passes about half the time.
+
+Three wrong turns on the way to the fix, each instructive:
+
+1. **`if _, ok := <-f.leaderClose; !ok`** inside the `doneCh` case. On a close-only channel a blocking
+   receive is a *wait*, not a *question*: still leading → blocks forever; stepped down → `ok` is false.
+   `ok` can never be true, so the `return nil` beneath it was unreachable. Asking a question of a
+   channel needs `select` + `default`.
+2. **Right idiom, wrong branch.** Adding the non-blocking check to the `doneCh` case reads as *"the
+   entry committed… and we stepped down → tell the caller it failed"* — the invariant negated. Reaching
+   that case already settles the question; the tie only hurts where you are about to report failure.
+3. **Guarding the producer instead.** `processFutures` grew an `!n.IsLeader()` check, which stopped the
+   drain from completing committed futures exactly when leadership was ending — reintroducing the same
+   loss from the other end, and inverting `commitMu -> mu` while it was at it.
+
+The fix is the original shape: let the `select` mean only *stop sleeping*, then re-derive the verdict
+below it in priority order via a non-blocking `committed()`. Which is to say the old code was right and
+the refactor's job was to keep its structure, not just its inputs.
+
+The corollary showed up later. A future is keyed by index alone, so the follower commit path
+deliberately does **not** drain: a new leader may have truncated our entry and put its own at that
+index, and completing on index alone would report success for a proposal that was discarded.
+`ErrLeadershipLost` is wrong-but-safe there; `nil` would be wrong-and-unsafe.
+
+---
+
+## Bug 8: four hangs from replacing a condition variable with a channel
+
+`sync.Cond` cannot be selected on, so shutting the apply loop down meant broadcasting on every
+cancellation path. Replacing `commitCond` with a buffered `commitCh` fixed that — the loop selects over
+the wake-up and `ctx.Done()` together — and produced four distinct hangs on the way, in one function.
+
+**`Wait()` is lock-neutral. A channel receive is not.** That single sentence is the whole bug. `Wait()`
+releases the lock, sleeps, and reacquires before returning, so a caller that held the lock going in
+still holds it coming out, and the condition is always re-evaluated under it. Every broken version was
+an attempt to re-create that property by hand:
+
+```go
+select { case <-ctx.Done(): ...; case <-n.commitCh: ; default: }
+```
+
+*A spin.* The `default:` means the select never blocks, and `commitMu` — taken above the outer loop —
+is never released. The loop burns a core while holding the one lock `SetCommitIndex` needs, so the
+condition can never change. Livelock, and it survived the test suite because every test advanced the
+commit index *before* the goroutine was scheduled.
+
+*Unlock with no reacquire.* `fatal error: sync: unlock of unlocked mutex` on the first wake-up, plus a
+data race on `commitIndex` at the condition check.
+
+*Reacquire after the inner loop.* Correct for the path that waited, fatal for the path that did not:
+skipping the inner loop reaches a `Lock()` on a mutex already held, and Go mutexes are not reentrant.
+Three tests hung. The tell was that the top of the inner loop had **two predecessors that disagreed
+about the lock** — from the outer loop it was held, from a wake-up it was not — so no placement outside
+the loop could be right for both.
+
+The fix is *unlock, receive, lock*, all inside the inner loop.
+
+**And then the fourth, on the sender side.** Every sender did `Lock(commitMu)` → `commitCh <- struct{}{}`
+→ `Unlock`. The loop only receives when it has nothing to apply, so during `applyEntries` there is no
+consumer at all. A burst fills the buffer, the next sender blocks *mid-send while holding `commitMu`*,
+and the loop then blocks acquiring `commitMu` on its way back to the receive that would have released
+that sender. A cycle, not a race — deterministic, and no scheduling can break it.
+
+Two independent fixes, and the difference between them is the lesson. Draining the buffer before
+sending works, but only because *every* sender holds `commitMu` — a rule nothing enforces, and which
+two of the three call sites broke, so the deadlock survived the "fix". Sending after releasing the lock
+also works, and is local: you can read `SetCommitIndex` alone and see it. What landed is a non-blocking
+send into a size-1 buffer, which needs no rule at all — the send cannot block whoever calls it, and the
+channel's own capacity provides the coalescing the drain loop was doing by hand.
+
+One more, found while cleaning up: removing the drain also removed the `defer`, and the early return in
+`SetCommitIndex` for a lower index started leaking `commitMu` outright. No test took that branch —
+they all advance monotonically — while `HandleAppendEntries` reaches it routinely.
+
+Both scenarios are now pinned by tests. Both need a gate proving the loop is parked before the burst
+starts: the first version of the deadlock test passed in 14ms because the burst finished before the
+goroutine ever ran.
 
 ---
 
@@ -449,8 +570,15 @@ since this section was last written. What is left:
   "all green" is scoped to what the tests actually exercise.
 - **Linearizable reads**: reads currently go through the log; read leases or heartbeat-based reads
   would allow bypassing the log for non-mutating queries.
-- **Propose as a future**: `Propose` still blocks until commit. `leaderCloseCh` fixed the worst of it
-  — a blocked `Propose` now fails with `ErrLeadershipLost` on step-down instead of hanging — but the
-  caller still can't do other work while waiting. The design is worked out in `STATE.md`; the part
-  that took longest to get right was realising the waiter list wants to be a slice under `commitMu`
-  rather than a channel, because a channel can neither be peeked nor cleared.
+- **Futures carrying `(index, term)`**: a `Future` is keyed by log index alone, so a proposal whose
+  entry a new leader truncated cannot be distinguished from one that committed. Today that is handled
+  conservatively — the follower commit path does not drain, so such a waiter gets `ErrLeadershipLost`
+  rather than a false success. Carrying the term would let it be precise.
+- **`Future.errCh`**: the field exists and nothing ever sends on it, so that case in `Wait` is
+  unreachable. Either wire it (an entry truncated out from under a waiter is the obvious candidate) or
+  drop it.
+
+**Done since this section was last written**: `Propose` returns a `Future` instead of blocking. The
+part that took longest to get right was not the waiter list — a slice under `commitMu`, because a
+channel can neither be peeked nor cleared — but the tie-break the old blocking version got for free.
+See Bug 7.

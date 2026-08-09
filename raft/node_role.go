@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"math/big"
 	"time"
 
@@ -24,6 +25,11 @@ func (n *Node) becomeFollower() {
 	// The fan-out channels belong to the leadership term that just ended; a later
 	// becomeLeader builds a fresh set.
 	n.clearMemberChannels()
+	// Every future registered this term captured the channel clearLeaderCloseCh just
+	// closed, so dropping the list is enough — the waiters are already awake and
+	// deciding for themselves. Must stay after clearLeaderCloseCh, or they are
+	// dropped while still asleep.
+	n.clearFutureList()
 	n.SetRole(ServerRole_Follower)
 	n.startElectionOut(n.ctx)
 }
@@ -44,6 +50,11 @@ func (n *Node) becomeCandidate() {
 // becomeLeader could not tell correct bookkeeping here from bookkeeping that
 // startSendLogs quietly repaired.
 func (n *Node) initLeaderTermState(lastIndex uint) {
+	// Seeded before mu is taken, not inside the hold below: futureList is guarded by
+	// commitMu, and holding mu across it would create a mu -> commitMu ordering that
+	// exists nowhere else in this codebase.
+	n.initFutureList()
+
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -70,14 +81,6 @@ func (n *Node) initLeaderTermState(lastIndex uint) {
 
 func (n *Node) becomeLeader() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
-	// Open this term's leadership channel BEFORE the role flips. Propose gates on
-	// role == Leader, and waitForCommit reads a nil channel as "not leading" — so
-	// setting the role first would leave a window where a proposal is accepted and
-	// then immediately fails with ErrLeadershipLost. In this order, role == Leader
-	// always implies a live leaderCloseCh.
-	n.setLeaderCloseCh()
-	n.SetRole(ServerRole_Leader)
-	n.SetLeaderID("")
 
 	lastIndex, err := n.store.GetLastLogIndex(n.ctx)
 	if err != nil {
@@ -87,6 +90,67 @@ func (n *Node) becomeLeader() {
 	}
 
 	n.initLeaderTermState(lastIndex)
+
+	n.clientMu.Lock()
+	_, err = n.appendEntry(n.ctx, EntryType_NoOp, nil)
+	if err != nil {
+		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error appending no-op log entry")
+		n.clientMu.Unlock()
+		n.becomeFollower()
+		return
+	}
+	n.clientMu.Unlock()
+
+	// A staging peer at the start of a term belongs to some previous leader's
+	// AddMember that never finished: the catch-up goroutine died with that leader, so
+	// nothing left alive will ever promote it. Abort the addition the way AddMember's
+	// own rollback does — append the configuration without it.
+	//
+	// One pass over the snapshot answers both "is there one" and "which one";
+	// hasStagingPeer would just scan the same map a second time. The guard matters:
+	// with an empty id, removePeer deletes nothing and we would append a config entry
+	// identical to the live one, bumping latestIndex for no change at all.
+	stagingID := ""
+	for id, peer := range n.peersSnapshot() {
+		if peer.PeerState == PeerState_Staging {
+			stagingID = id
+			break
+		}
+	}
+	if stagingID != "" {
+		n.clientMu.Lock()
+		n.removePeer(stagingID)
+		data, mErr := json.Marshal(n.peersSnapshot())
+		if mErr != nil {
+			zerolog.Ctx(n.ctx).Error().Err(mErr).Msg("becomeLeader: failed to marshal config")
+			n.clientMu.Unlock()
+			n.becomeFollower()
+			return
+		}
+
+		// Appended, not waited on. Nothing is replicating yet — startSendLogs is still
+		// below us — so a commit-wait here could never be satisfied. If the entry dies
+		// with us before committing, rollbackLatestIfTruncated puts the staging peer
+		// back and the next leader runs this same cleanup.
+		if _, pErr := n.appendEntry(n.ctx, EntryType_Config, data); pErr != nil {
+			zerolog.Ctx(n.ctx).Warn().Err(pErr).Msg("becomeLeader: staging peer cleanup failed to append; it may remain")
+			n.clientMu.Unlock()
+			n.becomeFollower()
+			return
+		}
+		n.clientMu.Unlock()
+	}
+
+	// Open this term's leadership channel BEFORE the role flips, and flip the role
+	// only once every line above has run. Propose gates on role == Leader, and
+	// newFuture captures leaderCloseCh — reading a nil one as "not leading" — so
+	// setting the role any earlier leaves a window where a proposal is accepted and
+	// then either fails instantly with ErrLeadershipLost or registers a future into a
+	// list initLeaderTermState is about to replace. In this order, role == Leader
+	// always implies a live leaderCloseCh and a fully seeded term.
+	n.setLeaderCloseCh()
+	n.SetRole(ServerRole_Leader)
+	n.SetLeaderID("")
 
 	n.startSendLogs(n.ctx)
 }

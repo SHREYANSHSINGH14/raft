@@ -50,7 +50,15 @@ func (d *DebugServer) handleAppendLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := d.server.Node.Propose(context.Background(), raft.EntryType_Command, []byte(req.Data))
+	// Propose now returns as soon as the entry is appended, so the endpoint keeps its
+	// old contract — respond once the entry is committed — by waiting on the future.
+	// Both are scoped to the request: if the caller hangs up, the wait ends. The entry
+	// stays proposed and will commit on its own; only the reply is abandoned.
+	ctx := r.Context()
+	future, err := d.server.Node.Propose(ctx, raft.EntryType_Command, []byte(req.Data))
+	if err == nil {
+		err = future.Wait(ctx)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, AppendLogsDebugResponse{
 			Success:  false,

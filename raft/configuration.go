@@ -82,8 +82,8 @@ func (n *Node) rollbackLatestIfTruncated(fromIndex uint64) {
 // applying it is a straight replace: latest becomes the decoded map and
 // latestIndex becomes entry.Index.
 //
-// It does NOT touch committed — that only advances once the entry commits
-// (setCommittedConfiguration, wired from the apply loop; see STATE.md).
+// It does NOT touch committed — that only advances once the entry commits, via
+// advanceCommittedConfiguration, which the commit-index updater calls.
 //
 // NOTE: this runs on the follower path (HandleAppendEntries). The decoded Peers
 // carry the leader's NextIndex/MatchIndex, which are leader-only replication
@@ -97,16 +97,4 @@ func (n *Node) processConfigurationLogEntry(entry LogEntry) error {
 
 	n.setLatestConfiguration(peers, entry.Index)
 	return nil
-}
-
-func (n *Node) getLatestConfigurationIndex() uint64 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.configurations.latestIndex
-}
-
-func (n *Node) getCommittedConfigurationIndex() uint64 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.configurations.committedIndex
 }

@@ -13,18 +13,19 @@ import (
 
 const methodTimeoutNow = "TimeoutNow"
 
-// newRemoveTestNode wires a leader whose Propose returns immediately: a large
-// pre-set commitIndex satisfies waitForCommit without any replication, so the
-// RemoveMember flow runs synchronously. All four peers are Voters, which
-// NewNodeMock does not do by default.
+// newRemoveTestNode wires a leader whose proposals commit immediately: a large
+// pre-set commitIndex plus a background drainer completes every future without any
+// replication, so the RemoveMember flow runs to the end. All four peers are Voters,
+// which NewNodeMock does not do by default.
 func newRemoveTestNode(t *testing.T, store Storage) (*Node, *MockTransport) {
 	t.Helper()
 	transport := NewMockTransport()
 	node := NewNodeMock(store, nil)
 	node.transport = transport
 	node.Role = ServerRole_Leader
-	node.setLeaderCloseCh() // RemoveMember proposes; waitForCommit needs a live one
+	node.setLeaderCloseCh() // RemoveMember proposes; newFuture captures this channel
 	node.SetCommitIndex(1000)
+	startAutoCommitter(t, node)
 
 	for _, id := range []string{"node-2", "node-3", "node-4", "node-5"} {
 		node.addPeer(id, Peer{PeerState: PeerState_Voter})

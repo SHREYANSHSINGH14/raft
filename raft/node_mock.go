@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"sync"
 
 	"github.com/stretchr/testify/mock"
 )
@@ -76,6 +75,8 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 		committed: clonePeers(bootstrap),
 	}
 	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
-	node.commitCond = *sync.NewCond(&node.commitMu)
+	// Same buffer as NewNode. A nil commitCh would make every wake-up a send to a
+	// nil channel, which blocks forever.
+	node.commitCh = make(chan struct{}, 1)
 	return node
 }
