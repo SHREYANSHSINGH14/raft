@@ -85,13 +85,12 @@ func (n *Node) setLeaderCloseCh() {
 }
 
 // clearLeaderCloseCh ends the current leadership term: it closes the channel and
-// clears the field, then wakes everything parked on commitCond. Closing is what
-// releases the Futures — each one selects on the channel it captured — while the
-// broadcast covers the apply loop and anything else sleeping on commitCond.
+// clears the field. The close is what releases the Futures — each one selects on
+// the channel it captured, so one close answers every waiter in flight.
 //
 // Taking the channel out of the field under mu before closing is what makes the
 // close happen exactly once — two concurrent step-downs cannot both see non-nil.
-// The broadcast is issued without mu held, matching SetCommitIndex.
+// The commit signal is sent without mu held, matching SetCommitIndex.
 func (n *Node) clearLeaderCloseCh() {
 	n.mu.Lock()
 	ch := n.leaderCloseCh
@@ -102,7 +101,12 @@ func (n *Node) clearLeaderCloseCh() {
 		return // not leader; nothing to close and nobody to wake
 	}
 	close(ch)
-	n.commitCond.Broadcast()
+
+	// Nudge the apply loop so it re-evaluates rather than sleeping through a term
+	// change. Nothing it waits on actually depends on leadership, so this is a
+	// no-op wake in practice — kept because a step-down is exactly the moment not
+	// to assume that. Sent with mu released, and commitMu never taken.
+	n.signalCommit()
 }
 
 func (n *Node) getLeaderCloseCh() chan struct{} {
@@ -410,25 +414,57 @@ func (n *Node) clearMemberChannels() {
 // =============================================================================
 // 8. Commit index
 //
-// Guarded by commitMu (commitCond's lock), NOT mu — sync.Cond.Wait holds its lock
-// while sleeping, so a shared lock would freeze every goroutine that needs mu
-// whenever the apply loop had nothing to do. See node.go.
+// Guarded by commitMu, NOT mu. The apply loop parks on commitCh whenever it has
+// nothing to apply, and it holds commitMu while evaluating that condition — a
+// shared lock would freeze every goroutine that needs mu for as long as the loop
+// had nothing to do. See node.go.
 // =============================================================================
 
+// signalCommit wakes the apply loop to re-check its condition. It is the only
+// correct way to write to commitCh.
+//
+// The send is non-blocking, and that is load-bearing twice over.
+//
+// It cannot deadlock. A blocking send made while holding commitMu wedges the node
+// permanently: the loop is outside its receive for the whole of applyEntries, a busy
+// leader commits more than a bufferful in that time, and the sender then sits on the
+// very lock the loop needs to get back to the receive that would release it. Not
+// blocking removes the cycle rather than relying on every caller to release the lock
+// first — which is the kind of rule that gets broken at two call sites out of three.
+//
+// It cannot pile up. commitCh is buffered 1 and the signal is a level, not a queue:
+// it says "state moved, go look", and the loop re-reads commitIndex and
+// snapShotInProgress when it wakes. A full buffer means a wake-up is already pending,
+// so the dropped signal costs nothing — and the loop wakes once per burst instead of
+// once per sender.
+func (n *Node) signalCommit() {
+	select {
+	case n.commitCh <- struct{}{}:
+	default:
+	}
+}
+
+// SetCommitIndex advances commitIndex and wakes the apply loop. A lower index is
+// ignored — commitIndex only moves forward.
+//
+// No defer: the signal must go out with commitMu released (see signalCommit), so
+// every path unlocks explicitly. The early return is the one that is easy to get
+// wrong, and leaking the lock there wedges the node for good.
 func (n *Node) SetCommitIndex(idx uint) {
-	n.commitCond.L.Lock()
-	defer n.commitCond.L.Unlock()
+	n.commitMu.Lock()
 	if idx < n.commitIndex {
+		n.commitMu.Unlock()
 		return
 	}
 	n.commitIndex = idx
+	n.commitMu.Unlock()
 
-	n.commitCond.Broadcast()
+	n.signalCommit()
 }
 
 func (n *Node) GetCommitIndex() uint {
-	n.commitCond.L.Lock()
-	defer n.commitCond.L.Unlock()
+	n.commitMu.Lock()
+	defer n.commitMu.Unlock()
 
 	return n.commitIndex
 }

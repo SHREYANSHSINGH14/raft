@@ -39,29 +39,29 @@ type Node struct {
 	lastApplied uint
 
 	mu sync.Mutex
-	// commitMu guards commitIndex reads/writes in the apply loop and Propose waiters.
-	// Kept separate from mu because sync.Cond.Wait() holds its lock while sleeping —
-	// if commitCond used mu, the apply loop sleeping in Wait() would block every
-	// internal goroutine that needs mu (election, heartbeat, role transitions).
-	// SetCommitIndex updates commitIndex under mu, then broadcasts on commitCond
-	// without holding mu — the two mutexes are intentionally independent.
+	// commitMu guards commitIndex and futureList. Kept separate from mu because the
+	// apply loop holds it while evaluating its wait condition, and a shared lock
+	// would block every internal goroutine that needs mu (election, heartbeat, role
+	// transitions) for as long as the loop had nothing to do. The two mutexes are
+	// intentionally independent, and neither is ever taken while holding the other.
 	commitMu sync.Mutex
 
 	// clientMu guards exposed methods that may be called concurrently by users of the library, like Propose, HandleAppendEntries, and HandleRequestVote. This is separate from mu because it doesn't need to be held for internal operations like the election timer or apply loop, and we want to avoid unnecessary blocking of those.
 	clientMu sync.Mutex
 
-	// commitCond notifies the apply loop and Propose waiters when commitIndex advances.
-	// Wait() must be called with commitMu held. Internally, sync.Cond maintains a list
-	// of blocked goroutines — shared memory. Before sleeping, a goroutine must register
-	// itself on that list, which is the "ticket". The lock ensures ticket assignment and
-	// lock release are atomic — if they weren't, a Signal() or Broadcast() could fire
-	// after the goroutine decided to wait but before it got its ticket. The goroutine
-	// would be on no list, Signal() or Broadcast() would walk the list and miss it,
-	// and it would sleep forever with nothing to wake it. By holding the lock during
-	// ticket assignment, we guarantee: by the time Signal() or Broadcast() walk the
-	// waiter list, any goroutine that decided to wait is already registered on it.
-	// Signal() and Broadcast() themselves require no lock — they only read the list.
-	commitCond sync.Cond
+	// commitCh wakes the apply loop when commitIndex advances or a snapshot ends.
+	// This replaced a sync.Cond: a Cond cannot be selected on, so shutdown needed a
+	// broadcast on every cancellation path, whereas the loop can now select over
+	// commitCh and ctx.Done() together.
+	//
+	// **Buffered 1, and written only through signalCommit, which never blocks.** The
+	// signal is a level, not a queue — it says "state moved, go look", and the loop
+	// re-reads commitIndex and snapShotInProgress when it wakes, so a second queued
+	// signal would tell it nothing the first did not. One slot is therefore enough,
+	// and dropping a signal into a full buffer loses nothing. Sizing it larger only
+	// buys spurious wake-ups; making the send block reintroduces the deadlock in
+	// signalCommit's comment.
+	commitCh chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -148,7 +148,7 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 	// explicitly — otherwise the compactor would think a floor at index 0 is held.
 	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
 
-	node.commitCond = *sync.NewCond(&node.commitMu)
+	node.commitCh = make(chan struct{}, 1)
 
 	// Seed both configuration views from the caller-supplied bootstrap peers at
 	// index 0. Until the first config entry is appended, latest == committed.

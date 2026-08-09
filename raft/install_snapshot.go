@@ -123,12 +123,12 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	}
 	defer snapshotFile.Close()
 
-	n.commitCond.L.Lock()
+	n.commitMu.Lock()
 	err = n.sm.Restore(ctx, snapshotFile)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error restoring state machine from snapshot")
 		success = false
-		n.commitCond.L.Unlock()
+		n.commitMu.Unlock()
 		return
 	}
 
@@ -136,10 +136,10 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting last applied index")
 		success = false
-		n.commitCond.L.Unlock()
+		n.commitMu.Unlock()
 		return
 	}
-	n.commitCond.L.Unlock()
+	n.commitMu.Unlock()
 
 	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
 	if err != nil {
