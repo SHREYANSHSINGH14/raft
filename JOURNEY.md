@@ -436,6 +436,69 @@ the entry is genuinely committed rather than merely appended locally.
 
 ---
 
+## Bug 7: `select` has no notion of priority, and the refactor that discovered it
+
+`Propose` used to block. `waitForCommit` did the waiting, and it had a shape worth looking at before
+the bug makes sense:
+
+```go
+for n.commitIndex < index && ctx.Err() == nil && !leadershipEnded(leaderCh) {
+    n.commitCond.Wait()
+}
+
+if n.commitIndex >= index { return nil }   // committed wins
+if ctx.Err() != nil       { return ctx.Err() }
+return ErrLeadershipLost
+```
+
+Two separate questions, answered in two separate places. The loop asks *should I still be asleep?*
+The `if`s below ask *what is true now?* It never asks who woke it — the wake-up reason is thrown away
+and the verdict re-derived from state. That is why the tie between "committed" and "stepped down"
+always resolved the same way: committed, because the entry is in the log for good and reporting failure
+invites a retry that appends it twice.
+
+Turning `Propose` into a future fused those two questions into one `select`:
+
+```go
+select {
+case <-f.doneCh:      return nil
+case <-f.leaderClose: return ErrLeadershipLost
+...
+}
+```
+
+Now the case that fires *is* the verdict. That coincides with the truth only when exactly one thing is
+true. When the entry committed **and** the term ended, both channels are ready — and Go's `select`
+chooses among ready cases uniformly at random. That is a spec guarantee, not an implementation quirk;
+it exists to prevent starvation. So no ordering of the cases and no restructuring inside a single
+`select` can express a preference. **Priority has to live somewhere a `select` isn't.**
+
+The test that caught it loops 100 times, because a single attempt passes about half the time.
+
+Three wrong turns on the way to the fix, each instructive:
+
+1. **`if _, ok := <-f.leaderClose; !ok`** inside the `doneCh` case. On a close-only channel a blocking
+   receive is a *wait*, not a *question*: still leading → blocks forever; stepped down → `ok` is false.
+   `ok` can never be true, so the `return nil` beneath it was unreachable. Asking a question of a
+   channel needs `select` + `default`.
+2. **Right idiom, wrong branch.** Adding the non-blocking check to the `doneCh` case reads as *"the
+   entry committed… and we stepped down → tell the caller it failed"* — the invariant negated. Reaching
+   that case already settles the question; the tie only hurts where you are about to report failure.
+3. **Guarding the producer instead.** `processFutures` grew an `!n.IsLeader()` check, which stopped the
+   drain from completing committed futures exactly when leadership was ending — reintroducing the same
+   loss from the other end, and inverting `commitMu -> mu` while it was at it.
+
+The fix is the original shape: let the `select` mean only *stop sleeping*, then re-derive the verdict
+below it in priority order via a non-blocking `committed()`. Which is to say the old code was right and
+the refactor's job was to keep its structure, not just its inputs.
+
+The corollary showed up later. A future is keyed by index alone, so the follower commit path
+deliberately does **not** drain: a new leader may have truncated our entry and put its own at that
+index, and completing on index alone would report success for a proposal that was discarded.
+`ErrLeadershipLost` is wrong-but-safe there; `nil` would be wrong-and-unsafe.
+
+---
+
 ## What Remains
 
 Snapshotting, membership changes (both directions), pre-vote and leadership transfer have all landed
@@ -449,8 +512,15 @@ since this section was last written. What is left:
   "all green" is scoped to what the tests actually exercise.
 - **Linearizable reads**: reads currently go through the log; read leases or heartbeat-based reads
   would allow bypassing the log for non-mutating queries.
-- **Propose as a future**: `Propose` still blocks until commit. `leaderCloseCh` fixed the worst of it
-  — a blocked `Propose` now fails with `ErrLeadershipLost` on step-down instead of hanging — but the
-  caller still can't do other work while waiting. The design is worked out in `STATE.md`; the part
-  that took longest to get right was realising the waiter list wants to be a slice under `commitMu`
-  rather than a channel, because a channel can neither be peeked nor cleared.
+- **Futures carrying `(index, term)`**: a `Future` is keyed by log index alone, so a proposal whose
+  entry a new leader truncated cannot be distinguished from one that committed. Today that is handled
+  conservatively — the follower commit path does not drain, so such a waiter gets `ErrLeadershipLost`
+  rather than a false success. Carrying the term would let it be precise.
+- **`Future.errCh`**: the field exists and nothing ever sends on it, so that case in `Wait` is
+  unreachable. Either wire it (an entry truncated out from under a waiter is the obvious candidate) or
+  drop it.
+
+**Done since this section was last written**: `Propose` returns a `Future` instead of blocking. The
+part that took longest to get right was not the waiter list — a slice under `commitMu`, because a
+channel can neither be peeked nor cleared — but the tie-break the old blocking version got for free.
+See Bug 7.

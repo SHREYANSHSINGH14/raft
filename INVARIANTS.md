@@ -150,16 +150,66 @@ no `electionTimeoutCh` signal. A partitioned node's probes must not move us, or 
 A higher-term response ends the round but is **never adopted** — a probe reply is not authority to
 move; the real term arrives via the next AppendEntries.
 
-### `leaderCloseCh`: open before the role, and never close it without a broadcast.
+### `leaderCloseCh`: opened last, and closed only by `clearLeaderCloseCh`.
 
-`becomeLeader` opens the channel **before** `SetRole(Leader)`. `Propose` gates on `role == Leader`
-while `waitForCommit` reads a nil channel as "not leading", so the other order leaves a window where a
-proposal is accepted and instantly fails with `ErrLeadershipLost`.
+`becomeLeader` runs in one order and it is load-bearing: read the last log index → `initLeaderTermState`
+→ append the no-op and any staging cleanup → `setLeaderCloseCh` → `SetRole(Leader)` → `startSendLogs`.
+The role flips **last**, so `role == Leader` implies both a live `leaderCloseCh` and a fully seeded term.
+Flipping earlier reopens two windows: a proposal accepted before the channel exists fails instantly with
+`ErrLeadershipLost` (`newFuture` captures a nil channel), and one accepted before `initFutureList`
+registers a future into a list that is about to be replaced — an orphaned waiter that nothing will ever
+complete. That window used to be two instructions; it now spans two disk writes.
 
-`clearLeaderCloseCh` is the only correct way to end a leadership term. It must `close()` **and**
-`commitCond.Broadcast()`: a `Propose` asleep in `Cond.Wait()` cannot observe a channel close, so
-without the broadcast it never re-checks and hangs exactly as the old TODO described. A bare `close()`
-elsewhere reintroduces that.
+`clearLeaderCloseCh` is the only correct way to end a leadership term. The `close()` is what releases
+every `Future` in flight — each captured this channel at registration, so one close answers all of them,
+O(1) regardless of how many proposals are outstanding. The `commitCond.Broadcast()` is for the apply
+loop and anything else parked on the cond. A bare `close()` elsewhere breaks the exactly-once property
+that comes from lifting the channel out of the field under `mu` first.
+
+### Futures: `commitMu` guards the list, and only `processFutures` completes one.
+
+`Propose` no longer blocks. It appends and returns a `Future`; `Future.Wait` is the commit-wait.
+
+`futureList` is guarded by **`commitMu`**, not `mu` — it lives next to `commitIndex`, and `newFuture`
+and `processFutures` are its only readers. Role transitions go through `initFutureList` /
+`clearFutureList` so they take the same lock; assigning the field directly under `mu` (or under nothing)
+is a data race that no test will show you. `initFutureList` runs *before* `initLeaderTermState` takes
+`mu`, which is not stylistic: `commitMu -> mu` is an ordering this codebase does not have (`newFuture`
+reads `leaderCloseCh` early to avoid it), and taking `mu -> commitMu` there would close the cycle from
+the other side.
+
+`newFuture` must be called under the **same `clientMu` hold as `appendEntry`**. The list is drained as a
+sorted prefix, and append order equals index order only while the two happen together; two proposals
+that register after unlocking can land out of order, and then `processFutures` stops at the wrong
+element and strands every waiter behind it.
+
+`processFutures` is called **after** `SetCommitIndex` returns — never from inside it, since
+`SetCommitIndex` holds `commitMu` for its whole body — and after `advanceCommittedConfiguration`.
+That last bit matters: closing a `doneCh` releases a caller into code you don't control, and `AddMember`
+reads committed configuration state the moment its wait returns. Everything the woken caller might read
+must already be updated.
+
+### `Future.Wait` re-derives the verdict; the `select` only decides when to stop sleeping.
+
+A `select` picks uniformly at random among ready cases, so the case that fires tells you which signal
+arrived, not which fact outranks the others. Every exit that is about to report failure therefore calls
+`committed()` first — a non-blocking check of `doneCh` — and the priority order is **committed, then
+context, then leadership**. Committed wins because the entry is in the log for good either way, and
+reporting failure invites a retry that appends it twice. The same check guards the nil-`leaderClose`
+path: `processFutures` closes `doneCh` without consulting the role, so a future registered outside a
+term can still have been completed.
+
+Note what `committed()` does *not* do: read `commitIndex`. A closed `doneCh` is `processFutures`'
+record of the `idx <= commitIndex` comparison it already made. Re-deriving it would take `commitMu` in
+every waiter and put a second copy of the rule where it can drift.
+
+**A future is keyed by index alone, which is why the follower commit path deliberately does not drain.**
+`HandleAppendEntries` advances `commitIndex` without calling `processFutures`. A node that still holds
+futures while running that path is a leader that has not yet processed its own step-down, and the new
+leader may have truncated our entry and put its own at that index — `LeaderCommit >= 11` would then mean
+*its* entry committed, not ours. Completing on index alone would report success for a discarded
+proposal. `ErrLeadershipLost` is the conservative answer and the correct one until futures carry
+`(index, term)`.
 
 ### The heartbeat orchestrator's `select` is inside a loop, and membership notifications never block.
 
@@ -174,6 +224,23 @@ no log line. If you add another non-terminal case, it must not `return` either.
 `notifyMemberAdded` / `notifyMemberRemoved`, which are non-blocking. A bare send blocks forever on a
 nil channel once we have stepped down. Note it is the `default:` clause that makes this safe — a send
 to a nil channel simply falls through — not the nil check, which only suppresses a spurious warning.
+
+### Every send to an internal signal channel is non-blocking.
+
+`electionTimeoutCh` and `timeoutNowCh` carry a **level**, not a queue: "someone entitled to keep us a
+follower is alive", "campaign now". A second pending signal says nothing the first did not, so a sender
+that cannot deposit one has already got what it wanted. All sends go through `signalElectionTimeout` /
+`signalTimeoutNow` / `notifyMember*`, never a bare `ch <- struct{}{}`.
+
+The reason is not throughput. Exactly one goroutine receives from `electionTimeoutCh` — whichever owns
+the current role's timer — and during a role transition there is none. The senders are RPC handlers
+holding `clientMu`. A blocking send there is safe today only because of three facts in three other
+files: stale-term `AppendEntries` return before reaching the send, pre-vote is leader-sticky, and a vote
+is spent for its term. None of them mention this channel. Not blocking needs no argument.
+
+Draining is not a substitute. `for range ch` on a channel nobody closes never returns — it hangs the
+role transition it was meant to protect — and a drain is racy anyway, since a peer can send between the
+last receive and the role flip.
 
 ### Compaction is *delayed* for a catching-up member, never bounded — via a channel, not a spin.
 
