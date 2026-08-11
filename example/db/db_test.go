@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	raft "github.com/SHREYANSHSINGH14/raft/raft"
+	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/stretchr/testify/assert"
 )
 

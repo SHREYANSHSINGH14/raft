@@ -1,7 +1,7 @@
 # Raft Consensus — Learning Implementation
 
 A from-scratch implementation of the [Raft consensus algorithm](https://raft.github.io/raft.pdf) in Go,
-refactored into an importable library. The `raft/` package exposes three interfaces — `Transport`,
+refactored into an importable library. The root package exposes three interfaces — `Transport`,
 `Storage`, and `StateMachine` — that the caller implements. The library owns consensus; the caller
 owns networking, persistence, and application state.
 
@@ -21,40 +21,54 @@ The three core problems Raft solves:
 
 ## Project Structure
 
+The **repo root is the library** — `import "github.com/SHREYANSHSINGH14/raft"` and you get the
+consensus engine and nothing else. `example/` is one concrete embedding of it (gRPC + PebbleDB +
+a cobra CLI), kept in-tree so the interfaces have a worked reference. The dependency points one
+way only: `example/` imports the root, never the reverse.
+
 ```
 .
-├── cmd/                  # CLI entrypoint (cobra)
-│   └── server.go
-├── config/               # Config loading from env vars + peers.yaml
-│   └── config.go
-├── raft/                 # Core Raft library (import this)
-│   ├── node.go           # Node struct, NewNode, Start/Stop
-│   ├── interfaces.go     # Transport, Storage, StateMachine interfaces
-│   ├── types.go          # Plain Go structs (LogEntry, RequestVoteArgs, …)
-│   ├── election.go       # Pre-vote round + candidate election loop
-│   ├── heartbeat.go      # Leader heartbeat / log replication
-│   ├── apply_loop.go     # Applies committed entries to the StateMachine
-│   ├── write_logs.go     # Propose — append and wait for commit
-│   ├── request_vote.go   # RequestVote RPC handler
-│   ├── pre_vote.go       # PreVote RPC handler (Ongaro §9.6)
-│   ├── timeout_now.go    # TimeoutNow RPC handler (leadership transfer)
-│   ├── append_entries.go # AppendEntries RPC handler
-│   ├── install_snapshot.go # InstallSnapshot RPC handler
-│   ├── snapshot.go       # Snapshot capture + log compaction
-│   ├── add_member.go     # AddMember — stage, catch up, promote
-│   └── remove_member.go  # RemoveMember — incl. self-removal handoff
-├── server/               # gRPC server + HTTP debug server
-│   ├── server.go         # grpcTransport adapter wires gRPC → raft.Transport
-│   └── debug_server.go
-├── db/                   # PebbleDB-backed raft.Storage implementation
-│   └── db.go
-├── proto/                # Protobuf definitions
-│   ├── rpc.proto
-│   └── log.proto
-├── types/                # Generated protobuf types
-├── peers.yaml            # Peer discovery config
-├── docker-compose.yaml   # 5-node cluster setup
-└── config.dev.env        # Local dev environment variables
+├── node.go               # Node struct, NewNode, Start/Stop
+├── interfaces.go         # Transport, Storage, StateMachine interfaces
+├── types.go              # Plain Go structs (LogEntry, RequestVoteArgs, …)
+├── election.go           # Pre-vote round + candidate election loop
+├── heartbeat.go          # Leader heartbeat / log replication
+├── apply_loop.go         # Applies committed entries to the StateMachine
+├── write_logs.go         # Propose — append, return a Future
+├── future.go             # Future.Wait — the commit-wait
+├── request_vote.go       # RequestVote RPC handler
+├── pre_vote.go           # PreVote RPC handler (Ongaro §9.6)
+├── timeout_now.go        # TimeoutNow RPC handler (leadership transfer)
+├── append_entries.go     # AppendEntries RPC handler
+├── install_snapshot.go   # InstallSnapshot RPC handler
+├── snapshot.go           # Snapshot capture + log compaction
+├── configuration.go      # Config-entry handling
+├── raft_config.go        # Config, Peer, the configurations struct
+├── add_member.go         # AddMember — stage, catch up, promote
+├── remove_member.go      # RemoveMember — incl. self-removal handoff
+│
+├── example/              # One concrete embedding — not part of the library
+│   ├── main.go           # Binary entrypoint
+│   ├── cmd/              # CLI entrypoint (cobra)
+│   ├── config/           # Config loading from env vars + peers.yaml
+│   ├── server/           # gRPC server + HTTP debug server
+│   │   ├── server.go     # grpcTransport adapter wires gRPC → raft.Transport
+│   │   └── debug_server.go
+│   ├── db/               # PebbleDB-backed raft.Storage implementation
+│   ├── proto/            # Protobuf definitions
+│   ├── types/            # Generated protobuf types
+│   ├── scripts/          # generate_protos.sh
+│   ├── peers.yaml        # Peer discovery config
+│   ├── Dockerfile
+│   ├── docker-compose.yaml # 5-node cluster setup
+│   └── config.dev.env    # Local dev environment variables
+│
+└── docs/                 # Every doc except this one
+    ├── INVARIANTS.md     # Architecture + the invariants that are easy to break
+    ├── JOURNEY.md        # Bugs hit, why they happened, what each taught
+    ├── STATE.md          # What is in flight right now
+    ├── architecture.md   # Per-concern breakdown (+ architecture.mmd)
+    └── membership-change.md
 ```
 
 ---
@@ -104,7 +118,7 @@ Follower ─────────────────▶ Candidate ──
 ### Run a 5-node cluster
 
 ```bash
-docker compose up --build
+cd example && docker compose up --build
 ```
 
 Each peer exposes two ports:
@@ -122,14 +136,16 @@ Each peer exposes two ports:
 ```bash
 # Export env vars into the current shell, then build and run
 set -a
-source config.dev.env
+source example/config.dev.env
 set +a
 
-make build
-make run
+go build -o raftd example/main.go
+./raftd server start
 ```
 
-`set -a` causes every variable sourced from the file to be automatically exported to the environment. `make run` just executes the binary (`./raftd server start`) — it does not build, so `make build` must come first.
+`set -a` causes every variable sourced from the file to be automatically exported to the environment.
+Run both from the repo root — `PEER_INFO` in `config.dev.env` is `example/peers.yaml`, resolved
+relative to the working directory.
 
 ---
 
@@ -249,8 +265,8 @@ peers:
 - [ ] **`PreVote` / `TimeoutNow` / `InstallSnapshot` over gRPC** — the handlers and the `Transport`
       methods exist, but `proto/rpc.proto` has no such RPCs, so `grpcTransport` stubs all three.
       Since elections are gated behind pre-vote, this currently prevents a *real* cluster from
-      electing a leader — the library's own tests pass because they mock the transport. See `STATE.md`.
-- [ ] `Propose` returning a future instead of blocking (design in `STATE.md`)
+      electing a leader — the library's own tests pass because they mock the transport. See `docs/STATE.md`.
+- [ ] `Propose` returning a future instead of blocking (design in `docs/STATE.md`)
 - [ ] Linearizable reads
 
 ---

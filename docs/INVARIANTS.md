@@ -1,33 +1,39 @@
 # raft — architecture, invariants, conventions
 
 A Raft consensus implementation built from the paper, structured as an importable Go library.
-`raft/` is the library; `db/` (PebbleDB), `server/` (gRPC), and `cmd/` are one concrete embedding of it.
+The **repo root is the library** (`package raft`, imported as `github.com/SHREYANSHSINGH14/raft`);
+everything under `example/` — `db/` (PebbleDB), `server/` (gRPC), `cmd/` — is one concrete embedding
+of it. Nothing in the library may import `example/`; the dependency only ever points inward.
 
 This file is the standing context for working on the repo: how the pieces fit, the
 invariants that are easy to break by accident, and the conventions to follow.
 
-- `README.md` — what it is and how to use it (the map)
+Everything except the README lives in `docs/`, alongside this file:
+
+- `../README.md` — what it is and how to use it (the map); the only doc at the repo root
 - `JOURNEY.md` — bugs hit, why they happened, what each fix taught (the travel log)
 - `STATE.md` — what is in flight right now (read this first when resuming)
-- `docs/architecture.mmd` — one connected Mermaid flowchart of a whole node (read when the details stop fitting in your head); `docs/architecture.md` is the per-concern breakdown with prose
-- `docs/` — design decisions made before building
+- `architecture.mmd` — one connected Mermaid flowchart of a whole node (read when the details stop fitting in your head); `architecture.md` is the per-concern breakdown with prose
+- the rest of `docs/` — design decisions made before building
 
 ## Architecture
 
-`raft/` never touches the network, the disk, or the application state directly. It calls out through
-three interfaces the caller implements ([interfaces.go](raft/interfaces.go)):
+The library never touches the network or the application state directly, and touches the disk only for
+snapshot files. It calls out through three interfaces the caller implements
+([interfaces.go](../interfaces.go)):
 
 - `Transport` — sends RPCs to peers. Owns addresses, pooling, retries, timeouts.
 - `Storage` — persists term, votedFor, lastApplied, and the log.
 - `StateMachine` — applies committed entries; snapshots and restores.
 
-Proto types stay inside `db/` and `server/` as a serialization detail. The library speaks plain Go
-structs (`LogEntry{Index, Term, Type, Data}`). `server/` converts at the gRPC boundary, `db/` at the
-storage boundary. **Do not leak proto types into `raft/`.**
+Proto types stay inside `example/db` and `example/server` as a serialization detail — they exist
+because *this* embedding chose gRPC and protobuf, and a different one need not. The library speaks
+plain Go structs (`LogEntry{Index, Term, Type, Data}`). `example/server` converts at the gRPC
+boundary, `example/db` at the storage boundary. **Do not leak proto types into the library.**
 
-`raft/db_mock.go` ships both a testify `MockStorage` and a real in-memory `MemStorage`, because
-tests in `raft/` cannot import `db/` — `db/` imports `raft/` to implement `raft.Storage`, so it
-would be a cycle.
+`db_mock.go` ships both a testify `MockStorage` and a real in-memory `MemStorage`, because the
+library's tests cannot import `example/db` — that package imports the library to implement
+`raft.Storage`, so it would be a cycle.
 
 ## Invariants — the things that are easy to break
 
@@ -36,7 +42,7 @@ would be a cycle.
 - **`mu`** — general node state (role, leaderID, peer NextIndex/MatchIndex).
 - **`commitMu`** — guards `commitIndex` and `futureList`.
 - **`clientMu`** — serializes the caller-facing entry points (`Propose`, `HandleAppendEntries`,
-  `HandleRequestVote`). Lives in the library so callers like `server/rpc.go` don't need their own lock.
+  `HandleRequestVote`). Lives in the library so callers like `example/server/rpc.go` don't need their own lock.
 
 `commitMu` is separate from `mu` because the apply loop holds it while evaluating its wait condition.
 A shared lock would block every internal goroutine that needs `mu` — election, heartbeat, role
@@ -107,13 +113,13 @@ replication uses one independent `sendLogsPerPeer` goroutine per peer, each with
 
 ### The apply loop parks during snapshots.
 
-`snapShotInProgress` (atomic) is checked in `shouldWaitForApply` ([apply_loop.go:64](raft/apply_loop.go#L64)).
+`snapShotInProgress` (atomic) is checked in `shouldWaitForApply` ([apply_loop.go:64](../apply_loop.go#L64)).
 While the state machine is being captured, the apply loop must not advance `lastApplied` past the
 index the snapshot is being taken at.
 
 ### The live cluster configuration is `configurations.latest`, not `cfg.Peers`.
 
-Membership is tracked in the `configurations` struct ([raft_config.go](raft/raft_config.go)) as two
+Membership is tracked in the `configurations` struct ([raft_config.go](../raft_config.go)) as two
 views: `latest` (most recent config in the log, committed or not — the **operating** set every peer
 helper, election, and heartbeat reads) and `committed` (last config known committed), each tagged with
 its producing log index. `cfg.Peers` is only the **bootstrap seed**, copied into both views once in
@@ -286,16 +292,16 @@ exit path (success, abort, panic-unwind).
 
 ## Conventions
 
-- Errors: `ErrNotFound` is defined in `raft/` so the library doesn't depend on Pebble's sentinel.
+- Errors: `ErrNotFound` is defined in the library so the library doesn't depend on Pebble's sentinel.
 - Logging: `zerolog.Ctx(ctx)` everywhere; the logger rides on the context.
 - Tests use testify mocks; method-name constants (e.g. `methodApply`) are used for `.On(...)` setup.
 
 ## Working on this repo
 
-Read `STATE.md` before starting — it records what is half-finished and why.
+Read `docs/STATE.md` before starting — it records what is half-finished and why.
 
 When a session produces a non-obvious decision (a design chosen over an alternative, a signature
 changed for a reason, a bug whose root cause was subtle), write it down before the session ends:
-- A bug and what it taught → `JOURNEY.md`
-- A design decision, with the options rejected and why → `docs/`
-- An invariant future-you could break by accident → here
+- A bug and what it taught → `docs/JOURNEY.md`
+- A design decision, with the options rejected and why → a new file in `docs/`
+- An invariant future-you could break by accident → here (`docs/INVARIANTS.md`)

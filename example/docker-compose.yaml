@@ -1,6 +1,8 @@
 services:
   peer1:
-    build: .
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
     ports:
       - "50051:50051"
       - "8081:8080"
@@ -21,7 +23,9 @@ services:
       - peer1_data:/app/data
 
   peer2:
-    build: .
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
     ports:
       - "50052:50052"
       - "8082:8080"
@@ -42,7 +46,9 @@ services:
       - peer2_data:/app/data
 
   peer3:
-    build: .
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
     ports:
       - "50053:50053"
       - "8083:8080"
@@ -63,7 +69,9 @@ services:
       - peer3_data:/app/data
 
   peer4:
-    build: .
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
     ports:
       - "50054:50054"
       - "8084:8080"
@@ -84,7 +92,9 @@ services:
       - peer4_data:/app/data
 
   peer5:
-    build: .
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
     ports:
       - "50055:50055"
       - "8085:8080"

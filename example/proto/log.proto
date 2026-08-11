@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package raft.log;
 
-option go_package = "github.com/SHREYANSHSINGH14/raft/types";
+option go_package = "github.com/SHREYANSHSINGH14/raft/example/types";
 
 import "google/protobuf/timestamp.proto";
 

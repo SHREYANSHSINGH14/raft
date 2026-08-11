@@ -5,6 +5,22 @@ It answers one question: if I sat down right now, what would I need to know?
 
 ## Just finished
 
+**Repo restructured: the library is now the repo root.** On branch `refactor/library-at-root`.
+`raft/*.go` moved to `.` (still `package raft`), so the import is `github.com/SHREYANSHSINGH14/raft`
+instead of the old `.../raft/raft` stutter. Everything else — `cmd`, `config`, `db`, `server`,
+`types`, `proto`, `scripts`, `main.go`, `peers.yaml`, `config.dev.env`, `Dockerfile`,
+`docker-compose.yaml` — moved under `example/`. Imports, `option go_package` in both `.proto` files,
+the Dockerfile and the compose build context (`context: ..`, since `COPY . .` has to reach the library
+at the root) are all rewired; `PEER_INFO` in `config.dev.env` is now `example/peers.yaml`, resolved
+relative to the working directory, so the dev binary must be run from the repo root.
+
+Also dropped in the same pass: the **Makefile** (two `go build` lines didn't earn a file — the README
+spells them out now) and the checked-out `raftd` binary. And **every doc except the README moved into
+`docs/`** — this file, `INVARIANTS.md`, `JOURNEY.md`. Relative links inside them gained a `../`.
+`CLAUDE.md` at the root is a symlink and now points at `docs/INVARIANTS.md`; it stays untracked.
+
+Purely mechanical — no library code changed.
+
 **`Propose` returns a `Future` instead of blocking.** This was the last item in the "decided but not
 built" section of the previous STATE.md, and it is now built:
 
@@ -49,7 +65,7 @@ Alongside it, in the same pass:
 
 ## The one thing that will bite you first
 
-**Three `Transport` methods are still stubs in `grpcTransport`** ([server/server.go](server/server.go))
+**Three `Transport` methods are still stubs in `grpcTransport`** ([server/server.go](../example/server/server.go))
 — `PreVote`, `TimeoutNow`, `InstallSnapshot` — because `proto/rpc.proto` has no such RPCs. They return
 `"not implemented"`.
 
@@ -58,16 +74,33 @@ the round counts as a withheld vote, so **no node in a multi-node deployment can
 single-node cluster still works: with one voter the round needs no RPCs and passes on its own vote. The
 library tests all pass because they mock the transport.
 
-Adding the three RPCs to the proto plus the `server/rpc.go` conversions is the highest-value next task,
+Adding the three RPCs to the proto plus the `example/server/rpc.go` conversions is the highest-value next task,
 and it is the prerequisite for running any real application against this.
 
 Second-order effects of the same gap: the `RemoveMember` leadership handoff always fails and falls
 through to the bare step-down, and a lagging follower can never be caught up by snapshot.
 
+**And right behind it: `LogEntry.Type` is dropped at every conversion boundary.** All three converters
+copy `Index`, `Term`, `Data` and silently omit `Type` — [example/db/db.go:39-52](../example/db/db.go#L39-L52)
+(`toProto`/`fromProto`), [example/server/server.go:173](../example/server/server.go#L173) (leader→wire),
+[example/server/rpc.go:29](../example/server/rpc.go#L29) (wire→follower). It is not a proto limitation:
+`log.proto` defines `EntryType type = 3` and the full enum.
+
+`EntryType_Command` is `iota`, so the zero value is a *valid* type — nothing errors, config entries just
+become commands. The leader appends a config entry, stores it (`Type` lost), reads it back at
+[heartbeat.go:241](../heartbeat.go#L241) to replicate it, ships it (lost again), and the follower's
+`entry.Type == EntryType_Config` test at [append_entries.go:151](../append_entries.go#L151) never fires —
+so `processConfigurationLogEntry` never runs and **membership changes never reach followers**. A restart
+loses the leader's own config the same way. Invisible to the test suite: `MemStorage` and the mock
+transport pass the struct through intact.
+
+Fix is a field at each of the three sites plus a named enum mapping (proto reserves 0 for
+`UNSPECIFIED`, so the two enums are offset by one — map it explicitly, don't cast).
+
 ## Not wired at all
 
 - **The three proto RPCs**, above. Everything else is downstream of it.
-- **`server/server.go:75` passes `nil` as the `StateMachine`** and sets no `SnapshotDir` / interval /
+- **`example/server/server.go:75` passes `nil` as the `StateMachine`** and sets no `SnapshotDir` / interval /
   threshold, so although `Node.Start` calls `startSnapshotLoop`, a real node still never snapshots.
 - **`Future.errCh`** — the field is allocated on every `Propose` and nothing ever sends on it, so that
   case in `Wait` is unreachable. Decide: wire it (an entry truncated out from under a waiter is the

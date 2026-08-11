@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	raft "github.com/SHREYANSHSINGH14/raft/raft"
-	"github.com/SHREYANSHSINGH14/raft/types"
+	"github.com/SHREYANSHSINGH14/raft"
+	"github.com/SHREYANSHSINGH14/raft/example/types"
 	"github.com/cockroachdb/pebble"
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"

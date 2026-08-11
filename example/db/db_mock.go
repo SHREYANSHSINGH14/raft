@@ -7,11 +7,11 @@ import (
 	"sort"
 	"sync"
 
-	raft "github.com/SHREYANSHSINGH14/raft/raft"
+	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/stretchr/testify/mock"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/SHREYANSHSINGH14/raft/types"
+	"github.com/SHREYANSHSINGH14/raft/example/types"
 )
 
 // MockStore is a mock implementation of raft.Storage for testing purposes.

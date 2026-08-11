@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/SHREYANSHSINGH14/raft/config"
-	"github.com/SHREYANSHSINGH14/raft/server"
+	"github.com/SHREYANSHSINGH14/raft/example/config"
+	"github.com/SHREYANSHSINGH14/raft/example/server"
 	"github.com/spf13/cobra"
 )
 

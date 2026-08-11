@@ -67,11 +67,11 @@ on the leader that wrote it and every follower that applies it. It also fixed a 
 a follower applying a config entry adopted a map that listed *itself* as a peer and omitted the leader.
 
 The cost is that the peer helpers split three ways — RPC fan-out excludes self, majority math includes
-it — which is now the first thing INVARIANTS.md warns about.
+it — which is now the first thing INVARIANTS.md (this directory) warns about.
 
 ## Key Constraint (now satisfied — was the prerequisite for all of the above)
 - **InstallSnapshot must exist first** — Staging servers that are far behind rely on it to catch up before they can even be considered for promotion.
-- **Status as of 2026-07-31: the send path now exists.** `Transport.InstallSnapshot`, `callInstallSnapshot` (streams the file with a size-scaled deadline, returns the full `SnapshotMeta`), and `sendInstallSnapshot` (the heartbeat fallback: when a peer's `nextIndex` is below the latest snapshot index, send a snapshot instead of decrementing forever). `AddMember` also drives InstallSnapshot directly for a fresh member. The follower-side `HandleInstallSnapshot` and on-disk format were already there. See `STATE.md` for the one remaining wiring gap (the catch-up's first AppendEntries anchor still needs the follower to accept the snapshot boundary as its prevLog).
+- **Status as of 2026-07-31: the send path now exists.** `Transport.InstallSnapshot`, `callInstallSnapshot` (streams the file with a size-scaled deadline, returns the full `SnapshotMeta`), and `sendInstallSnapshot` (the heartbeat fallback: when a peer's `nextIndex` is below the latest snapshot index, send a snapshot instead of decrementing forever). `AddMember` also drives InstallSnapshot directly for a fresh member. The follower-side `HandleInstallSnapshot` and on-disk format were already there. See `docs/STATE.md` for the one remaining wiring gap (the catch-up's first AppendEntries anchor still needs the follower to accept the snapshot boundary as its prevLog).
 
 ## Key Learnings Baked Into This Design
 - **Replication/liveness (InstallSnapshot) is a different subsystem from membership changes**, even though they interact. Don't conflate "follower is lagging, catch it up" with "cluster membership is changing" — a temporarily lagging *existing voter* uses InstallSnapshot too, but that's not a membership event. Staging exists specifically for *new* servers being onboarded, not for punishing/demoting slow existing voters.
@@ -80,9 +80,9 @@ it — which is now the first thing INVARIANTS.md warns about.
 
 ## Gap Between This Doc and the Code (as of 2026-08-03)
 Both directions have landed. What is left is plumbing, not design.
-- **`AddMember` is implemented** (`raft/add_member.go`): add as Staging → commit → InstallSnapshot →
+- **`AddMember` is implemented** (`add_member.go`): add as Staging → commit → InstallSnapshot →
   catch-up rounds → promote → commit, with rollback on failure, and tested.
-- **`RemoveMember` is implemented** (`raft/remove_member.go`): guards (leader, one change at a time,
+- **`RemoveMember` is implemented** (`remove_member.go`): guards (leader, one change at a time,
   peer exists, not the last voter) → remove → replicate the whole membership → commit, restoring the
   peer on any failure. Self-removal hands off via `TimeoutNow` and steps down regardless, per the
   decision recorded above.
@@ -98,11 +98,11 @@ Both directions have landed. What is left is plumbing, not design.
   updater), so a truncation rolls `latest` back to the last configuration that actually committed
   rather than to the bootstrap set.
 - Still missing: the **proto RPCs** for `PreVote`/`TimeoutNow`/`InstallSnapshot` — all three are stubs
-  in `grpcTransport`, so none of this works against a real cluster. See STATE.md.
+  in `grpcTransport`, so none of this works against a real cluster. See STATE.md (this directory).
 
 ## Still Open / Not Yet Decided
 - ~~Whether to implement the paper's optional §7 step-6 log-retain optimization for InstallSnapshot~~ —
-  **the code went the other way and already implements retain** (`raft/install_snapshot.go`: it compares
+  **the code went the other way and already implements retain** (`install_snapshot.go`: it compares
   the local entry at `LastIncludedIndex` against `LastIncludedTerm` and only discards the whole log on
   mismatch). The reason for changing course was never recorded. Either write it down or revisit it.
 - ~~Exact replication-lag threshold for Staging → Voter promotion.~~ — **decided (Ongaro §4.2.1):**
