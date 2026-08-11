@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	"github.com/SHREYANSHSINGH14/raft/cmd"
+	"github.com/SHREYANSHSINGH14/raft/example/cmd"
 )
 
 func main() {

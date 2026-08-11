@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/SHREYANSHSINGH14/raft/raft"
+	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/rs/zerolog"
 )
 

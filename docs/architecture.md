@@ -17,19 +17,19 @@ Diagrams:
 
 ## 1. Layering — library vs. embedding
 
-`raft/` never touches the network, disk, or app state directly. It calls out through three
+The library (repo root) never touches the network or app state directly. It calls out through three
 interfaces the caller implements. Everything else in this doc happens *inside* `raft.Node`.
 
 ```mermaid
 flowchart TB
     subgraph app["Concrete embedding — one deployment"]
-        cmd["cmd/ — main"]
-        server["server/ — gRPC = Transport"]
-        db["db/ — PebbleDB = Storage"]
+        cmd["example/cmd — main"]
+        server["example/server — gRPC = Transport"]
+        db["example/db — PebbleDB = Storage"]
         smimpl["app state machine = StateMachine"]
     end
 
-    subgraph lib["raft/ — the library"]
+    subgraph lib["repo root — the library"]
         node["raft.Node"]
         elect["election timer"]
         hb["heartbeat fan-out"]
@@ -48,7 +48,7 @@ flowchart TB
     node -- "StateMachine: Apply / Snapshot / Restore" --> smimpl
 ```
 
-> Not wired yet: `startSnapshotLoop` isn't started from `Node.Start`, and `server/` passes `nil`
+> Not wired yet: `startSnapshotLoop` isn't started from `Node.Start`, and `example/server` passes `nil`
 > as the StateMachine. The snapshot/membership machinery below is built but not running in a real node.
 
 ---

@@ -1,6 +1,6 @@
 package server
 
-import "github.com/SHREYANSHSINGH14/raft/raft"
+import "github.com/SHREYANSHSINGH14/raft"
 
 type AppendLogsDebugRequest struct {
 	Data string `json:"data"`

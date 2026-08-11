@@ -3,8 +3,8 @@ package server
 import (
 	"context"
 
-	"github.com/SHREYANSHSINGH14/raft/raft"
-	"github.com/SHREYANSHSINGH14/raft/types"
+	"github.com/SHREYANSHSINGH14/raft"
+	"github.com/SHREYANSHSINGH14/raft/example/types"
 )
 
 func (s *Server) RequestVote(ctx context.Context, args *types.RequestVoteArgs) (*types.RequestVoteResponse, error) {

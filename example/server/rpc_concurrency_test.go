@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SHREYANSHSINGH14/raft/db"
-	"github.com/SHREYANSHSINGH14/raft/raft"
-	"github.com/SHREYANSHSINGH14/raft/types"
+	"github.com/SHREYANSHSINGH14/raft"
+	"github.com/SHREYANSHSINGH14/raft/example/db"
+	"github.com/SHREYANSHSINGH14/raft/example/types"
 	"github.com/stretchr/testify/assert"
 )
 
