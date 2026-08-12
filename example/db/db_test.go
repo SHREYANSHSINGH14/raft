@@ -81,6 +81,45 @@ func TestCurrentTerm_KeyNotPresent(t *testing.T) {
 	assert.Equal(t, uint(0), term, "expected: %d, actual: %d", uint(5), term)
 }
 
+func TestLastApplied_GetValidResponse(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	err := store.SetLastApplied(ctx, 7)
+	assert.NoError(t, err, "error setting last applied")
+
+	idx, err := store.GetLastApplied(ctx)
+	assert.NoError(t, err, "error getting last applied")
+
+	assert.Equal(t, uint(7), idx, "expected: %d, actual: %d", uint(7), idx)
+}
+
+// Unlike GetCurrentTerm/GetVotedFor, a missing key here is not an error: nothing
+// applied yet is a fact. startApplyLoop treats any error from GetLastApplied as
+// fatal and returns, so a sentinel would stop a fresh node applying anything.
+func TestLastApplied_KeyNotPresent(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	idx, err := store.GetLastApplied(ctx)
+	assert.NoError(t, err, "missing last applied key should not be an error")
+
+	assert.Equal(t, uint(0), idx, "expected: %d, actual: %d", uint(0), idx)
+}
+
+func TestLastApplied_Overwrite(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	assert.NoError(t, store.SetLastApplied(ctx, 3))
+	assert.NoError(t, store.SetLastApplied(ctx, 9))
+
+	idx, err := store.GetLastApplied(ctx)
+	assert.NoError(t, err, "error getting last applied")
+
+	assert.Equal(t, uint(9), idx, "expected: %d, actual: %d", uint(9), idx)
+}
+
 func TestAppendLogs_ThenGetLogs(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()

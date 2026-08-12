@@ -291,7 +291,7 @@ func (m *MockKVStore) AppendLogs(_ context.Context, logs []raft.LogEntry) error 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, l := range logs {
-		val, err := proto.Marshal(toProto(l))
+		val, err := proto.Marshal(types.LogEntryFromRaft(l))
 		if err != nil {
 			return err
 		}
@@ -373,5 +373,5 @@ func (m *MockKVStore) unmarshalEntry(key []byte) (raft.LogEntry, error) {
 	if err := proto.Unmarshal(v, &entry); err != nil {
 		return raft.LogEntry{}, err
 	}
-	return fromProto(&entry), nil
+	return types.LogEntryToRaft(&entry), nil
 }

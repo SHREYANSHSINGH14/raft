@@ -21,6 +21,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RaftRpc_RequestVote_FullMethodName   = "/raft.rpc.RaftRpc/RequestVote"
 	RaftRpc_AppendEntries_FullMethodName = "/raft.rpc.RaftRpc/AppendEntries"
+	RaftRpc_PreVote_FullMethodName       = "/raft.rpc.RaftRpc/PreVote"
+	RaftRpc_TimeoutNow_FullMethodName    = "/raft.rpc.RaftRpc/TimeoutNow"
 	RaftRpc_WriteLog_FullMethodName      = "/raft.rpc.RaftRpc/WriteLog"
 	RaftRpc_ReadLog_FullMethodName       = "/raft.rpc.RaftRpc/ReadLog"
 )
@@ -41,6 +43,18 @@ type RaftRpcClient interface {
 	// AppendEntries is called by the leader to replicate log entries to followers.
 	// Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
 	AppendEntries(ctx context.Context, in *AppendEntriesArgs, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// PreVote is the probe a candidate sends before entering a new term. It asks
+	// "would you vote for me if I ran?" without the responder persisting anything —
+	// no term bump, no vote spent, no election timer reset. That is what stops a
+	// partitioned node from deposing a healthy leader when it rejoins.
+	//
+	// It is a separate RPC from RequestVote precisely so the receiving side cannot
+	// accidentally take RequestVote's side effects. Do not merge them.
+	PreVote(ctx context.Context, in *PreVoteArgs, opts ...grpc.CallOption) (*PreVoteResponse, error)
+	// TimeoutNow is the leadership-transfer RPC. The leader sends it to a peer it
+	// has chosen as successor, once that peer's log has caught up, telling it to
+	// campaign immediately rather than wait out its election timer.
+	TimeoutNow(ctx context.Context, in *TimeoutNowArgs, opts ...grpc.CallOption) (*TimeoutNowResponse, error)
 	// WriteLog is called by clients to submit new commands to the cluster.
 	// Only the leader can accept writes. If the receiving node is not the leader,
 	// it returns the current leader's ID so the client can redirect.
@@ -75,6 +89,26 @@ func (c *raftRpcClient) AppendEntries(ctx context.Context, in *AppendEntriesArgs
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AppendEntriesResponse)
 	err := c.cc.Invoke(ctx, RaftRpc_AppendEntries_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *raftRpcClient) PreVote(ctx context.Context, in *PreVoteArgs, opts ...grpc.CallOption) (*PreVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreVoteResponse)
+	err := c.cc.Invoke(ctx, RaftRpc_PreVote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *raftRpcClient) TimeoutNow(ctx context.Context, in *TimeoutNowArgs, opts ...grpc.CallOption) (*TimeoutNowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TimeoutNowResponse)
+	err := c.cc.Invoke(ctx, RaftRpc_TimeoutNow_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +151,18 @@ type RaftRpcServer interface {
 	// AppendEntries is called by the leader to replicate log entries to followers.
 	// Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
 	AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResponse, error)
+	// PreVote is the probe a candidate sends before entering a new term. It asks
+	// "would you vote for me if I ran?" without the responder persisting anything —
+	// no term bump, no vote spent, no election timer reset. That is what stops a
+	// partitioned node from deposing a healthy leader when it rejoins.
+	//
+	// It is a separate RPC from RequestVote precisely so the receiving side cannot
+	// accidentally take RequestVote's side effects. Do not merge them.
+	PreVote(context.Context, *PreVoteArgs) (*PreVoteResponse, error)
+	// TimeoutNow is the leadership-transfer RPC. The leader sends it to a peer it
+	// has chosen as successor, once that peer's log has caught up, telling it to
+	// campaign immediately rather than wait out its election timer.
+	TimeoutNow(context.Context, *TimeoutNowArgs) (*TimeoutNowResponse, error)
 	// WriteLog is called by clients to submit new commands to the cluster.
 	// Only the leader can accept writes. If the receiving node is not the leader,
 	// it returns the current leader's ID so the client can redirect.
@@ -142,6 +188,12 @@ func (UnimplementedRaftRpcServer) RequestVote(context.Context, *RequestVoteArgs)
 }
 func (UnimplementedRaftRpcServer) AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftRpcServer) PreVote(context.Context, *PreVoteArgs) (*PreVoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreVote not implemented")
+}
+func (UnimplementedRaftRpcServer) TimeoutNow(context.Context, *TimeoutNowArgs) (*TimeoutNowResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TimeoutNow not implemented")
 }
 func (UnimplementedRaftRpcServer) WriteLog(context.Context, *WriteLogRequest) (*WriteLogResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteLog not implemented")
@@ -206,6 +258,42 @@ func _RaftRpc_AppendEntries_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftRpc_PreVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreVoteArgs)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftRpcServer).PreVote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftRpc_PreVote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftRpcServer).PreVote(ctx, req.(*PreVoteArgs))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RaftRpc_TimeoutNow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TimeoutNowArgs)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftRpcServer).TimeoutNow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftRpc_TimeoutNow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftRpcServer).TimeoutNow(ctx, req.(*TimeoutNowArgs))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RaftRpc_WriteLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(WriteLogRequest)
 	if err := dec(in); err != nil {
@@ -256,6 +344,14 @@ var RaftRpc_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendEntries",
 			Handler:    _RaftRpc_AppendEntries_Handler,
+		},
+		{
+			MethodName: "PreVote",
+			Handler:    _RaftRpc_PreVote_Handler,
+		},
+		{
+			MethodName: "TimeoutNow",
+			Handler:    _RaftRpc_TimeoutNow_Handler,
 		},
 		{
 			MethodName: "WriteLog",

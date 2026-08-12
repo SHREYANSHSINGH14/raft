@@ -168,21 +168,12 @@ func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args r
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	entries := make([]*types.LogEntry, len(args.Entries))
-	for i, e := range args.Entries {
-		entries[i] = &types.LogEntry{
-			Index: e.Index,
-			Term:  e.Term,
-			Data:  e.Data,
-		}
-	}
-
 	resp, err := client.AppendEntries(ctx, &types.AppendEntriesArgs{
 		Term:         args.Term,
 		LeaderId:     args.LeaderID,
 		PrevLogIndex: args.PrevLogIndex,
 		PrevLogTerm:  args.PrevLogTerm,
-		Entries:      entries,
+		Entries:      types.LogEntriesFromRaft(args.Entries),
 		LeaderCommit: args.LeaderCommit,
 	})
 	if err != nil {
@@ -194,17 +185,48 @@ func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args r
 	}, nil
 }
 
-// PreVote is a stub, for the same reason as InstallSnapshot below: proto/rpc.proto
-// has no PreVote RPC yet, so types.RaftRpcClient can't send one. Wire the client
-// call once the proto exists — the receiving side (Node.HandlePreVote) is done.
 func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.PreVoteArgs) (raft.PreVoteResponse, error) {
-	return raft.PreVoteResponse{}, fmt.Errorf("PreVote not implemented")
+	client, ok := t.clients[peerID]
+	if !ok {
+		return raft.PreVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
+	}
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+
+	resp, err := client.PreVote(ctx, &types.PreVoteArgs{
+		Term:         args.Term,
+		CandidateId:  args.CandidateID,
+		LastLogIndex: args.LastLogIndex,
+		LastLogTerm:  args.LastLogTerm,
+	})
+	if err != nil {
+		return raft.PreVoteResponse{}, err
+	}
+	return raft.PreVoteResponse{
+		Term:        resp.Term,
+		VoteGranted: resp.VoteGranted,
+	}, nil
 }
 
-// TimeoutNow is a stub for the same reason as PreVote above: proto/rpc.proto has
-// no TimeoutNow RPC yet. The receiving side (Node.HandleTimeoutNow) is done.
 func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft.TimeoutNowArgs) (raft.TimeoutNowResponse, error) {
-	return raft.TimeoutNowResponse{}, fmt.Errorf("TimeoutNow not implemented")
+	client, ok := t.clients[peerID]
+	if !ok {
+		return raft.TimeoutNowResponse{}, fmt.Errorf("unknown peer: %s", peerID)
+	}
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+
+	resp, err := client.TimeoutNow(ctx, &types.TimeoutNowArgs{
+		Term:     args.Term,
+		LeaderId: args.LeaderID,
+	})
+	if err != nil {
+		return raft.TimeoutNowResponse{}, err
+	}
+	return raft.TimeoutNowResponse{
+		Term:    resp.Term,
+		Success: resp.Success,
+	}, nil
 }
 
 // InstallSnapshot is a stub: proto/rpc.proto has no InstallSnapshot RPC yet, so
