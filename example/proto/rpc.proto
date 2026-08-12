@@ -24,6 +24,20 @@ service RaftRpc {
     // Also serves as a heartbeat when entries is empty — resets the follower's election timeout.
     rpc AppendEntries (AppendEntriesArgs) returns (AppendEntriesResponse);
 
+    // PreVote is the probe a candidate sends before entering a new term. It asks
+    // "would you vote for me if I ran?" without the responder persisting anything —
+    // no term bump, no vote spent, no election timer reset. That is what stops a
+    // partitioned node from deposing a healthy leader when it rejoins.
+    //
+    // It is a separate RPC from RequestVote precisely so the receiving side cannot
+    // accidentally take RequestVote's side effects. Do not merge them.
+    rpc PreVote (PreVoteArgs) returns (PreVoteResponse);
+
+    // TimeoutNow is the leadership-transfer RPC. The leader sends it to a peer it
+    // has chosen as successor, once that peer's log has caught up, telling it to
+    // campaign immediately rather than wait out its election timer.
+    rpc TimeoutNow (TimeoutNowArgs) returns (TimeoutNowResponse);
+
     // WriteLog is called by clients to submit new commands to the cluster.
     // Only the leader can accept writes. If the receiving node is not the leader,
     // it returns the current leader's ID so the client can redirect.
@@ -69,6 +83,40 @@ message AppendEntriesArgs {
 message AppendEntriesResponse {
     uint64 term    = 1; // receiver's current term (leader steps down if stale)
     bool   success = 2; // true if the follower's log matched prev_log_index and prev_log_term
+}
+
+// PreVoteArgs is sent by a would-be candidate to probe whether an election would
+// succeed. It carries exactly what RequestVoteArgs carries, but term is the term
+// the candidate *would* run in (currentTerm + 1) — a hypothetical, not a term the
+// candidate has entered. Nobody persists it.
+message PreVoteArgs {
+    uint64 term           = 1; // the term the candidate would run in (currentTerm + 1)
+    string candidate_id   = 2; // ID of the probing candidate
+    uint64 last_log_index = 3; // index of the candidate's last log entry (for log up-to-date check)
+    uint64 last_log_term  = 4; // term of the candidate's last log entry (for log up-to-date check)
+}
+
+// PreVoteResponse is the reply to a PreVote RPC. It mirrors RequestVoteResponse,
+// but term is the responder's view of the term the vote was judged against, which
+// is not always the responder's own currentTerm. A higher term here ends the
+// candidate's round but is never adopted — a probe reply is not authority to move.
+message PreVoteResponse {
+    uint64 term         = 1; // term the pre-vote was judged against
+    bool   vote_granted = 2; // true if the responder would grant a real vote
+}
+
+// TimeoutNowArgs is sent by a leader to the peer it has chosen as successor.
+message TimeoutNowArgs {
+    uint64 term      = 1; // leader's current term
+    string leader_id = 2; // sender's ID, so the recipient can refuse a transfer from a non-leader
+}
+
+// TimeoutNowResponse reports whether the recipient accepted the transfer and will
+// campaign. success is false when it declined (stale term, wrong sender, already
+// leader) — the transfer failed and the leader keeps leadership.
+message TimeoutNowResponse {
+    uint64 term    = 1; // recipient's current term
+    bool   success = 2; // true if the recipient will campaign
 }
 
 // ─────────────────────────────────────────────

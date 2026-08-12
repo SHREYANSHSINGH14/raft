@@ -36,25 +36,49 @@ func NewStore(ctx context.Context, dirPath string) (*Store, error) {
 
 var _ raft.Storage = &Store{}
 
-func toProto(e raft.LogEntry) *types.LogEntry {
-	return &types.LogEntry{
-		Index: e.Index,
-		Term:  e.Term,
-		Data:  e.Data,
-	}
-}
-
-func fromProto(p *types.LogEntry) raft.LogEntry {
-	return raft.LogEntry{
-		Index: p.Index,
-		Term:  p.Term,
-		Data:  p.Data,
-	}
-}
-
 // LastApplied
-func (s *Store) SetLastApplied(_ context.Context, _ uint) error { return nil }
-func (s *Store) GetLastApplied(_ context.Context) (uint, error) { return 0, nil }
+//
+// Durability note: applyEntries calls sm.Apply *before* SetLastApplied, so a crash
+// between the two re-applies those entries on restart rather than skipping them.
+// That is the safe direction, and it is why this needs no shared batch with the
+// state machine — but it does mean StateMachine.Apply must genuinely be idempotent.
+func (s *Store) SetLastApplied(ctx context.Context, idx uint) error {
+	key := []byte(LastAppliedKey)
+	val := uintToBytes(idx)
+
+	err := s.db.Set(key, val, pebble.Sync)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while setting last applied")
+		return err
+	}
+	return nil
+}
+
+// GetLastApplied returns 0 (not ErrNotFound) on a fresh store: nothing has been
+// applied yet, which is a fact, not a failure. Both callers treat any error as
+// fatal — startApplyLoop kills the apply loop on one, so returning a sentinel
+// here would stop a brand-new node from ever applying anything.
+func (s *Store) GetLastApplied(ctx context.Context) (uint, error) {
+	key := []byte(LastAppliedKey)
+
+	data, closer, err := s.db.Get(key)
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return 0, nil
+		}
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while getting last applied")
+		return 0, err
+	}
+	defer closer.Close()
+
+	val, err := bytesToUint(data)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while converting byte data to uint")
+		return 0, err
+	}
+
+	return val, nil
+}
 
 // Current Term
 func (s *Store) SetCurrentTerm(ctx context.Context, term uint) error {
@@ -218,7 +242,7 @@ func (s *Store) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) {
 		return raft.LogEntry{}, err
 	}
 
-	return fromProto(&log), nil
+	return types.LogEntryToRaft(&log), nil
 }
 
 func (s *Store) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
@@ -245,7 +269,7 @@ func (s *Store) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
 		return raft.LogEntry{}, err
 	}
 
-	return fromProto(&log), nil
+	return types.LogEntryToRaft(&log), nil
 }
 
 // Note: we leave the entry.Index and index key check to business logic
@@ -255,7 +279,7 @@ func (s *Store) AppendLogs(ctx context.Context, logs []raft.LogEntry) error {
 
 	for i := range logs {
 		key := logKey(uint64(logs[i].Index))
-		val, err := proto.Marshal(toProto(logs[i]))
+		val, err := proto.Marshal(types.LogEntryFromRaft(logs[i]))
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("error marshaling")
 			return err
@@ -303,7 +327,7 @@ func (s *Store) GetLogs(ctx context.Context, startIdx, endIdx *uint) ([]raft.Log
 			return nil, err
 		}
 
-		logs = append(logs, fromProto(&log))
+		logs = append(logs, types.LogEntryToRaft(&log))
 	}
 
 	return logs, nil
@@ -334,7 +358,7 @@ func (s *Store) GetLogByIndex(ctx context.Context, idx uint) (raft.LogEntry, err
 		return raft.LogEntry{}, err
 	}
 
-	return fromProto(&log), nil
+	return types.LogEntryToRaft(&log), nil
 }
 
 // Since in this KV pebble DB we cannot put secondary index on term
@@ -366,7 +390,7 @@ func (s *Store) GetLogsByTerm(ctx context.Context, term uint) ([]raft.LogEntry, 
 		}
 
 		if log.Term == uint64(term) {
-			logs = append(logs, fromProto(&log))
+			logs = append(logs, types.LogEntryToRaft(&log))
 		}
 	}
 
