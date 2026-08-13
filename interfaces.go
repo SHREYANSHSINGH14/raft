@@ -26,6 +26,17 @@ type Transport interface {
 type StateMachine interface {
 	// Implementation has to be idempotent and durable otherwise it can diverge
 	// lastApplied index
+	//
+	// The returned error means "this replica is broken", not "the command was
+	// rejected". A command the state machine evaluated and refused — a compare-and-
+	// swap that did not match, a delete on a missing key — is a result every replica
+	// computes identically, so it must be reported through the state machine's own
+	// channels with a nil error here. Returning an error for it stops the apply loop
+	// and trips Fatal on this node alone, which is divergence, not rejection.
+	//
+	// Reserve the error for local faults the other replicas will not hit: a failed
+	// disk write, corruption, a store that will not answer. Those stop the loop
+	// permanently — see Fatal for what the caller is expected to do about it.
 	Apply(ctx context.Context, entries []LogEntry) error
 	Snapshot(ctx context.Context) (Snapshot, error)
 	Restore(ctx context.Context, snapshot io.ReadCloser) error

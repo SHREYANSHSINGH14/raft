@@ -121,6 +121,53 @@ func (n *Node) IsLeader() bool {
 	return n.Role == ServerRole_Leader
 }
 
+// Fatal returns a channel that is closed when this node can no longer keep its
+// state machine in step with the log — a failed Apply, or a store that cannot be
+// read at startup. Committed entries cannot be retracted and Raft never
+// re-delivers an entry it has already handed to Apply, so once this fires the
+// local state machine is behind the log for good and will not catch up on its own.
+//
+// The library does not act on this beyond stopping the apply loop, because the
+// useful responses are all the caller's to choose: cancel the context passed to
+// Start and take the node down, alert an operator, or wipe the state machine and
+// let the leader rebuild it through InstallSnapshot. What the caller must not do
+// is ignore it. Everything else here keeps running — the node still answers
+// AppendEntries, still grants votes, and can still win an election — so an
+// unwatched Fatal is a node serving reads from a state machine frozen in the past.
+//
+// Note the log itself is fine. Only the state machine is stuck, so this node
+// remains a valid log replica and continues to count toward quorum. Callers that
+// want to keep that fault tolerance can stop serving reads and leave the node
+// running; callers that want the simple thing cancel the context.
+//
+// Use FatalErr for the cause. Reading a closed channel never blocks, so this is
+// safe to select on alongside ctx.Done().
+func (n *Node) Fatal() <-chan struct{} {
+	return n.fatalCh
+}
+
+// FatalErr returns the failure that closed Fatal, or nil if it has not fired.
+func (n *Node) FatalErr() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.fatalErr
+}
+
+// setFatal records err and closes fatalCh, once. Callers must not hold mu.
+//
+// The error is stored before the close so that any goroutine woken by the close
+// is guaranteed to see it — the close is what publishes the write.
+func (n *Node) setFatal(ctx context.Context, err error) {
+	n.fatalOnce.Do(func() {
+		n.mu.Lock()
+		n.fatalErr = err
+		n.mu.Unlock()
+
+		close(n.fatalCh)
+		zerolog.Ctx(ctx).Error().Err(err).Msg("fatal: state machine can no longer follow the log, node must stop serving reads")
+	})
+}
+
 // =============================================================================
 // 3. Cluster configuration — reading
 //

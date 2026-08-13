@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/rs/zerolog"
@@ -32,6 +33,13 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 		lastApplied, err := n.store.GetLastApplied(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop db error: error getting lastapplied")
+			// Fatal, and the worst kind: the loop never starts at all, so this node
+			// would apply nothing for its entire life while looking healthy from the
+			// outside. Unless we are simply shutting down, in which case the error is
+			// just the cancelled context on its way out.
+			if ctx.Err() == nil {
+				n.setFatal(ctx, fmt.Errorf("apply loop could not start: reading last applied: %w", err))
+			}
 			return
 		}
 
@@ -60,6 +68,13 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 
 			if err := n.applyEntries(ctx, lastApplied, commitIdx); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop error")
+				// The entries up to commitIdx are committed and cannot be taken back, and
+				// nothing will hand them to Apply again, so giving up here leaves the state
+				// machine permanently short of the log. Tell the caller before we go — see
+				// Fatal. A cancelled context is ordinary shutdown, not that.
+				if ctx.Err() == nil {
+					n.setFatal(ctx, fmt.Errorf("applying entries up to %d: %w", commitIdx, err))
+				}
 				return
 			}
 

@@ -22,6 +22,12 @@ If I sat down right now, what would I need to know?
   not restore the state machine.
 - **`HandleInstallSnapshot` reordered** so nothing destructive happens before the new snapshot is
   durable, and `ErrNoSnapshot` distinguishes "no snapshot" from "cannot read the snapshot directory".
+- **`Node.Fatal()` / `Node.FatalErr()`** report that the apply loop has stopped for good. The loop used
+  to log and return, and nothing else noticed — `commitCh` is a non-blocking send, so the node kept
+  replicating, kept voting, and could still win an election with a state machine frozen at the entry it
+  choked on. Committed entries can't be retracted and Raft never re-delivers to `Apply`, so that state
+  is permanent. Both fatal exits now close the channel; the two `ctx` exits stay silent, guarded by
+  `ctx.Err() == nil` so a clean shutdown isn't reported as a fault.
 
 The enum was deliberately *not* renumbered and not split into internal/user categories — the explicit
 mapping plus the apply filter get the same result without touching the library's public API.
@@ -112,6 +118,20 @@ split earns itself. Cluster-level needs an open-loop generator or the tail laten
   such a waiter gets `ErrLeadershipLost`.
 - **`Future.errCh`** — allocated on every `Propose`, never sent on, so that `Wait` case is unreachable.
   Wire it or delete it.
+- **Nothing in the library reacts to `Fatal` — deliberate.** The obvious reactions (step down, refuse to
+  campaign, reject `TimeoutNow`, stop serving reads) are all reachable by the caller cancelling the
+  context it passed to `Start`, so the library would only be picking one policy on the caller's behalf.
+  The finer policy worth knowing about but not built: a node with a stuck state machine still has a
+  correct, durable log, so it remains a valid log replica and can keep counting toward quorum. Keeping
+  it alive and only refusing reads and leadership preserves fault tolerance that a full stop throws
+  away — the cost is a sticky in-memory flag checked in `election()` and `HandleTimeoutNow`, which is
+  the one campaign path that bypasses the election timer. In-memory, not persisted: `SetLastApplied`
+  never ran, so a restart replays the failed entry and a transient fault should not survive it.
+- **`Apply` cannot return per-entry results.** Fine for `Set`/`Delete`; blocking for compare-and-swap or
+  create-if-absent, where the answer only exists at the instant `Apply` ran and a later read is a
+  different point in time. Either `Apply` returns `[]any` routed to each entry's `Future`
+  (hashicorp's shape, breaking change) or the state machine stashes results by log index for the
+  handler to drain after `Wait`. Cheap now with one mock implementation, expensive later.
 
 ## Open questions
 

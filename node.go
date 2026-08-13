@@ -65,6 +65,18 @@ type Node struct {
 	// signalCommit's comment.
 	commitCh chan struct{}
 
+	// fatalCh is closed exactly once, by setFatal, when this node has hit a local
+	// failure that leaves its state machine permanently behind the log. fatalErr
+	// holds the cause and is guarded by mu.
+	//
+	// Closed rather than sent on, so every waiter sees it and a caller that arrives
+	// late still does — the same reason context.Done() is a closed channel. The
+	// library takes no action of its own beyond stopping the apply loop; deciding
+	// what a broken replica should do is the caller's, and Fatal documents why.
+	fatalCh   chan struct{}
+	fatalOnce sync.Once
+	fatalErr  error
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -151,6 +163,7 @@ func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) 
 	node.catchingUpIdx.Store(DefaultCatchingUpIdx)
 
 	node.commitCh = make(chan struct{}, 1)
+	node.fatalCh = make(chan struct{})
 
 	// Seed both configuration views from the caller-supplied bootstrap peers at
 	// index 0. Until the first config entry is appended, latest == committed.

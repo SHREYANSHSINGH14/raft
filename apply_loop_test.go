@@ -426,3 +426,77 @@ func TestSetCommitIndex_LowerIndex_IgnoredAndReleasesLock(t *testing.T) {
 		t.Fatal("commitMu was leaked by the early return in SetCommitIndex")
 	}
 }
+
+// ── Fatal ─────────────────────────────────────────────────────────────────────
+
+// awaitFatal blocks until the node reports a fatal failure, failing the test if
+// it does not arrive.
+func awaitFatal(t *testing.T, node *Node) error {
+	t.Helper()
+	select {
+	case <-node.Fatal():
+		return node.FatalErr()
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for Fatal")
+		return nil
+	}
+}
+
+// A failed Apply leaves the state machine permanently behind a log that cannot be
+// retracted, so the caller has to be told — the apply goroutine exiting quietly is
+// exactly the silent-divergence case Fatal exists to prevent.
+func TestApplyLoop_ApplyFails_ReportsFatal(t *testing.T) {
+	store := new(MockStorage)
+	sm := new(MockStateMachine)
+	node := NewNodeMock(store, sm)
+
+	start, end := uint(1), uint(4)
+	entries := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
+	sm.On(methodApply, mock.Anything, entries).Return(errors.New("apply error"))
+
+	node.startApplyLoop(context.Background())
+	node.SetCommitIndex(3)
+
+	err := awaitFatal(t, node)
+	assert.ErrorContains(t, err, "apply error", "the cause must survive to the caller")
+	assert.ErrorContains(t, err, "3", "the commit index we could not reach is the useful detail")
+}
+
+// The startup read is the worse failure of the two: the loop never runs at all, so
+// without Fatal the node applies nothing for its whole life while looking healthy.
+func TestApplyLoop_GetLastAppliedFails_ReportsFatal(t *testing.T) {
+	store := new(MockStorage)
+	sm := new(MockStateMachine)
+	node := NewNodeMock(store, sm)
+
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), errors.New("db error"))
+
+	node.startApplyLoop(context.Background())
+
+	err := awaitFatal(t, node)
+	assert.ErrorContains(t, err, "db error")
+}
+
+// Shutdown is not a failure. If a cancelled context tripped Fatal, every clean stop
+// would look like a broken replica and callers would learn to ignore the signal.
+func TestApplyLoop_ContextCancelled_DoesNotReportFatal(t *testing.T) {
+	store := new(MockStorage)
+	sm := new(MockStateMachine)
+	node := NewNodeMock(store, sm)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
+
+	node.startApplyLoop(ctx)
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case <-node.Fatal():
+		t.Fatalf("clean shutdown reported as fatal: %v", node.FatalErr())
+	default:
+	}
+	assert.NoError(t, node.FatalErr())
+}

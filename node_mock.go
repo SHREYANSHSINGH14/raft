@@ -78,5 +78,8 @@ func NewNodeMock(store Storage, sm StateMachine) *Node {
 	// Same buffer as NewNode. A nil commitCh would make every wake-up a send to a
 	// nil channel, which blocks forever.
 	node.commitCh = make(chan struct{}, 1)
+	// Unbuffered and never written to except by close, same as NewNode. A nil
+	// fatalCh would make Fatal() block forever instead of simply never firing.
+	node.fatalCh = make(chan struct{})
 	return node
 }
