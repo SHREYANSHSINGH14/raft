@@ -2,7 +2,9 @@ package raft
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -202,6 +204,12 @@ func (n *Node) Start(ctx context.Context) {
 		}
 	}
 
+	err = n.restore(n.ctx)
+	if err != nil {
+		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error restoring state machine from snapshot")
+		return
+	}
+
 	zerolog.Ctx(n.ctx).Debug().Msg("Waiting for peers to be up")
 	n.waitForQuorum(n.ctx)
 
@@ -217,4 +225,171 @@ func (n *Node) Stop() {
 	if n.cancel != nil {
 		n.cancel()
 	}
+}
+
+// restore rebuilds the state that is derived from disk but not itself persisted:
+// commitIndex, the snapshot boundary, and the two configuration views.
+//
+// It deliberately does NOT restore the state machine in the normal case. This
+// library assumes a durable state machine, so its state is already on disk — not
+// only everything below the snapshot index, but every entry appended after it and
+// applied since, because applyEntries calls Apply before SetLastApplied and the
+// store keeps both. Calling sm.Restore here would roll the state machine back to
+// the snapshot index while the apply loop resumed from lastApplied, silently
+// dropping everything applied since the last snapshot.
+//
+// The one exception is an interrupted InstallSnapshot — see below.
+func (n *Node) restore(ctx context.Context) error {
+	lastApplied, err := n.store.GetLastApplied(ctx)
+	if err != nil {
+		return err
+	}
+
+	dir, meta, err := n.readLatestSnapshotMeta(ctx)
+	if err != nil {
+		return err
+	}
+
+	if dir != "" {
+		if err := n.seedConfigurationFromSnapshot(ctx, meta); err != nil {
+			return err
+		}
+		n.SetSnapshotLatest(meta.Index, meta.Term)
+
+		// lastApplied is normally >= the snapshot index, because our own snapshots
+		// are taken at the applied index. Lower means a leader-pushed
+		// InstallSnapshot was interrupted: it writes the snapshot to disk before
+		// calling sm.Restore and SetLastApplied, so a crash anywhere in that window
+		// leaves a snapshot the state machine may never have taken.
+		//
+		// It does not matter where in that window it died. Restore is a wholesale
+		// replace, so re-running it when the state machine is already at meta.Index
+		// changes nothing; the crash point stops being a case to distinguish.
+		if meta.Index > lastApplied {
+			zerolog.Ctx(ctx).Warn().Msgf(
+				"snapshot at index %d is ahead of lastApplied %d; finishing interrupted install",
+				meta.Index, lastApplied)
+			if err := n.installSnapshotFromDisk(ctx, dir, meta); err != nil {
+				return err
+			}
+			lastApplied = meta.Index
+		}
+	}
+
+	// Only committed entries are ever applied, so lastApplied is a safe lower bound
+	// for commitIndex. The real value may have been higher when we crashed; the
+	// leader's next AppendEntries carries it, and SetCommitIndex ignores decreases.
+	n.SetCommitIndex(lastApplied)
+
+	return n.replayConfigurations(ctx, meta.Index, lastApplied)
+}
+
+// readLatestSnapshotMeta decodes meta.json from the newest snapshot directory.
+// Having no snapshot is the ordinary case, not an error, and returns "".
+func (n *Node) readLatestSnapshotMeta(ctx context.Context) (string, SnapshotMeta, error) {
+	latestDir, err := getLatestSnapshotDir(n.cfg.SnapshotDir)
+	if errors.Is(err, ErrNoSnapshot) {
+		// Also the state of every node in an embedding that configures no
+		// SnapshotDir. Start aborts on an error, so returning one here would stop
+		// the node booting.
+		zerolog.Ctx(ctx).Debug().Msg("no snapshot to restore from")
+		return "", SnapshotMeta{}, nil
+	}
+	if err != nil {
+		return "", SnapshotMeta{}, err
+	}
+
+	metaFile, err := os.Open(n.cfg.SnapshotDir + "/" + latestDir + "/" + MetaFileName)
+	if err != nil {
+		return "", SnapshotMeta{}, err
+	}
+	defer metaFile.Close()
+
+	var meta SnapshotMeta
+	if err := json.NewDecoder(metaFile).Decode(&meta); err != nil {
+		return "", SnapshotMeta{}, err
+	}
+	return latestDir, meta, nil
+}
+
+// seedConfigurationFromSnapshot sets both configuration views to the membership
+// the snapshot captured. replayConfigurations then applies whatever the log holds
+// above it.
+func (n *Node) seedConfigurationFromSnapshot(ctx context.Context, meta SnapshotMeta) error {
+	members := make(map[string]Peer, len(meta.MemberConfig))
+	for id, state := range meta.MemberConfig {
+		members[id] = Peer{
+			PeerState: state,
+		}
+	}
+	n.setLatestConfiguration(members, uint64(meta.Index))
+	n.setCommittedConfiguration(members, uint64(meta.Index))
+
+	lastIndex, err := n.store.GetLastLogIndex(ctx)
+	if err != nil {
+		return err
+	}
+	if lastIndex < meta.Index {
+		// The log is missing entries the snapshot says were committed — we crashed
+		// after snapshotting but before compacting. DeleteLogs is idempotent, so
+		// drop everything up to the snapshot index.
+		if err := n.store.DeleteLogs(ctx, 0, meta.Index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installSnapshotFromDisk finishes an InstallSnapshot that crashed partway. No
+// lock is taken because restore runs before startApplyLoop, so nothing else is
+// touching the state machine yet.
+func (n *Node) installSnapshotFromDisk(ctx context.Context, dir string, meta SnapshotMeta) error {
+	snapshotFile, err := os.Open(n.cfg.SnapshotDir + "/" + dir + "/" + SnapshotFileName)
+	if err != nil {
+		return err
+	}
+	defer snapshotFile.Close()
+
+	if err := n.sm.Restore(ctx, snapshotFile); err != nil {
+		return err
+	}
+	return n.store.SetLastApplied(ctx, meta.Index)
+}
+
+// replayConfigurations walks the log above the snapshot index and re-applies every
+// configuration entry in order, reproducing the latest/committed split the node
+// held before it restarted.
+//
+// This is the only way membership survives a restart: cfg.Peers is a bootstrap
+// seed and configurations lives in memory, so without the replay a node that
+// restarts after an AddMember reverts to the seed and operates on a cluster that
+// no longer exists.
+//
+// advanceCommittedConfiguration runs after each entry rather than once at the end.
+// Once at the end would only ever consider the final config entry, so a committed
+// change followed by an uncommitted one would strand committed at the snapshot's
+// view instead of at the committed change.
+func (n *Node) replayConfigurations(ctx context.Context, snapshotIdx, commitIndex uint) error {
+	start := snapshotIdx + 1
+	logs, err := n.store.GetLogs(ctx, &start, nil)
+	if err != nil {
+		return err
+	}
+
+	replayed := 0
+	for _, entry := range logs {
+		if entry.Type != EntryType_Config {
+			continue
+		}
+		if err := n.processConfigurationLogEntry(entry); err != nil {
+			return err
+		}
+		n.advanceCommittedConfiguration(uint64(commitIndex))
+		replayed++
+	}
+
+	if replayed > 0 {
+		zerolog.Ctx(ctx).Debug().Msgf("replayed %d configuration entries above index %d", replayed, snapshotIdx)
+	}
+	return nil
 }

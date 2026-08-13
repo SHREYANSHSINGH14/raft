@@ -249,9 +249,24 @@ func getLatestSnapshotIndex(dirs []os.DirEntry) (uint, error) {
 	return maxIdx, nil
 }
 
-func (n *Node) getLatestSnapshotDir() (string, error) {
-	snapShotDirEntries, err := os.ReadDir(n.cfg.SnapshotDir)
+// getLatestSnapshotDir returns the name of the snapshot directory with the
+// highest last-included index.
+//
+// "There is no snapshot" is reported as ErrNoSnapshot rather than a generic
+// error, because the two callers want opposite things from it: callInstallSnapshot
+// cannot ship a snapshot that does not exist and should fail, while startup
+// recovery must treat it as the ordinary state of a node that has never
+// snapshotted. A directory that exists but cannot be read is a real error to both.
+func getLatestSnapshotDir(snapshotDir string) (string, error) {
+	if snapshotDir == "" {
+		return "", ErrNoSnapshot
+	}
+
+	snapShotDirEntries, err := os.ReadDir(snapshotDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrNoSnapshot
+		}
 		return "", fmt.Errorf("getLatestSnapshotDir: reading snapshot directory: %w", err)
 	}
 	var latestSnapshotDir string
@@ -270,7 +285,7 @@ func (n *Node) getLatestSnapshotDir() (string, error) {
 		}
 	}
 	if latestSnapshotDir == "" {
-		return "", fmt.Errorf("getLatestSnapshotDir: no snapshot directory found")
+		return "", ErrNoSnapshot
 	}
 	return latestSnapshotDir, nil
 }
@@ -349,7 +364,7 @@ func writeFileSynced(path string, write func(*os.File) error) error {
 }
 
 func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *InstallSnapshotResponse, snapshotMeta SnapshotMeta, err error) {
-	latestSnapshotDir, err := n.getLatestSnapshotDir()
+	latestSnapshotDir, err := getLatestSnapshotDir(n.cfg.SnapshotDir)
 	if err != nil {
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
 	}

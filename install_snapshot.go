@@ -66,34 +66,20 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			n.SetLeaderID(req.LeaderID)
 			success = true
 			return
-		} else {
-			for _, dir := range dirs {
-				if !dir.IsDir() {
-					continue
-				}
-				err = os.RemoveAll(dir.Name())
-				if err != nil {
-					zerolog.Ctx(ctx).Error().Err(err).Msgf("install snapshot: error deleting %s", dir.Name())
-					return
-				}
-			}
-
-			var lastIndex uint
-			lastIndex, err = n.store.GetLastLogIndex(ctx)
-			if err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting lastIndex")
-				return
-			}
-
-			if lastIndex > 0 {
-				err = n.store.DeleteLogs(ctx, 0, lastIndex)
-				if err != nil {
-					zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
-					return
-				}
-			}
 		}
 	}
+
+	// NOTHING DESTRUCTIVE MAY HAPPEN ABOVE THIS POINT.
+	//
+	// Deleting the old snapshots and truncating the log used to run here, before
+	// the new snapshot was written. A crash in that window left the node with no
+	// snapshot, no log, and a lastApplied pointing at state nothing on disk could
+	// account for — and nothing to signal that an install had been interrupted.
+	//
+	// writeSnapshotToDisk renames a fully-synced temp directory into place, so the
+	// new snapshot appearing IS the commit point. Everything destructive happens
+	// after it, and a crash before it leaves the previous snapshot and the log
+	// exactly as they were.
 
 	timestamp := time.Now()
 	snapshotDir := generateLatestSnapshotDirName(uint(req.SnapshotMetadata.LastIncludedIndex), uint(req.SnapshotMetadata.LastIncludedTerm), timestamp)
@@ -111,6 +97,23 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error writing snapshot to disk")
 		success = false
 		return
+	}
+
+	// The new snapshot is durable, so the old ones are now dead weight. Failing to
+	// remove them is not worth failing the install over: getLatestSnapshotIndex
+	// takes the maximum, and the one just written has the highest index, so a
+	// leftover directory is inert.
+	//
+	// dirs was listed before the write, so it cannot contain the new directory.
+	// Note the path: dir.Name() alone is relative to the process working
+	// directory, which is not where snapshots live.
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		if rmErr := os.RemoveAll(n.cfg.SnapshotDir + "/" + dir.Name()); rmErr != nil {
+			zerolog.Ctx(ctx).Warn().Err(rmErr).Msgf("install snapshot: could not delete superseded snapshot %s", dir.Name())
+		}
 	}
 
 	// Apply the snapshot to the state machine and update the log store

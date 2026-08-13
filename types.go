@@ -9,6 +9,13 @@ import (
 // ErrNotFound is returned by Storage implementations when a key does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrNoSnapshot is returned by getLatestSnapshotDir when there is no snapshot to
+// find — no SnapshotDir configured, the directory does not exist yet, or it holds
+// no parseable snapshot. It is separate from a read failure because startup
+// recovery treats it as the normal state of a node that has never snapshotted,
+// while callInstallSnapshot treats it as a genuine failure.
+var ErrNoSnapshot = errors.New("no snapshot found")
+
 // ErrLeadershipLost is returned by Propose when this node stopped being leader
 // while the proposed entry was still uncommitted. The entry stays in the local
 // log — the new leader decides whether it survives — so the caller must treat the
