@@ -86,9 +86,15 @@ func (n *Node) applyEntries(ctx context.Context, lastApplied, commitIdx uint) er
 		return int(a.Index) - int(b.Index)
 	})
 
-	if err = n.sm.Apply(ctx, logs); err != nil {
+	var commandEntries []LogEntry
+	for _, log := range logs {
+		if log.Type != EntryType_Command {
+			continue
+		}
+		commandEntries = append(commandEntries, log)
+	}
+	if err = n.sm.Apply(ctx, commandEntries); err != nil {
 		return err
 	}
-
 	return n.store.SetLastApplied(ctx, commitIdx)
 }

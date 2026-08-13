@@ -15,6 +15,40 @@ import "github.com/SHREYANSHSINGH14/raft"
 // The library never imports this package, so the dependency still only points
 // inward (see CLAUDE.md).
 
+// The two enums are offset by one and must be mapped explicitly, never cast:
+// proto reserves 0 for UNSPECIFIED, while the library's EntryType_Command is
+// iota. A cast would turn every Config entry into a NoOp — silently, since both
+// are valid values.
+//
+// ENTRY_TYPE_UNSPECIFIED maps to EntryType_Command because that is what entries
+// written before Type was carried already decode to: their Type field is absent,
+// which reads back as 0. The library has no Unspecified value to map it to.
+func entryTypeToRaft(t EntryType) raft.EntryType {
+	switch t {
+	case EntryType_ENTRY_TYPE_NO_OP:
+		return raft.EntryType_NoOp
+	case EntryType_ENTRY_TYPE_CONFIG:
+		return raft.EntryType_Config
+	case EntryType_ENTRY_TYPE_BARRIER:
+		return raft.EntryType_Barrier
+	default: // ENTRY_TYPE_COMMAND, ENTRY_TYPE_UNSPECIFIED, anything unknown
+		return raft.EntryType_Command
+	}
+}
+
+func entryTypeFromRaft(t raft.EntryType) EntryType {
+	switch t {
+	case raft.EntryType_NoOp:
+		return EntryType_ENTRY_TYPE_NO_OP
+	case raft.EntryType_Config:
+		return EntryType_ENTRY_TYPE_CONFIG
+	case raft.EntryType_Barrier:
+		return EntryType_ENTRY_TYPE_BARRIER
+	default:
+		return EntryType_ENTRY_TYPE_COMMAND
+	}
+}
+
 // LogEntryToRaft converts a wire/storage entry into the library's LogEntry.
 func LogEntryToRaft(p *LogEntry) raft.LogEntry {
 	if p == nil {
@@ -23,6 +57,7 @@ func LogEntryToRaft(p *LogEntry) raft.LogEntry {
 	return raft.LogEntry{
 		Index: p.Index,
 		Term:  p.Term,
+		Type:  entryTypeToRaft(p.Type),
 		Data:  p.Data,
 	}
 }
@@ -32,6 +67,7 @@ func LogEntryFromRaft(e raft.LogEntry) *LogEntry {
 	return &LogEntry{
 		Index: e.Index,
 		Term:  e.Term,
+		Type:  entryTypeFromRaft(e.Type),
 		Data:  e.Data,
 	}
 }
