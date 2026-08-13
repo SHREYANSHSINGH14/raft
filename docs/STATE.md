@@ -1,18 +1,31 @@
 # Where I am
 
-**Last updated: 2026-08-12.** Short-lived by design — rewrite it, don't append.
+**Last updated: 2026-08-13.** Short-lived by design — rewrite it, don't append.
 If I sat down right now, what would I need to know?
 
 ## Just finished
-
-On branch `feat/wire-prevote-timeoutnow-lastapplied`.
 
 - **`PreVote` and `TimeoutNow` are on the wire** — proto, `grpcTransport` (send), `Server` (receive).
   Multi-node elections work now; before this, every pre-vote errored against a real cluster and no node
   could win.
 - **One `LogEntry` converter** in [example/types/convert.go](../example/types/convert.go), replacing three
-  hand-written copies. Behaviour preserved exactly — `Type` is still dropped.
+  hand-written copies.
+- **`LogEntry.Type` survives serialization**, so membership changes finally reach followers. The two
+  enums are offset by one (proto reserves 0 for `UNSPECIFIED`, `EntryType_Command` is `iota`), so the
+  converter maps them with an explicit switch — a cast would turn every `Config` into a `NoOp`
+  silently. `UNSPECIFIED` decodes to `Command`, because entries already on disk have no Type field.
+- **`applyEntries` filters to `EntryType_Command`** before calling `sm.Apply`, so the library's own
+  no-op and config entries never reach the state machine and no embedding has to remember to skip them.
 - **`lastApplied` is persisted** in `example/db`. Was a stub returning 0.
+- **`Node.restore` rebuilds derived state at startup** — `commitIndex`, `snapshotLatest`, and both
+  configuration views. Membership now survives a restart. See "Crash recovery" below for why it does
+  not restore the state machine.
+- **`HandleInstallSnapshot` reordered** so nothing destructive happens before the new snapshot is
+  durable, and `ErrNoSnapshot` distinguishes "no snapshot" from "cannot read the snapshot directory".
+
+The enum was deliberately *not* renumbered and not split into internal/user categories — the explicit
+mapping plus the apply filter get the same result without touching the library's public API.
+`EntryType_Barrier` remains declared and unused by anything.
 
 Regenerated with protoc 32.0 (the version the checked-in stubs used; local apt protoc is 3.21.12 and
 would downgrade the header). `protoc-gen-go` also moved 1.31.0 → 1.36.11 — that's the churn in
@@ -22,16 +35,7 @@ would downgrade the header). `protoc-gen-go` also moved 1.31.0 → 1.36.11 — t
 
 ## Blockers, in order
 
-**1. `LogEntry.Type` is dropped in `convert.go`.** Config entries arrive as commands, so
-`processConfigurationLogEntry` never fires and **membership changes never reach followers**. Not a proto
-limitation — `log.proto` has the field. Invisible to tests: `MemStorage` and the mock transport pass the
-struct through intact.
-
-Fix: one field each direction, plus an explicit enum mapping — proto reserves 0 for `UNSPECIFIED` and
-`EntryType_Command` is `iota`, so the two are offset by one. Don't cast. Add a round-trip test so the
-next new field can't go missing the same way.
-
-**2. `InstallSnapshot` transport is still a stub**, so a lagging follower can never be caught up.
+**1. `InstallSnapshot` transport is still a stub**, so a lagging follower can never be caught up.
 `HandleInstallSnapshot` is complete; what's missing is that `InstallSnapshotArgs.Reader` is an
 `io.Reader` and gRPC has no such thing. Send side chunks the reader onto a stream; receive side wraps
 `stream.Recv()` in an `io.Reader`, buffering leftovers.
@@ -40,25 +44,46 @@ The trap: [install_snapshot.go:21](../install_snapshot.go#L21) drains the reader
 including its early rejections. The sender must stream to completion even when the answer is already
 `Success: false`, or the stream hangs instead of failing.
 
-**3. `example/server/server.go:75` passes `nil` as the `StateMachine`.** Now that `lastApplied` is real,
+**2. `example/server/server.go:75` passes `nil` as the `StateMachine`.** Now that `lastApplied` is real,
 `shouldTriggerSnapshot` can fire, so this reaches a nil deref instead of silently no-opping.
 
-## No crash-recovery path
+**3. Nit in `applyEntries`:** `sm.Apply` is called even when the filtered slice is empty, so a batch of
+only config/no-op entries hands the state machine nothing. Harmless for a real store, noisy for mocks.
+Guard it with `len(commandEntries) > 0`.
 
-Write orderings are all safe already (see INVARIANTS.md — `currentTerm` before `votedFor`, `Apply`
-before `SetLastApplied`, snapshot durable before compaction). The **read** side is missing:
-[node.go:178-213](../node.go#L178-L213) loads `currentTerm` and `votedFor` and nothing else.
+## Crash recovery
 
-- The state machine is never restored at startup — `sm.Restore` is only called when a leader pushes a
-  snapshot at us.
-- `configurations` is never rebuilt from the log, so restart reverts to the `cfg.Peers` seed and loses
-  every membership change.
-- `snapshotLatest` isn't restored, so after restart-following-compaction `logTermAt` can't validate a
-  `prevLogIndex` at the snapshot boundary.
+Write orderings are all safe (see INVARIANTS.md — `currentTerm` before `votedFor`, `Apply` before
+`SetLastApplied`, snapshot durable before compaction). `Node.restore` now covers the read side:
+`commitIndex` from the durable `lastApplied`, `snapshotLatest` from the snapshot meta, and both
+configuration views from the snapshot plus a replay of every config entry the log holds above it.
 
-**A durable state machine is now load-bearing.** `GetLastApplied` used to always return 0, so the apply
-loop replayed the whole log and rebuilt the FSM by accident. It now resumes from the real index — a
-volatile FSM would start empty and never receive entries at or below `lastApplied`.
+**The library assumes a durable state machine, and `restore` deliberately does not call `sm.Restore`.**
+State below the snapshot index is already on disk, and so is everything appended and applied after it.
+Restoring at startup would roll the state machine back to the snapshot index while the apply loop
+resumed from `lastApplied`, silently dropping everything applied since — and `lastApplied` is always
+>= the snapshot index, because our own snapshots are taken at the applied index. A volatile state
+machine would need the opposite design (restore, then set `lastApplied` to the snapshot index and
+replay), which is why hashicorp does not persist `lastApplied` at all.
+
+The one exception is `lastApplied < meta.Index`, which can only mean a leader-pushed
+`InstallSnapshot` was interrupted. `restore` finishes it. Where in the window it died does not need
+distinguishing, because `Restore` is a wholesale replace and re-running it on an already-current state
+machine is inert.
+
+`HandleInstallSnapshot` was reordered to make that recoverable: everything destructive now runs after
+`writeSnapshotToDisk`, whose atomic rename is the commit point. It used to delete the old snapshots and
+the whole log *first*, so a crash left no snapshot, no log, and nothing on disk to signal an install
+had been in progress. The blanket log delete is gone rather than moved — the block further down
+already truncates correctly by comparing the entry at `LastIncludedIndex` against the snapshot's term.
+
+Two things still open here:
+
+- **`replayConfigurations` scans the whole log above the snapshot index on every boot.** Linear in log
+  length, so a node that has not snapshotted in a while pays for it at startup. Narrowing it needs a
+  get-entries-by-type on `Storage`, which does not exist.
+- **None of `restore` is tested.** The library tests mock everything and never exercise `Start`, so the
+  interrupted-install branch — the one most worth pinning — has no coverage.
 
 ## Who does what
 
@@ -73,7 +98,7 @@ free, `Increment(k)` isn't), and `Restore` is a **replace**, not a load — the 
 lagging follower with stale state, so keys absent from the snapshot must be deleted, not left behind.
 Use a Pebble instance separate from `Store`, or clearing the keyspace wipes the raft log.
 
-**Delegable:** the `Type` fix, `InstallSnapshot` transport, codegen and plumbing.
+**Delegable:** `InstallSnapshot` transport, codegen and plumbing.
 
 **Benchmarking is deferred** until a cluster actually commits. First pass when it's time:
 `processFutures` drain (O(n) in pending proposals) and the `MemStorage` append path, `-count=10
