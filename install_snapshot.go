@@ -9,7 +9,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Note
 func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotArgs) (resp *InstallSnapshotResponse, err error) {
 	n.clientMu.Lock()
 	term, err := n.store.GetCurrentTerm(ctx)
@@ -27,8 +26,17 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			Term:    uint64(term),
 			Success: success,
 		}
+		// Close last, and never let it overwrite a real failure: the handler's error
+		// is what the caller needs, and a close error on a stream we have just
+		// drained is almost never the interesting half. It is still logged, and it
+		// still surfaces as the return when nothing else went wrong.
 		if closer, ok := req.Reader.(io.Closer); ok {
-			err = closer.Close()
+			if cerr := closer.Close(); cerr != nil {
+				zerolog.Ctx(ctx).Error().Err(cerr).Msg("install snapshot: error closing snapshot reader")
+				if err == nil {
+					err = cerr
+				}
+			}
 		}
 	}()
 
@@ -192,7 +200,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 		}
 	}
 
-	n.commitMu.Lock()
+	n.clientMu.Lock()
 	err = n.store.SetCurrentTerm(ctx, uint(req.Term))
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting current term")
