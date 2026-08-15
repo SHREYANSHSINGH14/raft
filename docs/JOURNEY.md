@@ -557,17 +557,114 @@ goroutine ever ran.
 
 ---
 
+## Bug 9: the state machine and the log shared a keyspace
+
+The first real `StateMachine` wrote `cmd.Key` straight into Pebble. So did the log — `log:<index>` —
+along with `current_term`, `voted_for` and `last_applied`. One database, one flat keyspace, no
+separation between the thing being replicated and the machinery replicating it.
+
+Two consequences, and the second is the one that matters.
+
+A client could `SET current_term` and overwrite Raft state. Bad, but it needs a hostile or unlucky
+client.
+
+`Snapshot` iterated with `nil` iterator options, so it captured **everything** — including the Raft log
+and the persisted term and vote. `Restore` on the receiving node then wrote all of it back. Installing
+a snapshot would overwrite the receiver's own `votedFor` with the *sender's*, which is precisely the
+durability guarantee that stops a node voting twice in one term. No client involvement required: normal
+operation, silently breaking the safety property.
+
+The fix is a prefix (`sm:`) and iterators bounded to it, which is what `example/db` already does for
+`log:`. STATE.md had suggested a separate Pebble instance instead; a prefix is cheaper and keeps one
+fsync domain, and the bounded iterator is the same amount of code either way.
+
+**The lesson is about where the bug was visible.** Nothing in `Apply` looks wrong. Nothing in `Persist`
+looks wrong. The defect only exists in the relationship between them and a third file — the storage
+layer's key layout — and no single-file review would ever have found it. Shared mutable namespaces are
+invisible until two components disagree about who owns what.
+
+---
+
+## Bug 10: the transport re-clamped deadlines the library had already scaled
+
+`grpcTransport` wrapped every outgoing RPC in `context.WithTimeout(ctx, t.timeout)`, with `t.timeout`
+coming from `RPCTimeoutMs` — 50ms by default. Defensive, symmetric across all four methods, and read as
+obviously correct for months.
+
+The library also sets a deadline before every transport call. Two of them are *scaled to the work*:
+`appendEntriesDeadline` adds time per batch of entries, so a large catch-up gets proportionally longer
+than a heartbeat, and `callInstallSnapshot` adds time per snapshot byte.
+
+`context.WithTimeout` on a parent that already has a deadline keeps **whichever is earlier**. So the
+flat 50ms won, every time. A catch-up batch computed a 500ms budget and got 50ms. The scaling code ran,
+produced the right number, and had no effect — `AppendEntriesDeadlineScaleCount` and
+`ScaleTimeMs` were dead config on this embedding, in the exact scenario they exist for: a follower far
+enough behind that the batch is big.
+
+The tests never saw it because they mock `Transport` entirely, so the clamp is not in the code under
+test. And it only bites when a batch is large, which is when a node is already struggling.
+
+The fix is to delete the wrappers — the transport sets no deadlines, and the field and its constructor
+argument went with them, because a dead field is an invitation to add the clamp back. The rule now
+lives on the `grpcTransport` type doc, where the next person adding a method will read it.
+
+**Two layers each doing something defensible, composing into something wrong.** Neither the library's
+"always deadline your RPCs" nor the transport's "always deadline your RPCs" is bad advice. `WithTimeout`
+silently taking the minimum is what turns redundancy into a bug, and it does so without an error, a log
+line, or a test failure.
+
+---
+
+## Bug 11: three bugs, one misreading of `io.Reader`
+
+Writing the snapshot codec and the `InstallSnapshot` sender produced three separate defects that are
+all the same misunderstanding: treating `Read` as though it fills the buffer and reports EOF
+separately.
+
+The contract does neither. `Read` may return fewer bytes than asked for with a nil error, and it may
+return `n > 0` **and** `io.EOF` from the same call. The docs are explicit — *callers should always
+process the n > 0 bytes returned before considering the error* — and every one of these bugs comes from
+not doing that.
+
+*Discarding `n`.* The chunk sender read into a 1KB buffer and sent the whole buffer, ignoring how much
+had been read. Every short read shipped stale bytes left over from the previous iteration, so any
+snapshot whose size was not an exact multiple of the chunk size arrived corrupt — with a valid length
+and no error anywhere.
+
+*Breaking on EOF before handling the data.* The same loop checked the error first, so a final read
+returning the last 300 bytes together with `io.EOF` threw those bytes away. Truncation, again silent.
+
+*Collapsing the two EOFs in the decoder.* The snapshot format is `[key_len][key][val_len][val]` repeated
+to EOF, so the decoder has to treat "stream ended" as success. But only at **one** offset: the first
+byte of a `key_len`. Everywhere else the reader is mid-record and an ending means truncation.
+`io.ReadFull` distinguishes these — `io.EOF` when it read nothing, `io.ErrUnexpectedEOF` when it read
+some but not all — and the first version passed both through as `io.EOF`, so a file cut off exactly
+after a length prefix restored as if complete, while one cut a byte later errored correctly. Truncation
+detection that depended on where the truncation landed.
+
+The decoder fix is to make `decode` translate: only the length read may end cleanly, so an `io.EOF` from
+the *data* read becomes `io.ErrUnexpectedEOF` before it leaves the function. Then `io.EOF` escaping
+`decode` can only have come from a length read, and the caller's `break` is correct by construction
+rather than by luck.
+
+**All three are silent.** No panic, no error, no failed test — just a snapshot that is quietly wrong,
+discovered later as state machine divergence with nothing pointing back here. The lesson is not "read
+the docs"; it is that `io.Reader` has three legal returns and code that handles two of them looks
+exactly like code that handles three.
+
+---
+
 ## What Remains
 
 Snapshotting, membership changes (both directions), pre-vote and leadership transfer have all landed
 since this section was last written. What is left:
 
-- **The gRPC surface has not kept up with the library.** `PreVote`, `TimeoutNow` and
-  `InstallSnapshot` are stubs in `grpcTransport` because `proto/rpc.proto` has no such RPCs. That was
-  cosmetic until elections went through the pre-vote gate — now every pre-vote against a real cluster
-  errors out, which the round counts as a withheld vote, so **no node can win an election in a real
-  deployment**. Every library test passes, because they all mock the transport. A good reminder that
-  "all green" is scoped to what the tests actually exercise.
+- **Running it.** The gRPC surface has caught up — `PreVote`, `TimeoutNow` and `InstallSnapshot` are
+  all on the wire now, and there is a real `StateMachine` behind them — but no cluster has actually
+  served a write or completed a snapshot transfer. Every library test passes and always did, because
+  they all mock the transport; the last session found four bugs in the `InstallSnapshot` send path by
+  reading it, none of which any test would have caught. "All green" is scoped to what the tests
+  actually exercise, and what they exercise is not the wire.
 - **Linearizable reads**: reads currently go through the log; read leases or heartbeat-based reads
   would allow bypassing the log for non-mutating queries.
 - **Futures carrying `(index, term)`**: a `Future` is keyed by log index alone, so a proposal whose

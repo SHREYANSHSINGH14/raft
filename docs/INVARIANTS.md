@@ -290,6 +290,88 @@ think a floor at 0 is permanently held and block the first snapshot forever. (2)
 must release the floor through `setCatchingUpIdx(DefaultCatchingUpIdx)` so the signal fires on every
 exit path (success, abort, panic-unwind).
 
+### The Transport sets no deadlines of its own.
+
+The library deadlines every RPC before it calls the `Transport`, and two of them are **scaled to the
+work**: `appendEntriesDeadline` adds time per batch of entries, `callInstallSnapshot` adds time per
+snapshot byte. A `context.WithTimeout` in the transport keeps whichever deadline is earlier, so a flat
+per-transport timeout silently overrides that scaling and caps a large catch-up at the budget meant for
+a heartbeat — with no error, no log line, and no test failure, since every library test mocks the
+transport. See JOURNEY.md Bug 10.
+
+The rule is one-directional: the *caller* owns the deadline because only the caller knows how much work
+the call represents. `grpcTransport` therefore has no timeout field at all — a dead field is an
+invitation to add the clamp back.
+
+### An embedded state machine needs its own keyspace.
+
+`example/db` puts `current_term`, `voted_for`, `last_applied` and `log:<index>` in one Pebble instance,
+and `example/statemachine` writes user keys into the same one. Every state machine key is therefore
+namespaced (`StatePrefix = "sm:"`) and every iterator over it is bounded to that range.
+
+This is not tidiness. Unbounded, `Snapshot` captures the Raft log and the persisted term and vote, and
+`Restore` writes them onto the receiving node — overwriting *its* `votedFor` with the sender's, which is
+the one piece of durable state that stops a node voting twice in a term. Normal operation, silently
+breaking safety. The mirror of the same rule: `Restore`'s `DeleteRange` must be bounded too, or clearing
+the state machine deletes the log. See JOURNEY.md Bug 9.
+
+### `Apply`'s error return means "this replica is broken", never "the command was rejected".
+
+Anything returned from `StateMachine.Apply` trips `Fatal` and stops the apply loop for the life of the
+process. So the error return is reserved for local faults the other replicas will not hit — a failed
+disk write, corruption, a store that will not answer.
+
+A command the state machine evaluated and refused — a CAS that did not match, an op it does not
+recognise — is a deterministic outcome *every* replica reaches identically from the same log. Returning
+it stops one node and calls that divergence. `example/statemachine` makes the split explicit:
+`ErrCommandFailed` wraps command-level errors, `Apply` reports them to the waiting client and keeps
+going, and anything not wrapping it is returned. The test is always the same question — *would every
+other replica hit this error, given the same log?*
+
+Waiters are released only **after** `DB.Apply` returns. Notifying inside the staging loop hands a
+success receipt to clients whose writes are still in a batch that a later entry may cause the whole call
+to discard.
+
+### A command waiter is registered before `Propose`, and keyed by a caller-chosen id.
+
+`Future.Wait` answers *did it commit*; the state machine's result buffer answers *what did applying it
+produce*. A caller needs both, in that order, and a future that fails must not fall through to the
+result wait — nothing will ever complete that waiter.
+
+The registration order is the load-bearing part. Keying results on the log index would force
+registration *after* `Propose` returns, and on a single-node cluster the majority is one, so the entry
+can commit and apply before the handler gets back — the result is dropped and the caller blocks until
+its context expires. On three nodes the commit needs a round trip, so registration wins essentially
+every time. A race that hides on a real cluster and fires on a laptop is the worst kind to ship, so the
+key has to be something chosen before the append, not assigned by it. See
+[command-results.md](command-results.md).
+
+### `Restore` replaces the state machine; it does not merge into it.
+
+A node far enough behind to need an `InstallSnapshot` may hold keys the leader has since deleted, and
+nothing in the snapshot stream mentions them — there is no record of a deletion to replay. Clearing the
+namespace first is what makes "the state machine becomes the snapshot" true rather than "the state
+machine gains the snapshot's keys".
+
+It does **not** have to be atomic. Writes flush in bounded batches, and a crash midway leaves the clear
+plus a partial restore committed — which is safe, and not by accident: the snapshot file is already on
+disk, `SetLastApplied` runs only after `Restore` returns nil, and startup replays that same file from
+the beginning. Nothing downstream can observe the partial state, and re-running over it converges.
+
+### In a length-prefixed stream, only a length read may end at EOF.
+
+The snapshot format is `[key_len][key][val_len][val]` repeated to EOF, so exactly one byte offset in the
+whole stream is a legal ending: the first byte of a `key_len`. Everywhere else the reader is mid-record,
+and an ending there means the file was truncated.
+
+`io.ReadFull` already draws that distinction — `io.EOF` when it read nothing, `io.ErrUnexpectedEOF` when
+it read some but not all — so `decode` translates an `io.EOF` from the *data* read into
+`io.ErrUnexpectedEOF` before returning. Then an `io.EOF` escaping `decode` can only have come from a
+length read, and the caller's `break` is correct by construction rather than by luck.
+
+The same contract bites on the write side: `Read` may return `n > 0` **together with** `io.EOF`, so
+process the bytes before the error, and never send more of the buffer than `n`. See JOURNEY.md Bug 11.
+
 ## Conventions
 
 - Errors: `ErrNotFound` is defined in the library so the library doesn't depend on Pebble's sentinel.

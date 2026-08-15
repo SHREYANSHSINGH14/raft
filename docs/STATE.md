@@ -1,66 +1,63 @@
 # Where I am
 
-**Last updated: 2026-08-13.** Short-lived by design — rewrite it, don't append.
+**Last updated: 2026-08-15.** Short-lived by design — rewrite it, don't append.
 If I sat down right now, what would I need to know?
 
 ## Just finished
 
-- **`PreVote` and `TimeoutNow` are on the wire** — proto, `grpcTransport` (send), `Server` (receive).
-  Multi-node elections work now; before this, every pre-vote errored against a real cluster and no node
-  could win.
-- **One `LogEntry` converter** in [example/types/convert.go](../example/types/convert.go), replacing three
-  hand-written copies.
-- **`LogEntry.Type` survives serialization**, so membership changes finally reach followers. The two
-  enums are offset by one (proto reserves 0 for `UNSPECIFIED`, `EntryType_Command` is `iota`), so the
-  converter maps them with an explicit switch — a cast would turn every `Config` into a `NoOp`
-  silently. `UNSPECIFIED` decodes to `Command`, because entries already on disk have no Type field.
-- **`applyEntries` filters to `EntryType_Command`** before calling `sm.Apply`, so the library's own
-  no-op and config entries never reach the state machine and no embedding has to remember to skip them.
-- **`lastApplied` is persisted** in `example/db`. Was a stub returning 0.
-- **`Node.restore` rebuilds derived state at startup** — `commitIndex`, `snapshotLatest`, and both
-  configuration views. Membership now survives a restart. See "Crash recovery" below for why it does
-  not restore the state machine.
-- **`HandleInstallSnapshot` reordered** so nothing destructive happens before the new snapshot is
-  durable, and `ErrNoSnapshot` distinguishes "no snapshot" from "cannot read the snapshot directory".
-- **`Node.Fatal()` / `Node.FatalErr()`** report that the apply loop has stopped for good. The loop used
-  to log and return, and nothing else noticed — `commitCh` is a non-blocking send, so the node kept
-  replicating, kept voting, and could still win an election with a state machine frozen at the entry it
-  choked on. Committed entries can't be retracted and Raft never re-delivers to `Apply`, so that state
-  is permanent. Both fatal exits now close the channel; the two `ctx` exits stay silent, guarded by
-  `ctx.Err() == nil` so a clean shutdown isn't reported as a fault.
+- **`example/statemachine` exists** — a Pebble `StateMachine` implementing `Apply`, `Snapshot` and
+  `Restore`. The interface had only ever been mocked, so this is the first real implementation and the
+  first check on whether its shape was a good guess. It mostly was; see "What the implementation
+  taught the interface" below.
+- **The server is wired.** `NewNode` was being handed `nil` as the state machine, and the snapshot
+  config was never copied into `raft.Config` — so `Start` would have panicked in `NewTicker(0)` before
+  the apply loop got as far as its own nil deref. Both fixed, plus a supervisor that shuts the server
+  down when `Node.Fatal()` fires and a sweeper for abandoned command waiters.
+- **`InstallSnapshot` is on the wire, end to end.** Client-streaming RPC in the proto, chunking sender
+  in `grpcTransport`, receiving handler in `example/server/rpc.go` that feeds an `io.Pipe` so the
+  library streams the snapshot to disk as it arrives rather than buffering it.
+- **KV endpoints on the debug server** — `/kv/set`, `/kv/delete`, `/kv/cas`, `/kv/get`. No new proto
+  service; replication is the point, not the API surface.
+- **Command results reach the client.** `Apply` collects waiters and releases them only after the
+  batch is durable. Keyed by a caller-chosen command id, registered *before* `Propose` — see
+  [command-results.md](command-results.md) for why the obvious alternative (keying on log index) is
+  racy on exactly the cluster size you develop against.
 
-The enum was deliberately *not* renumbered and not split into internal/user categories — the explicit
-mapping plus the apply filter get the same result without touching the library's public API.
-`EntryType_Barrier` remains declared and unused by anything.
+- **`applyEntries` no longer calls `sm.Apply` with an empty slice**, so a batch of only config/no-op
+  entries doesn't hand the state machine nothing.
 
-Regenerated with protoc 32.0 (the version the checked-in stubs used; local apt protoc is 3.21.12 and
-would downgrade the header). `protoc-gen-go` also moved 1.31.0 → 1.36.11 — that's the churn in
-`log.pb.go`. protoc 32.0 is installed at `~/.local/bin/protoc`.
-
-`go build`, `go vet`, `go test ./...` and `-race` all green.
+`go build`, `go vet` and `go test ./...` are green.
 
 ## Blockers, in order
 
-**1. `InstallSnapshot` transport is still a stub**, so a lagging follower can never be caught up.
-`HandleInstallSnapshot` is complete; what's missing is that `InstallSnapshotArgs.Reader` is an
-`io.Reader` and gRPC has no such thing. Send side chunks the reader onto a stream; receive side wraps
-`stream.Recv()` in an `io.Reader`, buffering leftovers.
+**1. None of it has been run.** No cluster has served a `/kv/set` or completed an `InstallSnapshot`
+transfer. Everything above is compile-and-reason confidence, and the last session found four separate
+bugs in the send path alone by reading it. Stand up three nodes before trusting any of this.
 
-The trap: [install_snapshot.go:21](../install_snapshot.go#L21) drains the reader on **every** exit,
-including its early rejections. The sender must stream to completion even when the answer is already
-`Success: false`, or the stream hangs instead of failing.
+**2. `example/statemachine` has no tests** — the only package in the repo without any. The cheapest
+high-value one is a `Persist` → `Restore` round trip: it pins the framing, the `sm:` prefix handling,
+and replace-not-merge in a single test. Truncating the stream at a few offsets covers the
+`io.EOF` / `io.ErrUnexpectedEOF` split, which is the part most likely to rot.
 
-**2. `example/server/server.go:75` passes `nil` as the `StateMachine`.** Now that `lastApplied` is real,
-`shouldTriggerSnapshot` can fire, so this reaches a nil deref instead of silently no-opping.
+## What the implementation taught the interface
 
-**3. Nit in `applyEntries`:** `sm.Apply` is called even when the filtered slice is empty, so a batch of
-only config/no-op entries hands the state machine nothing. Harmless for a real store, noisy for mocks.
-Guard it with `len(commandEntries) > 0`.
+Three things only showed up once there was a real `StateMachine`, and all three are now invariants:
+
+- **The state machine and the log share a Pebble instance**, so state machine keys need a namespace of
+  their own (`sm:`). Without one a client `SET` can overwrite `current_term`, and `Snapshot` captures
+  the Raft log and ships it to another node. STATE.md previously suggested a separate Pebble instance;
+  a prefix plus bounded iterators is cheaper and keeps one fsync domain.
+- **`Apply`'s error return is not the place for a rejected command.** A CAS that did not match is a
+  deterministic outcome every replica reaches identically; returning it stops the apply loop on one
+  node and calls that divergence. The split is now explicit — `ErrCommandFailed` wraps command-level
+  errors, everything else is node-level and fatal.
+- **`Restore` is a replace, and it can be non-atomic.** Bounded batches are safe because the snapshot
+  file is already on disk and `SetLastApplied` has not run, so startup replays the same file.
 
 ## Crash recovery
 
 Write orderings are all safe (see INVARIANTS.md — `currentTerm` before `votedFor`, `Apply` before
-`SetLastApplied`, snapshot durable before compaction). `Node.restore` now covers the read side:
+`SetLastApplied`, snapshot durable before compaction). `Node.restore` covers the read side:
 `commitIndex` from the durable `lastApplied`, `snapshotLatest` from the snapshot meta, and both
 configuration views from the snapshot plus a replay of every config entry the log holds above it.
 
@@ -77,12 +74,6 @@ The one exception is `lastApplied < meta.Index`, which can only mean a leader-pu
 distinguishing, because `Restore` is a wholesale replace and re-running it on an already-current state
 machine is inert.
 
-`HandleInstallSnapshot` was reordered to make that recoverable: everything destructive now runs after
-`writeSnapshotToDisk`, whose atomic rename is the commit point. It used to delete the old snapshots and
-the whole log *first*, so a crash left no snapshot, no log, and nothing on disk to signal an install
-had been in progress. The blanket log delete is gone rather than moved — the block further down
-already truncates correctly by comparing the entry at `LastIncludedIndex` against the snapshot's term.
-
 Two things still open here:
 
 - **`replayConfigurations` scans the whole log above the snapshot index on every boot.** Linear in log
@@ -95,16 +86,7 @@ Two things still open here:
 
 Split by learning density, not by the library/`example` boundary.
 
-**Mine:** the Pebble `StateMachine` (`Apply`, `Snapshot`, `Restore`), startup recovery, and everything
-in the library. `StateMachine` has only ever been mocked, so its shape is an unvalidated guess —
-`Storage` got a sharp contract precisely because it has two implementations.
-
-Two things that decide the `StateMachine` design: `Apply` must be idempotent per entry (`Set(k,v)` is
-free, `Increment(k)` isn't), and `Restore` is a **replace**, not a load — the caller is usually a
-lagging follower with stale state, so keys absent from the snapshot must be deleted, not left behind.
-Use a Pebble instance separate from `Store`, or clearing the keyspace wipes the raft log.
-
-**Delegable:** `InstallSnapshot` transport, codegen and plumbing.
+**Mine:** the Pebble `StateMachine`, startup recovery, and everything in the library.
 
 **Benchmarking is deferred** until a cluster actually commits. First pass when it's time:
 `processFutures` drain (O(n) in pending proposals) and the `MemStorage` append path, `-count=10
@@ -118,6 +100,11 @@ split earns itself. Cluster-level needs an open-loop generator or the tail laten
   such a waiter gets `ErrLeadershipLost`.
 - **`Future.errCh`** — allocated on every `Propose`, never sent on, so that `Wait` case is unreachable.
   Wire it or delete it.
+- **Linearizable reads.** `/kv/get` reads the local Pebble directly and is documented as stale. A
+  correct read needs either a log entry per read or a ReadIndex round trip.
+- **Exactly-once commands.** Command ids are server-generated, so a client retry proposes a second
+  entry. Client-supplied ids plus a dedup table in `Apply` would fix it; the id already travels in the
+  command payload, so the wire format does not have to change.
 - **Nothing in the library reacts to `Fatal` — deliberate.** The obvious reactions (step down, refuse to
   campaign, reject `TimeoutNow`, stop serving reads) are all reachable by the caller cancelling the
   context it passed to `Start`, so the library would only be picking one policy on the caller's behalf.
@@ -127,11 +114,6 @@ split earns itself. Cluster-level needs an open-loop generator or the tail laten
   away — the cost is a sticky in-memory flag checked in `election()` and `HandleTimeoutNow`, which is
   the one campaign path that bypasses the election timer. In-memory, not persisted: `SetLastApplied`
   never ran, so a restart replays the failed entry and a transient fault should not survive it.
-- **`Apply` cannot return per-entry results.** Fine for `Set`/`Delete`; blocking for compare-and-swap or
-  create-if-absent, where the answer only exists at the instant `Apply` ran and a later read is a
-  different point in time. Either `Apply` returns `[]any` routed to each entry's `Future`
-  (hashicorp's shape, breaking change) or the state machine stashes results by log index for the
-  handler to drain after `Wait`. Cheap now with one mock implementation, expensive later.
 
 ## Open questions
 
@@ -139,6 +121,8 @@ split earns itself. Cluster-level needs an open-loop generator or the tail laten
 - Why streaming `InstallSnapshot` rather than the paper's chunked/offset form?
 - Confirm `db.Store.DeleteLogs` really deletes the prefix in the production store (the mocks do). A
   no-op there would mask the whole retain-floor design.
+- `CommandResultBuffer.Sweep` runs on a 30s ticker in `example/server`. Whether that is the right home
+  for it, or whether the buffer should reap on insert, is untested either way.
 
 ## Known TODOs in code
 
