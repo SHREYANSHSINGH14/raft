@@ -238,6 +238,9 @@ func getLatestSnapshotIndex(dirs []os.DirEntry) (uint, error) {
 		if !dir.IsDir() {
 			continue
 		}
+		if strings.Contains(dir.Name(), ".tmp") {
+			continue
+		}
 		idx, _, _, err := parseSnapshotDirName(dir.Name())
 		if err != nil {
 			continue

@@ -9,19 +9,26 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Note
 func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotArgs) (resp *InstallSnapshotResponse, err error) {
-
+	n.clientMu.Lock()
 	term, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting current term")
+		n.clientMu.Unlock()
 		return nil, err
 	}
+	n.clientMu.Unlock()
+
 	success := false
 	defer func() {
 		_, _ = io.Copy(io.Discard, req.Reader)
 		resp = &InstallSnapshotResponse{
 			Term:    uint64(term),
 			Success: success,
+		}
+		if closer, ok := req.Reader.(io.Closer); ok {
+			err = closer.Close()
 		}
 	}()
 
@@ -49,9 +56,11 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 
 		if req.SnapshotMetadata.LastIncludedIndex <= uint64(latestSnapshotIdx) {
 			zerolog.Ctx(ctx).Debug().Msgf("install snapshot: ignoring request from %s with snapshot index %d, latest snapshot index is %d", req.LeaderID, req.SnapshotMetadata.LastIncludedIndex, latestSnapshotIdx)
+			n.clientMu.Lock()
 			err = n.store.SetCurrentTerm(ctx, uint(req.Term))
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting current term")
+				n.clientMu.Unlock()
 				success = false
 				return
 			}
@@ -59,11 +68,13 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			err = n.store.SetVotedFor(ctx, req.LeaderID)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting voted for")
+				n.clientMu.Unlock()
 				success = false
 				return
 			}
 
 			n.SetLeaderID(req.LeaderID)
+			n.clientMu.Unlock()
 			success = true
 			return
 		}
@@ -181,9 +192,11 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 		}
 	}
 
+	n.commitMu.Lock()
 	err = n.store.SetCurrentTerm(ctx, uint(req.Term))
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting current term")
+		n.clientMu.Unlock()
 		success = false
 		return
 	}
@@ -191,6 +204,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	err = n.store.SetVotedFor(ctx, req.LeaderID)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error setting voted for")
+		n.clientMu.Unlock()
 		success = false
 		return
 	}
@@ -205,6 +219,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	for peerID, peerState := range req.SnapshotMetadata.MemberConfig {
 		n.SetPeerState(peerID, peerState)
 	}
+	n.clientMu.Unlock()
 
 	zerolog.Ctx(ctx).Info().Msgf("install snapshot: successfully installed snapshot from leader %s with index %d and term %d", req.LeaderID, req.SnapshotMetadata.LastIncludedIndex, req.SnapshotMetadata.LastIncludedTerm)
 

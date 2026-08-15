@@ -127,7 +127,7 @@ type InstallSnapshotArgs struct {
 	LeaderID         string
 	SnapshotMetadata SnapshotMetadata
 	SnapshotSize     uint64
-	Reader           io.Reader
+	Reader           io.ReadCloser
 }
 
 type InstallSnapshotResponse struct {
