@@ -109,6 +109,7 @@ func (s *Server) InstallSnapshot(stream grpc.ClientStreamingServer[types.Install
 			if metaReceived {
 				return fmt.Errorf("meta already received")
 			}
+			metaReceived = true
 			snapshotMeta := arg.GetSnapshotMeta()
 
 			memberConfig := make(map[string]raft.PeerState, len(snapshotMeta.MemberConfig))
@@ -139,7 +140,7 @@ func (s *Server) InstallSnapshot(stream grpc.ClientStreamingServer[types.Install
 			}
 			snapshotChunk := arg.GetSnapshotChunk()
 			n, err := pw.Write(snapshotChunk.Chunk)
-			if err != nil && !errors.Is(io.ErrClosedPipe, err) {
+			if err != nil && !errors.Is(err, io.ErrClosedPipe) {
 				return err
 			}
 			bytesWritten += n
