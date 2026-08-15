@@ -9,6 +9,7 @@ package types
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -20,6 +21,60 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// PeerState mirrors raft.PeerState. STAGING is a member still catching up, replicated
+// to but not counted toward a majority; NONVOTER is replicated to and never counted.
+type PeerState int32
+
+const (
+	PeerState_UNKNOWN  PeerState = 0
+	PeerState_STAGING  PeerState = 1
+	PeerState_VOTER    PeerState = 2
+	PeerState_NONVOTER PeerState = 3
+)
+
+// Enum value maps for PeerState.
+var (
+	PeerState_name = map[int32]string{
+		0: "UNKNOWN",
+		1: "STAGING",
+		2: "VOTER",
+		3: "NONVOTER",
+	}
+	PeerState_value = map[string]int32{
+		"UNKNOWN":  0,
+		"STAGING":  1,
+		"VOTER":    2,
+		"NONVOTER": 3,
+	}
+)
+
+func (x PeerState) Enum() *PeerState {
+	p := new(PeerState)
+	*p = x
+	return p
+}
+
+func (x PeerState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PeerState) Descriptor() protoreflect.EnumDescriptor {
+	return file_rpc_proto_enumTypes[0].Descriptor()
+}
+
+func (PeerState) Type() protoreflect.EnumType {
+	return &file_rpc_proto_enumTypes[0]
+}
+
+func (x PeerState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PeerState.Descriptor instead.
+func (PeerState) EnumDescriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{0}
+}
 
 // RequestVoteArgs is sent by a candidate to solicit a vote from a peer.
 type RequestVoteArgs struct {
@@ -517,6 +572,346 @@ func (x *TimeoutNowResponse) GetSuccess() bool {
 	return false
 }
 
+// InstallSnapshotArgs is one message on the InstallSnapshot stream.
+//
+// The oneof is what keeps the header and the payload on a single stream: the first
+// message carries snapshot_meta, every message after it carries snapshot_chunk. Two
+// separate RPCs would make "which transfer does this chunk belong to" a question the
+// protocol has to answer, and would let chunks outlive the meta that describes them.
+type InstallSnapshotArgs struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*InstallSnapshotArgs_SnapshotMeta
+	//	*InstallSnapshotArgs_SnapshotChunk
+	Payload       isInstallSnapshotArgs_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotArgs) Reset() {
+	*x = InstallSnapshotArgs{}
+	mi := &file_rpc_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotArgs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotArgs) ProtoMessage() {}
+
+func (x *InstallSnapshotArgs) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotArgs.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotArgs) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *InstallSnapshotArgs) GetPayload() isInstallSnapshotArgs_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *InstallSnapshotArgs) GetSnapshotMeta() *InstallSnapshotMeta {
+	if x != nil {
+		if x, ok := x.Payload.(*InstallSnapshotArgs_SnapshotMeta); ok {
+			return x.SnapshotMeta
+		}
+	}
+	return nil
+}
+
+func (x *InstallSnapshotArgs) GetSnapshotChunk() *SnapshotChunk {
+	if x != nil {
+		if x, ok := x.Payload.(*InstallSnapshotArgs_SnapshotChunk); ok {
+			return x.SnapshotChunk
+		}
+	}
+	return nil
+}
+
+type isInstallSnapshotArgs_Payload interface {
+	isInstallSnapshotArgs_Payload()
+}
+
+type InstallSnapshotArgs_SnapshotMeta struct {
+	SnapshotMeta *InstallSnapshotMeta `protobuf:"bytes,1,opt,name=snapshot_meta,json=snapshotMeta,proto3,oneof"` // exactly once, as the first message
+}
+
+type InstallSnapshotArgs_SnapshotChunk struct {
+	SnapshotChunk *SnapshotChunk `protobuf:"bytes,2,opt,name=snapshot_chunk,json=snapshotChunk,proto3,oneof"` // zero or more, only after the meta
+}
+
+func (*InstallSnapshotArgs_SnapshotMeta) isInstallSnapshotArgs_Payload() {}
+
+func (*InstallSnapshotArgs_SnapshotChunk) isInstallSnapshotArgs_Payload() {}
+
+// InstallSnapshotResponse is the single reply, sent once the receiver has taken the
+// whole snapshot and handed it to its state machine.
+type InstallSnapshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`       // receiver's current term (leader steps down if stale)
+	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"` // true if the snapshot was installed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotResponse) Reset() {
+	*x = InstallSnapshotResponse{}
+	mi := &file_rpc_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotResponse) ProtoMessage() {}
+
+func (x *InstallSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *InstallSnapshotResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+// InstallSnapshotMeta is the stream header: everything the receiver needs in order to
+// judge the transfer before a single byte of payload arrives.
+type InstallSnapshotMeta struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Term              uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                                      // leader's current term
+	LeaderId          string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`                               // leader's ID, so the receiver can redirect clients
+	SnapshotSize      uint64                 `protobuf:"varint,3,opt,name=snapshot_size,json=snapshotSize,proto3" json:"snapshot_size,omitempty"`                  // total payload bytes to expect across all chunks
+	LastIncludedIndex uint64                 `protobuf:"varint,4,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"` // the snapshot replaces the log up to here, inclusive
+	LastIncludedTerm  uint64                 `protobuf:"varint,5,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`    // term of last_included_index
+	Timestamp         *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                                             // when the snapshot was taken; diagnostics only
+	// Cluster membership as of last_included_index. It travels with the snapshot
+	// because installing one discards the log that held the configuration entries —
+	// without this the receiver would restore its state and not know who its peers
+	// are.
+	MemberConfig  []*MemberConfig `protobuf:"bytes,7,rep,name=member_config,json=memberConfig,proto3" json:"member_config,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotMeta) Reset() {
+	*x = InstallSnapshotMeta{}
+	mi := &file_rpc_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotMeta) ProtoMessage() {}
+
+func (x *InstallSnapshotMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotMeta.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotMeta) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *InstallSnapshotMeta) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotMeta) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *InstallSnapshotMeta) GetSnapshotSize() uint64 {
+	if x != nil {
+		return x.SnapshotSize
+	}
+	return 0
+}
+
+func (x *InstallSnapshotMeta) GetLastIncludedIndex() uint64 {
+	if x != nil {
+		return x.LastIncludedIndex
+	}
+	return 0
+}
+
+func (x *InstallSnapshotMeta) GetLastIncludedTerm() uint64 {
+	if x != nil {
+		return x.LastIncludedTerm
+	}
+	return 0
+}
+
+func (x *InstallSnapshotMeta) GetTimestamp() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Timestamp
+	}
+	return nil
+}
+
+func (x *InstallSnapshotMeta) GetMemberConfig() []*MemberConfig {
+	if x != nil {
+		return x.MemberConfig
+	}
+	return nil
+}
+
+// SnapshotChunk is one slice of the opaque snapshot payload. Chunk boundaries carry no
+// meaning: the receiver concatenates them in arrival order, so the sender may pick any
+// size, and snapshot_size — not the chunk count — is what says when the payload ends.
+type SnapshotChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chunk         []byte                 `protobuf:"bytes,1,opt,name=chunk,proto3" json:"chunk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotChunk) Reset() {
+	*x = SnapshotChunk{}
+	mi := &file_rpc_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotChunk) ProtoMessage() {}
+
+func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
+func (*SnapshotChunk) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SnapshotChunk) GetChunk() []byte {
+	if x != nil {
+		return x.Chunk
+	}
+	return nil
+}
+
+// MemberConfig is one member of the configuration carried in InstallSnapshotMeta.
+type MemberConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                         // peer ID; addresses are the Transport's concern, not the log's
+	PeerState     PeerState              `protobuf:"varint,2,opt,name=peer_state,json=peerState,proto3,enum=raft.rpc.PeerState" json:"peer_state,omitempty"` // whether this peer votes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemberConfig) Reset() {
+	*x = MemberConfig{}
+	mi := &file_rpc_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemberConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemberConfig) ProtoMessage() {}
+
+func (x *MemberConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_rpc_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemberConfig.ProtoReflect.Descriptor instead.
+func (*MemberConfig) Descriptor() ([]byte, []int) {
+	return file_rpc_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *MemberConfig) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *MemberConfig) GetPeerState() PeerState {
+	if x != nil {
+		return x.PeerState
+	}
+	return PeerState_UNKNOWN
+}
+
 // WriteLogRequest is sent by a client to submit new log entries to the cluster.
 type WriteLogRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -527,7 +922,7 @@ type WriteLogRequest struct {
 
 func (x *WriteLogRequest) Reset() {
 	*x = WriteLogRequest{}
-	mi := &file_rpc_proto_msgTypes[8]
+	mi := &file_rpc_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -539,7 +934,7 @@ func (x *WriteLogRequest) String() string {
 func (*WriteLogRequest) ProtoMessage() {}
 
 func (x *WriteLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rpc_proto_msgTypes[8]
+	mi := &file_rpc_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -552,7 +947,7 @@ func (x *WriteLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteLogRequest.ProtoReflect.Descriptor instead.
 func (*WriteLogRequest) Descriptor() ([]byte, []int) {
-	return file_rpc_proto_rawDescGZIP(), []int{8}
+	return file_rpc_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *WriteLogRequest) GetEntries() []*LogEntry {
@@ -574,7 +969,7 @@ type WriteLogResponse struct {
 
 func (x *WriteLogResponse) Reset() {
 	*x = WriteLogResponse{}
-	mi := &file_rpc_proto_msgTypes[9]
+	mi := &file_rpc_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -586,7 +981,7 @@ func (x *WriteLogResponse) String() string {
 func (*WriteLogResponse) ProtoMessage() {}
 
 func (x *WriteLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rpc_proto_msgTypes[9]
+	mi := &file_rpc_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -599,7 +994,7 @@ func (x *WriteLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteLogResponse.ProtoReflect.Descriptor instead.
 func (*WriteLogResponse) Descriptor() ([]byte, []int) {
-	return file_rpc_proto_rawDescGZIP(), []int{9}
+	return file_rpc_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WriteLogResponse) GetSuccess() bool {
@@ -634,7 +1029,7 @@ type ReadLogRequest struct {
 
 func (x *ReadLogRequest) Reset() {
 	*x = ReadLogRequest{}
-	mi := &file_rpc_proto_msgTypes[10]
+	mi := &file_rpc_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -646,7 +1041,7 @@ func (x *ReadLogRequest) String() string {
 func (*ReadLogRequest) ProtoMessage() {}
 
 func (x *ReadLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rpc_proto_msgTypes[10]
+	mi := &file_rpc_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -659,7 +1054,7 @@ func (x *ReadLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadLogRequest.ProtoReflect.Descriptor instead.
 func (*ReadLogRequest) Descriptor() ([]byte, []int) {
-	return file_rpc_proto_rawDescGZIP(), []int{10}
+	return file_rpc_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReadLogRequest) GetStartIndex() uint64 {
@@ -688,7 +1083,7 @@ type ReadLogResponse struct {
 
 func (x *ReadLogResponse) Reset() {
 	*x = ReadLogResponse{}
-	mi := &file_rpc_proto_msgTypes[11]
+	mi := &file_rpc_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +1095,7 @@ func (x *ReadLogResponse) String() string {
 func (*ReadLogResponse) ProtoMessage() {}
 
 func (x *ReadLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rpc_proto_msgTypes[11]
+	mi := &file_rpc_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +1108,7 @@ func (x *ReadLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadLogResponse.ProtoReflect.Descriptor instead.
 func (*ReadLogResponse) Descriptor() ([]byte, []int) {
-	return file_rpc_proto_rawDescGZIP(), []int{11}
+	return file_rpc_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ReadLogResponse) GetEntries() []*LogEntry {
@@ -741,7 +1136,7 @@ var File_rpc_proto protoreflect.FileDescriptor
 
 const file_rpc_proto_rawDesc = "" +
 	"\n" +
-	"\trpc.proto\x12\braft.rpc\x1a\tlog.proto\"\x92\x01\n" +
+	"\trpc.proto\x12\braft.rpc\x1a\tlog.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x92\x01\n" +
 	"\x0fRequestVoteArgs\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +
@@ -773,7 +1168,28 @@ const file_rpc_proto_rawDesc = "" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\"B\n" +
 	"\x12TimeoutNowResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
-	"\asuccess\x18\x02 \x01(\bR\asuccess\"?\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xa8\x01\n" +
+	"\x13InstallSnapshotArgs\x12D\n" +
+	"\rsnapshot_meta\x18\x01 \x01(\v2\x1d.raft.rpc.InstallSnapshotMetaH\x00R\fsnapshotMeta\x12@\n" +
+	"\x0esnapshot_chunk\x18\x02 \x01(\v2\x17.raft.rpc.SnapshotChunkH\x00R\rsnapshotChunkB\t\n" +
+	"\apayload\"G\n" +
+	"\x17InstallSnapshotResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xc0\x02\n" +
+	"\x13InstallSnapshotMeta\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12#\n" +
+	"\rsnapshot_size\x18\x03 \x01(\x04R\fsnapshotSize\x12.\n" +
+	"\x13last_included_index\x18\x04 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
+	"\x12last_included_term\x18\x05 \x01(\x04R\x10lastIncludedTerm\x128\n" +
+	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12;\n" +
+	"\rmember_config\x18\a \x03(\v2\x16.raft.rpc.MemberConfigR\fmemberConfig\"%\n" +
+	"\rSnapshotChunk\x12\x14\n" +
+	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"R\n" +
+	"\fMemberConfig\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x122\n" +
+	"\n" +
+	"peer_state\x18\x02 \x01(\x0e2\x13.raft.rpc.PeerStateR\tpeerState\"?\n" +
 	"\x0fWriteLogRequest\x12,\n" +
 	"\aentries\x18\x01 \x03(\v2\x12.raft.log.LogEntryR\aentries\"f\n" +
 	"\x10WriteLogResponse\x12\x18\n" +
@@ -787,7 +1203,12 @@ const file_rpc_proto_rawDesc = "" +
 	"\x0fReadLogResponse\x12,\n" +
 	"\aentries\x18\x01 \x03(\v2\x12.raft.log.LogEntryR\aentries\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12\x1b\n" +
-	"\terror_msg\x18\x03 \x01(\tR\berrorMsg2\xa7\x03\n" +
+	"\terror_msg\x18\x03 \x01(\tR\berrorMsg*>\n" +
+	"\tPeerState\x12\v\n" +
+	"\aUNKNOWN\x10\x00\x12\v\n" +
+	"\aSTAGING\x10\x01\x12\t\n" +
+	"\x05VOTER\x10\x02\x12\f\n" +
+	"\bNONVOTER\x10\x032\xfe\x03\n" +
 	"\aRaftRpc\x12G\n" +
 	"\vRequestVote\x12\x19.raft.rpc.RequestVoteArgs\x1a\x1d.raft.rpc.RequestVoteResponse\x12M\n" +
 	"\rAppendEntries\x12\x1b.raft.rpc.AppendEntriesArgs\x1a\x1f.raft.rpc.AppendEntriesResponse\x12;\n" +
@@ -795,7 +1216,8 @@ const file_rpc_proto_rawDesc = "" +
 	"\n" +
 	"TimeoutNow\x12\x18.raft.rpc.TimeoutNowArgs\x1a\x1c.raft.rpc.TimeoutNowResponse\x12A\n" +
 	"\bWriteLog\x12\x19.raft.rpc.WriteLogRequest\x1a\x1a.raft.rpc.WriteLogResponse\x12>\n" +
-	"\aReadLog\x12\x18.raft.rpc.ReadLogRequest\x1a\x19.raft.rpc.ReadLogResponseB0Z.github.com/SHREYANSHSINGH14/raft/example/typesb\x06proto3"
+	"\aReadLog\x12\x18.raft.rpc.ReadLogRequest\x1a\x19.raft.rpc.ReadLogResponse\x12U\n" +
+	"\x0fInstallSnapshot\x12\x1d.raft.rpc.InstallSnapshotArgs\x1a!.raft.rpc.InstallSnapshotResponse(\x01B0Z.github.com/SHREYANSHSINGH14/raft/example/typesb\x06proto3"
 
 var (
 	file_rpc_proto_rawDescOnce sync.Once
@@ -809,43 +1231,58 @@ func file_rpc_proto_rawDescGZIP() []byte {
 	return file_rpc_proto_rawDescData
 }
 
-var file_rpc_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_rpc_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_rpc_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_rpc_proto_goTypes = []any{
-	(*RequestVoteArgs)(nil),       // 0: raft.rpc.RequestVoteArgs
-	(*RequestVoteResponse)(nil),   // 1: raft.rpc.RequestVoteResponse
-	(*AppendEntriesArgs)(nil),     // 2: raft.rpc.AppendEntriesArgs
-	(*AppendEntriesResponse)(nil), // 3: raft.rpc.AppendEntriesResponse
-	(*PreVoteArgs)(nil),           // 4: raft.rpc.PreVoteArgs
-	(*PreVoteResponse)(nil),       // 5: raft.rpc.PreVoteResponse
-	(*TimeoutNowArgs)(nil),        // 6: raft.rpc.TimeoutNowArgs
-	(*TimeoutNowResponse)(nil),    // 7: raft.rpc.TimeoutNowResponse
-	(*WriteLogRequest)(nil),       // 8: raft.rpc.WriteLogRequest
-	(*WriteLogResponse)(nil),      // 9: raft.rpc.WriteLogResponse
-	(*ReadLogRequest)(nil),        // 10: raft.rpc.ReadLogRequest
-	(*ReadLogResponse)(nil),       // 11: raft.rpc.ReadLogResponse
-	(*LogEntry)(nil),              // 12: raft.log.LogEntry
+	(PeerState)(0),                  // 0: raft.rpc.PeerState
+	(*RequestVoteArgs)(nil),         // 1: raft.rpc.RequestVoteArgs
+	(*RequestVoteResponse)(nil),     // 2: raft.rpc.RequestVoteResponse
+	(*AppendEntriesArgs)(nil),       // 3: raft.rpc.AppendEntriesArgs
+	(*AppendEntriesResponse)(nil),   // 4: raft.rpc.AppendEntriesResponse
+	(*PreVoteArgs)(nil),             // 5: raft.rpc.PreVoteArgs
+	(*PreVoteResponse)(nil),         // 6: raft.rpc.PreVoteResponse
+	(*TimeoutNowArgs)(nil),          // 7: raft.rpc.TimeoutNowArgs
+	(*TimeoutNowResponse)(nil),      // 8: raft.rpc.TimeoutNowResponse
+	(*InstallSnapshotArgs)(nil),     // 9: raft.rpc.InstallSnapshotArgs
+	(*InstallSnapshotResponse)(nil), // 10: raft.rpc.InstallSnapshotResponse
+	(*InstallSnapshotMeta)(nil),     // 11: raft.rpc.InstallSnapshotMeta
+	(*SnapshotChunk)(nil),           // 12: raft.rpc.SnapshotChunk
+	(*MemberConfig)(nil),            // 13: raft.rpc.MemberConfig
+	(*WriteLogRequest)(nil),         // 14: raft.rpc.WriteLogRequest
+	(*WriteLogResponse)(nil),        // 15: raft.rpc.WriteLogResponse
+	(*ReadLogRequest)(nil),          // 16: raft.rpc.ReadLogRequest
+	(*ReadLogResponse)(nil),         // 17: raft.rpc.ReadLogResponse
+	(*LogEntry)(nil),                // 18: raft.log.LogEntry
+	(*timestamppb.Timestamp)(nil),   // 19: google.protobuf.Timestamp
 }
 var file_rpc_proto_depIdxs = []int32{
-	12, // 0: raft.rpc.AppendEntriesArgs.entries:type_name -> raft.log.LogEntry
-	12, // 1: raft.rpc.WriteLogRequest.entries:type_name -> raft.log.LogEntry
-	12, // 2: raft.rpc.ReadLogResponse.entries:type_name -> raft.log.LogEntry
-	0,  // 3: raft.rpc.RaftRpc.RequestVote:input_type -> raft.rpc.RequestVoteArgs
-	2,  // 4: raft.rpc.RaftRpc.AppendEntries:input_type -> raft.rpc.AppendEntriesArgs
-	4,  // 5: raft.rpc.RaftRpc.PreVote:input_type -> raft.rpc.PreVoteArgs
-	6,  // 6: raft.rpc.RaftRpc.TimeoutNow:input_type -> raft.rpc.TimeoutNowArgs
-	8,  // 7: raft.rpc.RaftRpc.WriteLog:input_type -> raft.rpc.WriteLogRequest
-	10, // 8: raft.rpc.RaftRpc.ReadLog:input_type -> raft.rpc.ReadLogRequest
-	1,  // 9: raft.rpc.RaftRpc.RequestVote:output_type -> raft.rpc.RequestVoteResponse
-	3,  // 10: raft.rpc.RaftRpc.AppendEntries:output_type -> raft.rpc.AppendEntriesResponse
-	5,  // 11: raft.rpc.RaftRpc.PreVote:output_type -> raft.rpc.PreVoteResponse
-	7,  // 12: raft.rpc.RaftRpc.TimeoutNow:output_type -> raft.rpc.TimeoutNowResponse
-	9,  // 13: raft.rpc.RaftRpc.WriteLog:output_type -> raft.rpc.WriteLogResponse
-	11, // 14: raft.rpc.RaftRpc.ReadLog:output_type -> raft.rpc.ReadLogResponse
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	18, // 0: raft.rpc.AppendEntriesArgs.entries:type_name -> raft.log.LogEntry
+	11, // 1: raft.rpc.InstallSnapshotArgs.snapshot_meta:type_name -> raft.rpc.InstallSnapshotMeta
+	12, // 2: raft.rpc.InstallSnapshotArgs.snapshot_chunk:type_name -> raft.rpc.SnapshotChunk
+	19, // 3: raft.rpc.InstallSnapshotMeta.timestamp:type_name -> google.protobuf.Timestamp
+	13, // 4: raft.rpc.InstallSnapshotMeta.member_config:type_name -> raft.rpc.MemberConfig
+	0,  // 5: raft.rpc.MemberConfig.peer_state:type_name -> raft.rpc.PeerState
+	18, // 6: raft.rpc.WriteLogRequest.entries:type_name -> raft.log.LogEntry
+	18, // 7: raft.rpc.ReadLogResponse.entries:type_name -> raft.log.LogEntry
+	1,  // 8: raft.rpc.RaftRpc.RequestVote:input_type -> raft.rpc.RequestVoteArgs
+	3,  // 9: raft.rpc.RaftRpc.AppendEntries:input_type -> raft.rpc.AppendEntriesArgs
+	5,  // 10: raft.rpc.RaftRpc.PreVote:input_type -> raft.rpc.PreVoteArgs
+	7,  // 11: raft.rpc.RaftRpc.TimeoutNow:input_type -> raft.rpc.TimeoutNowArgs
+	14, // 12: raft.rpc.RaftRpc.WriteLog:input_type -> raft.rpc.WriteLogRequest
+	16, // 13: raft.rpc.RaftRpc.ReadLog:input_type -> raft.rpc.ReadLogRequest
+	9,  // 14: raft.rpc.RaftRpc.InstallSnapshot:input_type -> raft.rpc.InstallSnapshotArgs
+	2,  // 15: raft.rpc.RaftRpc.RequestVote:output_type -> raft.rpc.RequestVoteResponse
+	4,  // 16: raft.rpc.RaftRpc.AppendEntries:output_type -> raft.rpc.AppendEntriesResponse
+	6,  // 17: raft.rpc.RaftRpc.PreVote:output_type -> raft.rpc.PreVoteResponse
+	8,  // 18: raft.rpc.RaftRpc.TimeoutNow:output_type -> raft.rpc.TimeoutNowResponse
+	15, // 19: raft.rpc.RaftRpc.WriteLog:output_type -> raft.rpc.WriteLogResponse
+	17, // 20: raft.rpc.RaftRpc.ReadLog:output_type -> raft.rpc.ReadLogResponse
+	10, // 21: raft.rpc.RaftRpc.InstallSnapshot:output_type -> raft.rpc.InstallSnapshotResponse
+	15, // [15:22] is the sub-list for method output_type
+	8,  // [8:15] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_rpc_proto_init() }
@@ -854,18 +1291,23 @@ func file_rpc_proto_init() {
 		return
 	}
 	file_log_proto_init()
+	file_rpc_proto_msgTypes[8].OneofWrappers = []any{
+		(*InstallSnapshotArgs_SnapshotMeta)(nil),
+		(*InstallSnapshotArgs_SnapshotChunk)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rpc_proto_rawDesc), len(file_rpc_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   12,
+			NumEnums:      1,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_rpc_proto_goTypes,
 		DependencyIndexes: file_rpc_proto_depIdxs,
+		EnumInfos:         file_rpc_proto_enumTypes,
 		MessageInfos:      file_rpc_proto_msgTypes,
 	}.Build()
 	File_rpc_proto = out.File

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Server struct {
@@ -65,7 +68,7 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	transport, err := newGRPCTransport(cfg.ServerIDS, cfg.RPCTimeoutMs)
+	transport, err := newGRPCTransport(cfg.ServerIDS)
 	if err != nil {
 		return nil, fmt.Errorf("error creating transport: %w", err)
 	}
@@ -178,12 +181,17 @@ func (s *Server) Start() {
 }
 
 // grpcTransport implements raft.Transport using gRPC connections to peers.
+//
+// It sets no deadlines of its own. The library deadlines every RPC before handing us
+// the context, and two of them are scaled to the work: AppendEntries by batch size,
+// InstallSnapshot by snapshot size. A context.WithTimeout here would keep whichever
+// deadline is earlier, so a flat per-transport timeout would silently override that
+// scaling and cap a large catch-up at the budget for a heartbeat.
 type grpcTransport struct {
 	clients map[string]types.RaftRpcClient
-	timeout time.Duration
 }
 
-func newGRPCTransport(peerURLs map[string]string, timeoutMs int) (*grpcTransport, error) {
+func newGRPCTransport(peerURLs map[string]string) (*grpcTransport, error) {
 	clients := make(map[string]types.RaftRpcClient, len(peerURLs))
 	for id, url := range peerURLs {
 		conn, err := grpc.NewClient(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -194,7 +202,6 @@ func newGRPCTransport(peerURLs map[string]string, timeoutMs int) (*grpcTransport
 	}
 	return &grpcTransport{
 		clients: clients,
-		timeout: time.Duration(timeoutMs) * time.Millisecond,
 	}, nil
 }
 
@@ -203,9 +210,6 @@ func (t *grpcTransport) RequestVote(ctx context.Context, peerID string, args raf
 	if !ok {
 		return raft.RequestVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
 	resp, err := client.RequestVote(ctx, &types.RequestVoteArgs{
 		CandidateId:  args.CandidateID,
 		Term:         args.Term,
@@ -226,9 +230,6 @@ func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args r
 	if !ok {
 		return raft.AppendEntriesResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
 	resp, err := client.AppendEntries(ctx, &types.AppendEntriesArgs{
 		Term:         args.Term,
 		LeaderId:     args.LeaderID,
@@ -251,9 +252,6 @@ func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.Pr
 	if !ok {
 		return raft.PreVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
 	resp, err := client.PreVote(ctx, &types.PreVoteArgs{
 		Term:         args.Term,
 		CandidateId:  args.CandidateID,
@@ -274,9 +272,6 @@ func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft
 	if !ok {
 		return raft.TimeoutNowResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
-	ctx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
 	resp, err := client.TimeoutNow(ctx, &types.TimeoutNowArgs{
 		Term:     args.Term,
 		LeaderId: args.LeaderID,
@@ -290,9 +285,67 @@ func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft
 	}, nil
 }
 
-// InstallSnapshot is a stub: proto/rpc.proto has no InstallSnapshot RPC yet, so
-// types.RaftRpcClient can't send one. Wire the streaming client call once the
-// proto exists. See STATE.md.
 func (t *grpcTransport) InstallSnapshot(ctx context.Context, peerID string, args raft.InstallSnapshotArgs) (raft.InstallSnapshotResponse, error) {
-	return raft.InstallSnapshotResponse{}, fmt.Errorf("InstallSnapshot not implemented")
+	client, ok := t.clients[peerID]
+	if !ok {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("unknown peer: %s", peerID)
+	}
+	stream, err := client.InstallSnapshot(ctx)
+	if err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+
+	var memberConfig []*types.MemberConfig
+	for id, state := range args.SnapshotMetadata.MemberConfig {
+		memberConfig = append(memberConfig, &types.MemberConfig{
+			Id:        id,
+			PeerState: raftToProtoPeerState(state),
+		})
+	}
+
+	err = stream.Send(&types.InstallSnapshotArgs{
+		Payload: &types.InstallSnapshotArgs_SnapshotMeta{
+			SnapshotMeta: &types.InstallSnapshotMeta{
+				Term:              args.Term,
+				LeaderId:          args.LeaderID,
+				SnapshotSize:      args.SnapshotSize,
+				LastIncludedIndex: args.SnapshotMetadata.LastIncludedIndex,
+				LastIncludedTerm:  args.SnapshotMetadata.LastIncludedTerm,
+				Timestamp:         timestamppb.New(args.SnapshotMetadata.TimeStamp),
+				MemberConfig:      memberConfig,
+			},
+		},
+	})
+	if err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+
+	chunks := make([]byte, 64*statemachine.KB)
+	for {
+		n, err := args.Reader.Read(chunks)
+		if n > 0 {
+			if sendErr := stream.Send(&types.InstallSnapshotArgs{
+				Payload: &types.InstallSnapshotArgs_SnapshotChunk{
+					SnapshotChunk: &types.SnapshotChunk{Chunk: chunks[:n]},
+				},
+			}); sendErr != nil {
+				break // stream is broken; the real status comes from CloseAndRecv
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return raft.InstallSnapshotResponse{}, err
+		}
+	}
+
+	res, err := stream.CloseAndRecv()
+	if err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+	return raft.InstallSnapshotResponse{
+		Term:    res.Term,
+		Success: res.Success,
+	}, nil
 }

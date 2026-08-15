@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RaftRpc_RequestVote_FullMethodName   = "/raft.rpc.RaftRpc/RequestVote"
-	RaftRpc_AppendEntries_FullMethodName = "/raft.rpc.RaftRpc/AppendEntries"
-	RaftRpc_PreVote_FullMethodName       = "/raft.rpc.RaftRpc/PreVote"
-	RaftRpc_TimeoutNow_FullMethodName    = "/raft.rpc.RaftRpc/TimeoutNow"
-	RaftRpc_WriteLog_FullMethodName      = "/raft.rpc.RaftRpc/WriteLog"
-	RaftRpc_ReadLog_FullMethodName       = "/raft.rpc.RaftRpc/ReadLog"
+	RaftRpc_RequestVote_FullMethodName     = "/raft.rpc.RaftRpc/RequestVote"
+	RaftRpc_AppendEntries_FullMethodName   = "/raft.rpc.RaftRpc/AppendEntries"
+	RaftRpc_PreVote_FullMethodName         = "/raft.rpc.RaftRpc/PreVote"
+	RaftRpc_TimeoutNow_FullMethodName      = "/raft.rpc.RaftRpc/TimeoutNow"
+	RaftRpc_WriteLog_FullMethodName        = "/raft.rpc.RaftRpc/WriteLog"
+	RaftRpc_ReadLog_FullMethodName         = "/raft.rpc.RaftRpc/ReadLog"
+	RaftRpc_InstallSnapshot_FullMethodName = "/raft.rpc.RaftRpc/InstallSnapshot"
 )
 
 // RaftRpcClient is the client API for RaftRpc service.
@@ -65,6 +66,17 @@ type RaftRpcClient interface {
 	// Reads are served by any node since this is used for debugging and
 	// verifying replication. Production linearizable reads should go to leader only.
 	ReadLog(ctx context.Context, in *ReadLogRequest, opts ...grpc.CallOption) (*ReadLogResponse, error)
+	// InstallSnapshot is how a leader catches up a follower whose next needed entry
+	// has already been compacted away. AppendEntries cannot help there — the entries
+	// it would have to send no longer exist — so the leader ships the state machine
+	// itself instead of the log that produced it.
+	//
+	// Client-streaming, because a snapshot is arbitrarily large and must not have to
+	// fit in a single message. Exactly one snapshot_meta arrives first, then
+	// snapshot_chunk repeats until the sender half-closes; the single response comes
+	// back after that. The receiver rejects a chunk that precedes the meta and a
+	// second meta on the same stream.
+	InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotArgs, InstallSnapshotResponse], error)
 }
 
 type raftRpcClient struct {
@@ -135,6 +147,19 @@ func (c *raftRpcClient) ReadLog(ctx context.Context, in *ReadLogRequest, opts ..
 	return out, nil
 }
 
+func (c *raftRpcClient) InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotArgs, InstallSnapshotResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RaftRpc_ServiceDesc.Streams[0], RaftRpc_InstallSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[InstallSnapshotArgs, InstallSnapshotResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftRpc_InstallSnapshotClient = grpc.ClientStreamingClient[InstallSnapshotArgs, InstallSnapshotResponse]
+
 // RaftRpcServer is the server API for RaftRpc service.
 // All implementations must embed UnimplementedRaftRpcServer
 // for forward compatibility.
@@ -173,6 +198,17 @@ type RaftRpcServer interface {
 	// Reads are served by any node since this is used for debugging and
 	// verifying replication. Production linearizable reads should go to leader only.
 	ReadLog(context.Context, *ReadLogRequest) (*ReadLogResponse, error)
+	// InstallSnapshot is how a leader catches up a follower whose next needed entry
+	// has already been compacted away. AppendEntries cannot help there — the entries
+	// it would have to send no longer exist — so the leader ships the state machine
+	// itself instead of the log that produced it.
+	//
+	// Client-streaming, because a snapshot is arbitrarily large and must not have to
+	// fit in a single message. Exactly one snapshot_meta arrives first, then
+	// snapshot_chunk repeats until the sender half-closes; the single response comes
+	// back after that. The receiver rejects a chunk that precedes the meta and a
+	// second meta on the same stream.
+	InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotArgs, InstallSnapshotResponse]) error
 	mustEmbedUnimplementedRaftRpcServer()
 }
 
@@ -200,6 +236,9 @@ func (UnimplementedRaftRpcServer) WriteLog(context.Context, *WriteLogRequest) (*
 }
 func (UnimplementedRaftRpcServer) ReadLog(context.Context, *ReadLogRequest) (*ReadLogResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadLog not implemented")
+}
+func (UnimplementedRaftRpcServer) InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotArgs, InstallSnapshotResponse]) error {
+	return status.Error(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftRpcServer) mustEmbedUnimplementedRaftRpcServer() {}
 func (UnimplementedRaftRpcServer) testEmbeddedByValue()                 {}
@@ -330,6 +369,13 @@ func _RaftRpc_ReadLog_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftRpc_InstallSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RaftRpcServer).InstallSnapshot(&grpc.GenericServerStream[InstallSnapshotArgs, InstallSnapshotResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftRpc_InstallSnapshotServer = grpc.ClientStreamingServer[InstallSnapshotArgs, InstallSnapshotResponse]
+
 // RaftRpc_ServiceDesc is the grpc.ServiceDesc for RaftRpc service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -362,6 +408,12 @@ var RaftRpc_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RaftRpc_ReadLog_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "InstallSnapshot",
+			Handler:       _RaftRpc_InstallSnapshot_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "rpc.proto",
 }

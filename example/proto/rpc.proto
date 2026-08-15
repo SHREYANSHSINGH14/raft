@@ -5,6 +5,7 @@ package raft.rpc;
 option go_package = "github.com/SHREYANSHSINGH14/raft/example/types";
 
 import "log.proto";
+import "google/protobuf/timestamp.proto";
 
 // ─────────────────────────────────────────────
 //  Service definition
@@ -49,6 +50,18 @@ service RaftRpc {
     // Reads are served by any node since this is used for debugging and
     // verifying replication. Production linearizable reads should go to leader only.
     rpc ReadLog (ReadLogRequest) returns (ReadLogResponse);
+
+    // InstallSnapshot is how a leader catches up a follower whose next needed entry
+    // has already been compacted away. AppendEntries cannot help there — the entries
+    // it would have to send no longer exist — so the leader ships the state machine
+    // itself instead of the log that produced it.
+    //
+    // Client-streaming, because a snapshot is arbitrarily large and must not have to
+    // fit in a single message. Exactly one snapshot_meta arrives first, then
+    // snapshot_chunk repeats until the sender half-closes; the single response comes
+    // back after that. The receiver rejects a chunk that precedes the meta and a
+    // second meta on the same stream.
+    rpc InstallSnapshot(stream InstallSnapshotArgs) returns (InstallSnapshotResponse);
 }
 
 // ─────────────────────────────────────────────
@@ -117,6 +130,65 @@ message TimeoutNowArgs {
 message TimeoutNowResponse {
     uint64 term    = 1; // recipient's current term
     bool   success = 2; // true if the recipient will campaign
+}
+
+// InstallSnapshotArgs is one message on the InstallSnapshot stream.
+//
+// The oneof is what keeps the header and the payload on a single stream: the first
+// message carries snapshot_meta, every message after it carries snapshot_chunk. Two
+// separate RPCs would make "which transfer does this chunk belong to" a question the
+// protocol has to answer, and would let chunks outlive the meta that describes them.
+message InstallSnapshotArgs {
+  oneof payload {
+    InstallSnapshotMeta snapshot_meta = 1; // exactly once, as the first message
+    SnapshotChunk snapshot_chunk      = 2; // zero or more, only after the meta
+  }
+}
+
+// InstallSnapshotResponse is the single reply, sent once the receiver has taken the
+// whole snapshot and handed it to its state machine.
+message InstallSnapshotResponse {
+    uint64 term    = 1; // receiver's current term (leader steps down if stale)
+    bool   success = 2; // true if the snapshot was installed
+}
+
+// InstallSnapshotMeta is the stream header: everything the receiver needs in order to
+// judge the transfer before a single byte of payload arrives.
+message InstallSnapshotMeta {
+    uint64 term                         = 1; // leader's current term
+    string leader_id                    = 2; // leader's ID, so the receiver can redirect clients
+    uint64 snapshot_size                = 3; // total payload bytes to expect across all chunks
+    uint64 last_included_index          = 4; // the snapshot replaces the log up to here, inclusive
+    uint64 last_included_term           = 5; // term of last_included_index
+    google.protobuf.Timestamp timestamp = 6; // when the snapshot was taken; diagnostics only
+
+    // Cluster membership as of last_included_index. It travels with the snapshot
+    // because installing one discards the log that held the configuration entries —
+    // without this the receiver would restore its state and not know who its peers
+    // are.
+    repeated MemberConfig member_config = 7;
+}
+
+// SnapshotChunk is one slice of the opaque snapshot payload. Chunk boundaries carry no
+// meaning: the receiver concatenates them in arrival order, so the sender may pick any
+// size, and snapshot_size — not the chunk count — is what says when the payload ends.
+message SnapshotChunk {
+  bytes chunk = 1;
+}
+
+// PeerState mirrors raft.PeerState. STAGING is a member still catching up, replicated
+// to but not counted toward a majority; NONVOTER is replicated to and never counted.
+enum PeerState {
+  UNKNOWN  = 0;
+  STAGING  = 1;
+  VOTER    = 2;
+  NONVOTER = 3;
+}
+
+// MemberConfig is one member of the configuration carried in InstallSnapshotMeta.
+message MemberConfig {
+    string id            = 1; // peer ID; addresses are the Transport's concern, not the log's
+    PeerState peer_state = 2; // whether this peer votes
 }
 
 // ─────────────────────────────────────────────
