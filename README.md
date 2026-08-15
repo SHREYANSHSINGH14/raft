@@ -53,7 +53,10 @@ way only: `example/` imports the root, never the reverse.
 │   ├── config/           # Config loading from env vars + peers.yaml
 │   ├── server/           # gRPC server + HTTP debug server
 │   │   ├── server.go     # grpcTransport adapter wires gRPC → raft.Transport
-│   │   └── debug_server.go
+│   │   ├── rpc.go        # inbound Raft RPCs, incl. streaming InstallSnapshot
+│   │   ├── debug_server.go
+│   │   └── debug_kv.go   # /kv/* endpoints — propose, wait, report
+│   ├── statemachine/     # PebbleDB-backed raft.StateMachine implementation
 │   ├── db/               # PebbleDB-backed raft.Storage implementation
 │   ├── proto/            # Protobuf definitions
 │   ├── types/            # Generated protobuf types
@@ -68,6 +71,7 @@ way only: `example/` imports the root, never the reverse.
     ├── JOURNEY.md        # Bugs hit, why they happened, what each taught
     ├── STATE.md          # What is in flight right now
     ├── architecture.md   # Per-concern breakdown (+ architecture.mmd)
+    ├── command-results.md # How a per-command result reaches the caller
     └── membership-change.md
 ```
 
@@ -147,6 +151,45 @@ go build -o raftd example/main.go
 Run both from the repo root — `PEER_INFO` in `config.dev.env` is `example/peers.yaml`, resolved
 relative to the working directory.
 
+### Run a 3-node cluster without Docker
+
+Faster to iterate on than `docker compose`, and the logs land in files you can `tail`. Each node needs
+its own data directory, snapshot directory, and pair of ports.
+
+```bash
+go build -o /tmp/raftd example/main.go
+
+cat > /tmp/peers3.yaml <<'EOF'
+peers:
+  - id: peer1
+    rpc_url: localhost:50051
+  - id: peer2
+    rpc_url: localhost:50052
+  - id: peer3
+    rpc_url: localhost:50053
+EOF
+
+start() {  # start <id> <grpc-port> <debug-port>
+  ID=$1 BASE_URL=127.0.0.1 PORT=$2 DEBUG_PORT=$3 \
+  DB_DIR=/tmp/raft/$1/data SNAPSHOT_DIR=/tmp/raft/$1/snapshots \
+  PEER_INFO=/tmp/peers3.yaml LOG_LEVEL=debug \
+  RPC_TIMEOUT_MS=50 HEARTBEAT_MS=100 ELECTION_MIN_MS=1000 ELECTION_MAX_MS=5000 \
+  SNAPSHOT_INTERVAL_S=300 SNAPSHOT_THRESHOLD=1000 \
+  /tmp/raftd server start > /tmp/raft/$1.log 2>&1 &
+}
+
+mkdir -p /tmp/raft
+start peer1 50051 8081
+start peer2 50052 8082
+start peer3 50053 8083
+```
+
+A leader is elected within a couple of seconds. Stop them with
+`pkill -f '/tmp/raftd server start'`, and wipe state between runs with `rm -rf /tmp/raft`.
+
+**A node will not campaign until it can reach a majority** — it logs `waiting for quorum...` until
+enough peers answer. Starting fewer than two of three means no leader, by design.
+
 ---
 
 ## Debug HTTP API
@@ -155,15 +198,36 @@ Each node exposes a debug HTTP server for manual inspection and testing.
 
 ### Check all nodes at once
 ```bash
-for i in 1 2 3 4 5; do curl -s http://localhost:808${i}/status; echo; done
+for i in 1 2 3; do curl -s http://localhost:808${i}/status | jq -c '{id,role,term,commit_index,leader_id}'; done
 ```
 ```json
-{"id":"peer1","role":"LEADER","term":1,"commit_index":2,"leader_id":""}
-{"id":"peer2","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
-{"id":"peer3","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
-{"id":"peer4","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
-{"id":"peer5","role":"FOLLOWER","term":1,"commit_index":2,"leader_id":"peer1"}
+{"id":"peer1","role":"FOLLOWER","term":1,"commit_index":3,"leader_id":"peer3"}
+{"id":"peer2","role":"FOLLOWER","term":1,"commit_index":3,"leader_id":"peer3"}
+{"id":"peer3","role":"LEADER","term":1,"commit_index":3,"leader_id":""}
 ```
+
+The full response carries replication state as well — `last_log_index` next to `commit_index` answers
+"how far behind is this node" in one call, and `peers` is the live configuration
+(`configurations.latest`), not the bootstrap seed:
+
+```bash
+curl -s http://localhost:8083/status
+```
+```json
+{
+  "id": "peer3", "role": "LEADER", "is_leader": true, "term": 1, "leader_id": "",
+  "commit_index": 3, "last_log_index": 3,
+  "snapshot_index": 0, "snapshot_term": 0,
+  "peers": {
+    "peer1": {"peer_state": "VOTER", "next_index": 4, "match_index": 3},
+    "peer2": {"peer_state": "VOTER", "next_index": 4, "match_index": 3},
+    "peer3": {"peer_state": "VOTER", "next_index": 0, "match_index": 0}
+  }
+}
+```
+
+A leader's entry for *itself* shows zeroes: it does not replicate to itself, so it keeps no
+next/match index — `getMajorityMatchIndex` substitutes its own last log index when counting.
 
 ### Write a log entry
 ```bash
@@ -187,15 +251,92 @@ curl -s -X POST http://localhost:8082/logs/append \
 
 ### Read log entries
 ```bash
-curl -s "http://localhost:8081/logs/get?start=1&end=5"
+curl -s "http://localhost:8083/logs/get?start=1"
 ```
 ```json
-{"entries":[{"index":1,"term":1,"data":"set x=5"},{"index":2,"term":1,"data":"set y=10"}],"error_msg":"","leader_id":""}
+{
+  "node_id": "peer3", "role": "LEADER", "term": 1, "commit_index": 3,
+  "start_index": 1, "count": 3,
+  "entries": [
+    {"index": 1, "term": 1, "type": "NO_OP", "type_code": 1, "committed": true, "data_size": 0},
+    {
+      "index": 2, "term": 1, "type": "COMMAND", "type_code": 0,
+      "committed": true, "data_size": 124,
+      "data": {"id": "18c5c09a…", "op": "SET", "key": "user:1", "value": "eyJuYW1lIjoiYWxpY2UifQ=="},
+      "command": {"id": "18c5c09a…", "op": "SET", "key": "user:1", "value": {"name": "alice"}}
+    }
+  ]
+}
 ```
 
-Omit `end` to fetch everything from `start` to the latest:
+`data` is the entry as stored — `value` is base64 there because Go marshals `[]byte` that way.
+`command` is the same entry decoded, which is what you actually want to read. It appears only for
+`type: COMMAND` entries whose payload parses.
+
+`type` is reported by name because the numeric `EntryType` is an `iota` whose meaning is invisible in a
+dump, and the proto enum is offset by one — comparing the raw numbers across the two will mislead you.
+
+The envelope names the node that answered and where it stood. The same query against two nodes
+legitimately returns different things, and `committed` is per-node: an entry can be present in the log
+but not yet committed.
+
+Omit `start` to default to 1; there is no `end` — it returns everything from `start` to the latest.
+
+### Key/value operations
+
+These go through the state machine, so they are the ones that actually exercise replication. Values are
+raw JSON — whatever you send comes back unchanged. Writes must go to the leader.
+
 ```bash
-curl -s "http://localhost:8081/logs/get?start=1"
+# set — send writes to the leader
+curl -s -X POST http://localhost:8083/kv/set \
+  -d '{"key":"user:1","value":{"name":"alice"}}'
+```
+```json
+{"success":true,"key":"user:1","node_id":"peer3","role":"LEADER","commit_index":2,
+ "command_id":"18c5c09ab8e6b747c59efa6461158c11","index":2}
+```
+
+`command_id` and `index` identify the entry the write produced — look it up with
+`/logs/get?start=<index>`.
+
+```bash
+# read it back from every node — this is what proves replication
+for i in 1 2 3; do curl -s "http://localhost:808${i}/kv/get?key=user:1"; echo; done
+```
+```json
+{"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer1","role":"FOLLOWER","commit_index":3,"leader_id":"peer3"}
+{"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer2","role":"FOLLOWER","commit_index":3,"leader_id":"peer3"}
+{"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer3","role":"LEADER","commit_index":3}
+```
+
+`/kv/get` is a **stale local read** — it never touches the log, so it reports whatever that node has
+applied so far. That is why every response names the node and its `commit_index`: a follower that has
+not applied the entry yet answers `not found` for a moment, and the position is what tells you whether
+that is lag or a real miss.
+
+```bash
+# compare-and-swap
+curl -s -X POST http://localhost:8083/kv/set -d '{"key":"counter","value":1}'
+curl -s -X POST http://localhost:8083/kv/cas -d '{"key":"counter","expected":1,"value":2}'
+```
+
+A CAS whose expected value does not match is a *command* failure, not a node failure — the entry still
+committed, the write just did not happen, and the apply loop carries on. It still gets an index:
+```bash
+curl -s -X POST http://localhost:8083/kv/cas -d '{"key":"user:1","expected":{"name":"bob"},"value":1}'
+```
+```json
+{"success":false,"key":"user:1","node_id":"peer3","role":"LEADER","commit_index":3,
+ "command_id":"2a0224628de68bb2381268aa0852bd5b","index":3,
+ "error_msg":"command failed: cas: value mismatch for key \"user:1\""}
+```
+`HTTP 409` for a refused command, `404` for a missing key on `/kv/get`, `500` for anything else —
+including a write sent to a follower, which returns the `leader_id` to redirect to.
+
+```bash
+# delete
+curl -s -X POST http://localhost:8083/kv/delete -d '{"key":"user:1"}'
 ```
 
 ---
@@ -252,22 +393,30 @@ peers:
 - [x] Commit index advancement (majority match, Voters only)
 - [x] Persistent state (`currentTerm`, `votedFor`, log entries)
 - [x] Apply loop — committed entries reach the `StateMachine`
-- [x] `Propose` waits for commit, and fails fast with `ErrLeadershipLost` on step-down
+- [x] `Propose` returns a `Future`; `Future.Wait` is the commit-wait, failing fast with
+      `ErrLeadershipLost` on step-down
+- [x] `Node.Fatal()` — an apply loop that stops for good is reported rather than silently frozen
 - [x] Snapshots — creation, on-disk format, `InstallSnapshot` send + receive, log compaction
 - [x] **Cluster membership changes** — `AddMember` and `RemoveMember`, single-server changes
       (Ongaro §4.1), including a leader removing itself
-- [x] Client `WriteLog` / `ReadLog` RPCs
+- [x] **The whole Raft surface over gRPC** — `RequestVote`, `AppendEntries`, `PreVote`, `TimeoutNow`,
+      and a client-streaming `InstallSnapshot`
+- [x] **A real `StateMachine`** — `example/statemachine`, backed by Pebble: `Apply`, `Snapshot`,
+      `Restore`, with per-command results routed back to the caller
+- [x] Client `WriteLog` / `ReadLog` RPCs, and key/value endpoints on the debug server
 - [x] Graceful shutdown via context cancellation
 - [x] Debug HTTP server
 
 ## What's Not Yet Implemented
 
-- [ ] **`PreVote` / `TimeoutNow` / `InstallSnapshot` over gRPC** — the handlers and the `Transport`
-      methods exist, but `proto/rpc.proto` has no such RPCs, so `grpcTransport` stubs all three.
-      Since elections are gated behind pre-vote, this currently prevents a *real* cluster from
-      electing a leader — the library's own tests pass because they mock the transport. See `docs/STATE.md`.
-- [ ] `Propose` returning a future instead of blocking (design in `docs/STATE.md`)
-- [ ] Linearizable reads
+- [ ] **Linearizable reads** — `/kv/get` reads the local Pebble directly, so it returns whatever that
+      node has applied. A correct read needs a log entry per read or a ReadIndex round trip.
+- [ ] **Exactly-once commands** — command ids are server-generated, so a client retry proposes a
+      second entry. Needs client-supplied ids plus a dedup table in `Apply`.
+- [ ] **Tests for `example/statemachine`** — the only package in the repo without any. A
+      `Persist` → `Restore` round trip is the obvious first one.
+- [ ] Futures carrying `(index, term)` — keyed by index alone, a truncated proposal is
+      indistinguishable from a committed one, so it conservatively reports `ErrLeadershipLost`
 
 ---
 
