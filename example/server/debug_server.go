@@ -24,6 +24,10 @@ func (d *DebugServer) Start(port string) {
 	mux.HandleFunc("/logs/append", d.handleAppendLogs)
 	mux.HandleFunc("/logs/get", d.handleGetLogs)
 	mux.HandleFunc("/status", d.handleStatus)
+	mux.HandleFunc("/kv/set", d.handleKVSet)
+	mux.HandleFunc("/kv/delete", d.handleKVDelete)
+	mux.HandleFunc("/kv/cas", d.handleKVCAS)
+	mux.HandleFunc("/kv/get", d.handleKVGet)
 
 	go func() {
 		zerolog.Ctx(d.server.ctx).Debug().Str("port", port).Msg("debug server started")

@@ -34,6 +34,10 @@ func NewStore(ctx context.Context, dirPath string) (*Store, error) {
 	}, nil
 }
 
+func (s *Store) DB() *pebble.DB {
+	return s.db
+}
+
 var _ raft.Storage = &Store{}
 
 // LastApplied

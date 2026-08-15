@@ -1,6 +1,35 @@
 package server
 
-import "github.com/SHREYANSHSINGH14/raft"
+import (
+	"encoding/json"
+
+	"github.com/SHREYANSHSINGH14/raft"
+)
+
+// KV request/response types for the debug server. Values are carried as raw JSON so
+// whatever goes in comes back out unchanged.
+
+type KVSetRequest struct {
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+}
+
+type KVDeleteRequest struct {
+	Key string `json:"key"`
+}
+
+type KVCASRequest struct {
+	Key      string          `json:"key"`
+	Expected json.RawMessage `json:"expected"`
+	Value    json.RawMessage `json:"value"`
+}
+
+type KVResponse struct {
+	Success  bool            `json:"success"`
+	Value    json.RawMessage `json:"value,omitempty"`
+	ErrorMsg string          `json:"error_msg,omitempty"`
+	LeaderID string          `json:"leader_id,omitempty"`
+}
 
 type AppendLogsDebugRequest struct {
 	Data string `json:"data"`

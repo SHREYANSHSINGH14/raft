@@ -312,7 +312,7 @@ func (n *Node) readLatestSnapshotMeta(ctx context.Context) (string, SnapshotMeta
 		return "", SnapshotMeta{}, err
 	}
 
-	metaFile, err := os.Open(n.cfg.SnapshotDir + "/" + latestDir + "/" + MetaFileName)
+	metaFile, err := os.Open(n.cfg.SnapshotDir + "/" + latestDir + "/" + metaFileName)
 	if err != nil {
 		return "", SnapshotMeta{}, err
 	}
@@ -357,7 +357,7 @@ func (n *Node) seedConfigurationFromSnapshot(ctx context.Context, meta SnapshotM
 // lock is taken because restore runs before startApplyLoop, so nothing else is
 // touching the state machine yet.
 func (n *Node) installSnapshotFromDisk(ctx context.Context, dir string, meta SnapshotMeta) error {
-	snapshotFile, err := os.Open(n.cfg.SnapshotDir + "/" + dir + "/" + SnapshotFileName)
+	snapshotFile, err := os.Open(n.cfg.SnapshotDir + "/" + dir + "/" + snapshotFileName)
 	if err != nil {
 		return err
 	}

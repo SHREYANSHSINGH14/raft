@@ -117,7 +117,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	}
 
 	// Apply the snapshot to the state machine and update the log store
-	snapshotFilePath := snapshotDirPath + "/" + SnapshotFileName
+	snapshotFilePath := snapshotDirPath + "/" + snapshotFileName
 	snapshotFile, err := os.Open(snapshotFilePath)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error opening snapshot file")

@@ -24,10 +24,10 @@ func writeSnapshotFixture(t *testing.T, dir string, index, term uint) {
 	if err := os.MkdirAll(sdir, 0o755); err != nil {
 		t.Fatalf("mkdir snapshot fixture: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(sdir, SnapshotFileName), []byte("snapshot-bytes"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sdir, snapshotFileName), []byte("snapshot-bytes"), 0o644); err != nil {
 		t.Fatalf("write snapshot file: %v", err)
 	}
-	f, err := os.Create(filepath.Join(sdir, MetaFileName))
+	f, err := os.Create(filepath.Join(sdir, metaFileName))
 	if err != nil {
 		t.Fatalf("create meta file: %v", err)
 	}

@@ -222,3 +222,7 @@ func (f *Future) Wait(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+func (f *Future) Index() uint64 {
+	return f.idx
+}

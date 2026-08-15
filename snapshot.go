@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	SnapshotFileName = "snapshot"
-	MetaFileName     = "meta.json"
+	snapshotFileName = "snapshot"
+	metaFileName     = "meta.json"
 )
 
 type SnapshotMeta struct {
@@ -321,7 +321,7 @@ func writeSnapshotToDisk(r io.Reader, snapshotDirPath string, meta SnapshotMeta,
 		}
 	}()
 
-	if err := writeFileSynced(tmpDirPath+"/"+SnapshotFileName, func(f *os.File) error {
+	if err := writeFileSynced(tmpDirPath+"/"+snapshotFileName, func(f *os.File) error {
 		_, err := io.Copy(f, r)
 		return err
 	}); err != nil {
@@ -334,7 +334,7 @@ func writeSnapshotToDisk(r io.Reader, snapshotDirPath string, meta SnapshotMeta,
 		}
 	}
 
-	if err := writeFileSynced(tmpDirPath+"/"+MetaFileName, func(f *os.File) error {
+	if err := writeFileSynced(tmpDirPath+"/"+metaFileName, func(f *os.File) error {
 		return json.NewEncoder(f).Encode(meta)
 	}); err != nil {
 		return fmt.Errorf("writing meta: %w", err)
@@ -369,7 +369,7 @@ func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *Ins
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
 	}
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + latestSnapshotDir
-	metafile, err := os.Open(snapshotDirPath + "/" + MetaFileName)
+	metafile, err := os.Open(snapshotDirPath + "/" + metaFileName)
 	if err != nil {
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: opening snapshot meta file: %w", err)
 	}
@@ -380,7 +380,7 @@ func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *Ins
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: reading snapshot meta: %w", err)
 	}
 
-	snapshotFilePath := snapshotDirPath + "/" + SnapshotFileName
+	snapshotFilePath := snapshotDirPath + "/" + snapshotFileName
 	snapshotFile, err := os.Open(snapshotFilePath)
 	if err != nil {
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: opening snapshot file: %w", err)

@@ -12,6 +12,7 @@ import (
 	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/SHREYANSHSINGH14/raft/example/config"
 	"github.com/SHREYANSHSINGH14/raft/example/db"
+	"github.com/SHREYANSHSINGH14/raft/example/statemachine"
 	"github.com/SHREYANSHSINGH14/raft/example/types"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -20,6 +21,10 @@ import (
 
 type Server struct {
 	Node *raft.Node
+	// SM is the same state machine the node applies into. The debug handlers need it
+	// directly: Register/WaitForResult/Forget are the client half of a proposal, and
+	// the library never sees them.
+	SM *statemachine.StateMachine
 
 	baseUrl   string
 	port      string
@@ -36,6 +41,13 @@ type Server struct {
 
 var _ types.RaftRpcServer = &Server{}
 
+const (
+	// defaultSnapshotIntervalS is the fallback when the environment leaves it unset.
+	defaultSnapshotIntervalS = 300
+	// sweepInterval is how often abandoned command waiters are reaped.
+	sweepInterval = 30 * time.Second
+)
+
 func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	var server Server
 	server.ctx, server.cancelFunc = context.WithCancel(ctx)
@@ -47,7 +59,7 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	zerolog.SetGlobalLevel(logLevel)
 	server.ctx = logger.WithContext(server.ctx)
 
-	store, err := db.NewStore(ctx, cfg.DBDir)
+	store, err := db.NewStore(server.ctx, cfg.DBDir)
 	if err != nil {
 		fmt.Println("error while initializing db store")
 		return nil, err
@@ -63,6 +75,17 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		peers[id] = raft.Peer{PeerState: raft.PeerState_Voter}
 	}
 
+	// SnapshotInterval feeds time.NewTicker, which panics on a non-positive interval,
+	// so a zero from the environment has to be caught here rather than at Start.
+	snapshotInterval := cfg.SnapshotInterval
+	if snapshotInterval == 0 {
+		snapshotInterval = defaultSnapshotIntervalS
+	}
+	snapshotDir := cfg.SnapshotDir
+	if snapshotDir == "" {
+		snapshotDir = cfg.DBDir + "/snapshots"
+	}
+
 	raftCfg := raft.Config{
 		ID:            cfg.ID,
 		Peers:         peers,
@@ -70,11 +93,20 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		HeartbeatMs:   cfg.HeartbeatMs,
 		ElectionMinMs: cfg.ElectionMinMs,
 		ElectionMaxMs: cfg.ElectionMaxMs,
+
+		SnapshotDir:       snapshotDir,
+		SnapshotInterval:  snapshotInterval,
+		SnapshotThreshold: cfg.SnapshotThreshold,
+
+		InstallSnapshotDeadlineScaleSizeByte: cfg.InstallSnapshotDeadlineScaleSizeByte,
+		InstallSnapshotDeadlineScaleTimeMs:   cfg.InstallSnapshotDeadlineScaleTimeMs,
 	}
 
-	node := raft.NewNode(raftCfg, store, transport, nil)
+	sm := statemachine.NewStateMachine(server.ctx, store)
+	node := raft.NewNode(raftCfg, store, transport, sm)
 
 	server.Node = node
+	server.SM = sm
 	server.baseUrl = cfg.BaseURL
 	server.port = cfg.Port
 	server.debugPort = cfg.DebugPort
@@ -104,6 +136,35 @@ func (s *Server) Start() {
 	go func() {
 		<-s.ctx.Done()
 		grpcServer.GracefulStop()
+	}()
+
+	// The apply loop stops for good when it trips Fatal, and nothing else notices:
+	// the gRPC server would go on accepting writes and answering reads from a state
+	// machine that has permanently stopped tracking the log. Started before
+	// Node.Start, which blocks until the context is done.
+	go func() {
+		select {
+		case <-s.Node.Fatal():
+			zerolog.Ctx(s.ctx).Error().Err(s.Node.FatalErr()).Msg("node reported fatal failure, shutting down")
+			s.cancelFunc()
+		case <-s.ctx.Done():
+		}
+	}()
+
+	// Backstop for a handler that never reached its deferred Forget.
+	go func() {
+		ticker := time.NewTicker(sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if dropped := s.SM.Sweep(); dropped > 0 {
+					zerolog.Ctx(s.ctx).Debug().Int("dropped", dropped).Msg("swept abandoned command waiters")
+				}
+			case <-s.ctx.Done():
+				return
+			}
+		}
 	}()
 
 	zerolog.Ctx(s.ctx).Debug().Str("id", s.Node.GetID()).Str("role", string(s.Node.GetRole())).Str("listen_address", s.baseUrl+":"+s.port).Msg("server started")
