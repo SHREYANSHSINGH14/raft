@@ -108,8 +108,10 @@ func (n *Node) applyEntries(ctx context.Context, lastApplied, commitIdx uint) er
 		}
 		commandEntries = append(commandEntries, log)
 	}
-	if err = n.sm.Apply(ctx, commandEntries); err != nil {
-		return err
+	if len(commandEntries) > 0 {
+		if err = n.sm.Apply(ctx, commandEntries); err != nil {
+			return err
+		}
 	}
 	return n.store.SetLastApplied(ctx, commitIdx)
 }
