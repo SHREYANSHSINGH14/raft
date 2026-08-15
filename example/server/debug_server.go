@@ -2,7 +2,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -89,7 +88,8 @@ func (d *DebugServer) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		start = 1
 	}
 
-	logs, err := d.server.Node.GetLogs(context.Background(), start)
+	ctx := r.Context()
+	logs, err := d.server.Node.GetLogs(ctx, start)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, GetLogsDebugResponse{
 			ErrorMsg: err.Error(),
@@ -97,8 +97,18 @@ func (d *DebugServer) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	commitIndex := d.server.Node.GetCommitIndex()
+	term, _ := d.server.Node.GetCurrentTerm(ctx)
+
 	writeJSON(w, http.StatusOK, GetLogsDebugResponse{
-		Entries: toDebugEntries(logs),
+		NodeID:      d.server.Node.GetID(),
+		Role:        string(d.server.Node.GetRole()),
+		Term:        term,
+		CommitIndex: commitIndex,
+		LeaderID:    d.server.Node.GetLeaderID(),
+		StartIndex:  start,
+		Count:       len(logs),
+		Entries:     toDebugEntries(logs, commitIndex),
 	})
 }
 
@@ -109,15 +119,37 @@ func (d *DebugServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentTerm, _ := d.server.Node.GetCurrentTerm(context.Background())
+	ctx := r.Context()
+	currentTerm, _ := d.server.Node.GetCurrentTerm(ctx)
 
-	writeJSON(w, http.StatusOK, StatusDebugResponse{
-		ID:          d.server.Node.GetID(),
-		Role:        string(d.server.Node.GetRole()),
-		Term:        currentTerm,
-		CommitIndex: d.server.Node.GetCommitIndex(),
-		LeaderID:    d.server.Node.GetLeaderID(),
-	})
+	resp := StatusDebugResponse{
+		ID:            d.server.Node.GetID(),
+		Role:          string(d.server.Node.GetRole()),
+		IsLeader:      d.server.Node.IsLeader(),
+		Term:          currentTerm,
+		LeaderID:      d.server.Node.GetLeaderID(),
+		CommitIndex:   d.server.Node.GetCommitIndex(),
+		SnapshotIndex: d.server.Node.GetSnapshotLatestIndex(),
+		SnapshotTerm:  d.server.Node.GetSnapshotLatestTerm(),
+		Peers:         map[string]*PeerDebug{},
+	}
+
+	// The tail of the log, so "how far behind is this node" is answerable from one
+	// call: last_log_index is what it has, commit_index is what it may apply.
+	if logs, err := d.server.Node.GetLogs(ctx, 1); err == nil && len(logs) > 0 {
+		resp.LastLogIndex = logs[len(logs)-1].Index
+	}
+
+	for _, id := range d.server.peerIDs {
+		peer := d.server.Node.GetPeerIndex(id)
+		resp.Peers[id] = &PeerDebug{
+			PeerState:  peerStateName(peer.PeerState),
+			NextIndex:  peer.NextIndex,
+			MatchIndex: peer.MatchIndex,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

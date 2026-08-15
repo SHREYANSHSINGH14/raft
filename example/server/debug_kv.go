@@ -59,17 +59,28 @@ func (d *DebugServer) handleKVGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp := KVResponse{
+		Key:         key,
+		NodeID:      d.server.Node.GetID(),
+		Role:        string(d.server.Node.GetRole()),
+		CommitIndex: d.server.Node.GetCommitIndex(),
+		LeaderID:    d.server.Node.GetLeaderID(),
+	}
+
 	val, err := d.server.SM.Get(key)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, raft.ErrNotFound) {
 			status = http.StatusNotFound
 		}
-		writeJSON(w, status, KVResponse{ErrorMsg: err.Error()})
+		resp.ErrorMsg = err.Error()
+		writeJSON(w, status, resp)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, KVResponse{Success: true, Value: val})
+	resp.Success = true
+	resp.Value = val
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // runCommand builds a command, drives it through the log, and reports what applying
@@ -98,7 +109,8 @@ func (d *DebugServer) runCommand(w http.ResponseWriter, r *http.Request, key str
 		return
 	}
 
-	if err := d.propose(r.Context(), cmd); err != nil {
+	idx, err := d.propose(r.Context(), cmd)
+	if err != nil {
 		// A command the state machine evaluated and refused — a CAS that did not
 		// match, an unknown op — is a client error, not a node failure.
 		status := http.StatusInternalServerError
@@ -106,19 +118,36 @@ func (d *DebugServer) runCommand(w http.ResponseWriter, r *http.Request, key str
 			status = http.StatusConflict
 		}
 		writeJSON(w, status, KVResponse{
-			ErrorMsg: err.Error(),
-			LeaderID: d.server.Node.GetLeaderID(),
+			Key:         key,
+			CommandID:   cmd.ID,
+			Index:       idx,
+			NodeID:      d.server.Node.GetID(),
+			Role:        string(d.server.Node.GetRole()),
+			CommitIndex: d.server.Node.GetCommitIndex(),
+			ErrorMsg:    err.Error(),
+			LeaderID:    d.server.Node.GetLeaderID(),
 		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, KVResponse{Success: true})
+	writeJSON(w, http.StatusOK, KVResponse{
+		Success:     true,
+		Key:         key,
+		CommandID:   cmd.ID,
+		Index:       idx,
+		NodeID:      d.server.Node.GetID(),
+		Role:        string(d.server.Node.GetRole()),
+		CommitIndex: d.server.Node.GetCommitIndex(),
+	})
 }
 
-func (d *DebugServer) propose(ctx context.Context, cmd *statemachine.Command) error {
+// propose returns the log index the entry was appended at, which stays useful on the
+// error path too — a command that failed still occupies an index, and that is where
+// /logs/get will show it.
+func (d *DebugServer) propose(ctx context.Context, cmd *statemachine.Command) (uint64, error) {
 	data, err := cmd.Marshal()
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Deferred immediately, so it also runs on the path where Propose itself fails.
@@ -127,17 +156,18 @@ func (d *DebugServer) propose(ctx context.Context, cmd *statemachine.Command) er
 
 	future, err := d.server.Node.Propose(ctx, raft.EntryType_Command, data)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	idx := future.Index()
 
 	// Two waits, answering two different questions. The future answers "did it
 	// commit"; WaitForResult answers "what did applying it produce". A future that
 	// fails — ErrLeadershipLost, a cancelled request — must not fall through to the
 	// second, because nothing will ever complete that waiter.
 	if err := future.Wait(ctx); err != nil {
-		return err
+		return idx, err
 	}
-	return d.server.SM.WaitForResult(cmd.ID)
+	return idx, d.server.SM.WaitForResult(cmd.ID)
 }
 
 // rawOrNil keeps an absent JSON field absent. NewCommand marshals any non-nil value,

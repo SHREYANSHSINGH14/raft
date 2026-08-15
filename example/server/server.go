@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -28,6 +30,11 @@ type Server struct {
 	// directly: Register/WaitForResult/Forget are the client half of a proposal, and
 	// the library never sees them.
 	SM *statemachine.StateMachine
+
+	// peerIDs is every member of the cluster including this node. cfg.ServerIDS
+	// leaves self out; the debug status wants the whole configuration, and the
+	// library's own peerIDs() is unexported.
+	peerIDs []string
 
 	baseUrl   string
 	port      string
@@ -110,6 +117,8 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 
 	server.Node = node
 	server.SM = sm
+	server.peerIDs = append([]string{cfg.ID}, slices.Collect(maps.Keys(cfg.ServerIDS))...)
+	slices.Sort(server.peerIDs)
 	server.baseUrl = cfg.BaseURL
 	server.port = cfg.Port
 	server.debugPort = cfg.DebugPort
