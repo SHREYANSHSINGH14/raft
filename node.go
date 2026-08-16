@@ -226,8 +226,6 @@ func (n *Node) Start(ctx context.Context) {
 	}
 
 	zerolog.Ctx(n.ctx).Debug().Msg("Waiting for peers to be up")
-	n.waitForQuorum(n.ctx)
-
 	zerolog.Ctx(n.ctx).Debug().MsgFunc(func() string {
 		peers := n.peersSnapshot()
 		ids := make([]string, 0, len(peers))
@@ -245,6 +243,8 @@ func (n *Node) Start(ctx context.Context) {
 		}
 		return str
 	})
+	n.waitForQuorum(n.ctx)
+
 	n.startElectionOut(n.ctx)
 	n.startApplyLoop(n.ctx)
 	n.startSnapshotLoop(n.ctx)
