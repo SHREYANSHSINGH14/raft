@@ -18,6 +18,12 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
+      # Deliberately low. At the defaults (1000 entries / 300s) a cluster you are
+      # poking at by hand never snapshots, so compaction and InstallSnapshot never
+      # run and neither gets exercised.
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
     volumes:
       - ./peers.yaml:/app/peers.yaml  # all peers share same yaml
       - peer1_data:/app/data
@@ -41,6 +47,12 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
+      # Deliberately low. At the defaults (1000 entries / 300s) a cluster you are
+      # poking at by hand never snapshots, so compaction and InstallSnapshot never
+      # run and neither gets exercised.
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer2_data:/app/data
@@ -64,6 +76,12 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
+      # Deliberately low. At the defaults (1000 entries / 300s) a cluster you are
+      # poking at by hand never snapshots, so compaction and InstallSnapshot never
+      # run and neither gets exercised.
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer3_data:/app/data
@@ -87,6 +105,12 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
+      # Deliberately low. At the defaults (1000 entries / 300s) a cluster you are
+      # poking at by hand never snapshots, so compaction and InstallSnapshot never
+      # run and neither gets exercised.
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer4_data:/app/data
@@ -110,9 +134,73 @@ services:
       - HEARTBEAT_MS=100
       - ELECTION_MIN_MS=1000
       - ELECTION_MAX_MS=5000
+      # Deliberately low. At the defaults (1000 entries / 300s) a cluster you are
+      # poking at by hand never snapshots, so compaction and InstallSnapshot never
+      # run and neither gets exercised.
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer5_data:/app/data
+
+  # peer6 and peer7 are NOT part of the initial configuration and are absent from
+  # peers.yaml. They start, idle, and wait to be joined at runtime:
+  #
+  #   curl -s -X POST http://localhost:8084/cluster/add \
+  #     -d '{"id":"peer6","rpc_url":"peer6:50056","peer_state":"VOTER"}'
+  #
+  # PEER_INFO is unset for them, which LoadConfig treats as "no peers" — they learn
+  # the configuration from the leader's AppendEntries once the addition commits.
+  peer6:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
+    ports:
+      - "50056:50056"
+      - "8086:8080"
+    environment:
+      - ID=peer6
+      - BASE_URL=0.0.0.0
+      - PORT=50056
+      - DEBUG_PORT=8080
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer6_data:/app/data
+
+  peer7:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
+    ports:
+      - "50057:50057"
+      - "8087:8080"
+    environment:
+      - ID=peer7
+      - BASE_URL=0.0.0.0
+      - PORT=50057
+      - DEBUG_PORT=8080
+      - DB_DIR=data
+      - LOG_LEVEL=debug
+      - RPC_TIMEOUT_MS=50
+      - HEARTBEAT_MS=100
+      - ELECTION_MIN_MS=1000
+      - ELECTION_MAX_MS=5000
+      - SNAPSHOT_DIR=snapshots
+      - SNAPSHOT_INTERVAL_S=30
+      - SNAPSHOT_THRESHOLD=10
+    volumes:
+      - ./peers.yaml:/app/peers.yaml
+      - peer7_data:/app/data
 
 volumes:
   peer1_data:
@@ -120,3 +208,5 @@ volumes:
   peer3_data:
   peer4_data:
   peer5_data:
+  peer6_data:
+  peer7_data:
