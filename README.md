@@ -192,62 +192,81 @@ enough peers answer. Starting fewer than two of three means no leader, by design
 
 ---
 
-## Debug HTTP API
+## Debug HTTP API — inspection
 
 Each node exposes a debug HTTP server for manual inspection and testing.
 
+The responses are deliberately verbose — every one names the node that answered and where it stood,
+because the same query against two nodes legitimately returns different things. That makes them hard
+to read raw. The recipes below pipe through [`jq`](https://jqlang.github.io/jq/) (`sudo apt install
+jq`) to cut them down.
+
+Ports below assume the 5-node Docker cluster (`8081`–`8085`); drop to `1 2 3` for the local 3-node
+setup.
+
+The endpoints split cleanly in two, and the split is deliberate:
+
+| | Endpoints | |
+|---|---|---|
+| **Inspection** | `/status`, `/logs/get`, `/kv/get` | Read-only. Safe on any node, and *meant* to be run against every node — comparing them is how you see replication working. |
+| **Writes** | `/kv/set`, `/kv/delete`, `/kv/cas` | Leader-only. Every one goes through `Propose`, so it enters the log as a well-formed state machine command. |
+
+**There is no endpoint that appends arbitrary bytes to the log.** There used to be — `/logs/append`
+took a raw string and proposed it — and it was worse than useless once a real state machine existed:
+the bytes were not a marshalled `Command`, so `Apply` could not unmarshal them and skipped every entry
+it produced. The entry committed, replicated, advanced the commit index, and changed nothing. Writes go
+through `/kv/*` so that what lands in the log is something the state machine can actually apply.
+
 ### Check all nodes at once
-```bash
-for i in 1 2 3; do curl -s http://localhost:808${i}/status | jq -c '{id,role,term,commit_index,leader_id}'; done
-```
-```json
-{"id":"peer1","role":"FOLLOWER","term":1,"commit_index":3,"leader_id":"peer3"}
-{"id":"peer2","role":"FOLLOWER","term":1,"commit_index":3,"leader_id":"peer3"}
-{"id":"peer3","role":"LEADER","term":1,"commit_index":3,"leader_id":""}
-```
-
-The full response carries replication state as well — `last_log_index` next to `commit_index` answers
-"how far behind is this node" in one call, and `peers` is the live configuration
-(`configurations.latest`), not the bootstrap seed:
 
 ```bash
-curl -s http://localhost:8083/status
+{ printf 'ID\tROLE\tTERM\tCOMMIT\tLASTLOG\tLEADER\n'
+  for i in 1 2 3 4 5; do
+    curl -s http://localhost:808${i}/status |
+      jq -r '[.id,.role,.term,.commit_index,.last_log_index,.leader_id]|@tsv'
+  done
+} | column -t -s $'\t'
 ```
-```json
-{
-  "id": "peer3", "role": "LEADER", "is_leader": true, "term": 1, "leader_id": "",
-  "commit_index": 3, "last_log_index": 3,
-  "snapshot_index": 0, "snapshot_term": 0,
-  "peers": {
-    "peer1": {"peer_state": "VOTER", "next_index": 4, "match_index": 3},
-    "peer2": {"peer_state": "VOTER", "next_index": 4, "match_index": 3},
-    "peer3": {"peer_state": "VOTER", "next_index": 0, "match_index": 0}
-  }
-}
+```
+ID     ROLE      TERM  COMMIT  LASTLOG  LEADER
+peer1  FOLLOWER  1     3       3        peer4
+peer2  FOLLOWER  1     3       3        peer4
+peer3  FOLLOWER  1     3       3        peer4
+peer4  LEADER    1     3       3
+peer5  FOLLOWER  1     3       3        peer4
 ```
 
-A leader's entry for *itself* shows zeroes: it does not replicate to itself, so it keeps no
-next/match index — `getMajorityMatchIndex` substitutes its own last log index when counting.
+`commit_index` versus `last_log_index` is the "how far behind is this node" check: entries it holds
+versus entries it may apply. `leader_id` is blank on the leader itself.
 
-### Write a log entry
+Or a one-liner per node, if you just want the essentials without the table:
+
 ```bash
-curl -s -X POST http://localhost:8081/logs/append \
-  -H "Content-Type: application/json" \
-  -d '{"data": "set x=5"}'
-```
-```json
-{"success":true,"error_msg":"","leader_id":""}
+for i in 1 2 3 4 5; do curl -s http://localhost:808${i}/status | jq -c '{id,role,term,commit_index,leader_id}'; done
 ```
 
-If you hit a follower, it won't accept the write — redirect to the returned `leader_id`:
+### Replication progress, per peer
+
+`next_index` and `match_index` are **leader-only** state — a follower reports zeroes for everyone, so
+point this at whichever node the table above shows as `LEADER`:
+
 ```bash
-curl -s -X POST http://localhost:8082/logs/append \
-  -H "Content-Type: application/json" \
-  -d '{"data": "set x=5"}'
+curl -s http://localhost:8084/status |
+  jq -r '.peers | to_entries[] | [.key,.value.peer_state,.value.next_index,.value.match_index]|@tsv' |
+  column -t -s $'\t'
 ```
-```json
-{"success":false,"error_msg":"not the leader","leader_id":"peer1"}
 ```
+peer1  VOTER  4  3
+peer2  VOTER  4  3
+peer3  VOTER  4  3
+peer4  VOTER  0  0
+peer5  VOTER  4  3
+```
+
+`peers` is the live configuration (`configurations.latest`), not the bootstrap seed, so this is also
+how you watch a membership change land. The leader's entry for *itself* shows zeroes: it does not
+replicate to itself, so it keeps no next/match index — `getMajorityMatchIndex` substitutes its own
+last log index when counting.
 
 ### Read log entries
 ```bash
@@ -276,16 +295,53 @@ curl -s "http://localhost:8083/logs/get?start=1"
 `type` is reported by name because the numeric `EntryType` is an `iota` whose meaning is invisible in a
 dump, and the proto enum is offset by one — comparing the raw numbers across the two will mislead you.
 
-The envelope names the node that answered and where it stood. The same query against two nodes
-legitimately returns different things, and `committed` is per-node: an entry can be present in the log
-but not yet committed.
+A whole log is unreadable raw. One line per entry:
+
+```bash
+{ printf 'INDEX\tTERM\tTYPE\tCOMMITTED\tOP\tKEY\n'
+  curl -s "http://localhost:8084/logs/get?start=1" |
+    jq -r '.entries[] | [.index,.term,.type,.committed,(.command.op // "-"),(.command.key // "-")]|@tsv'
+} | column -t -s $'\t'
+```
+```
+INDEX  TERM  TYPE     COMMITTED  OP   KEY
+1      1     NO_OP    true       -    -
+2      1     COMMAND  true       SET  user:1
+3      1     COMMAND  true       CAS  user:1
+```
+
+`column -t -s $'\t'` splits on tabs only. Without `-s` it splits on any whitespace, so a key or value
+containing a space silently shifts every column after it.
+
+**The same table for every node** — the fastest way to see replication actually working, and the one
+place a divergence would be obvious:
+
+```bash
+for i in 1 2 3 4 5; do
+  printf 'peer%s:\n' "$i"
+  { printf 'INDEX\tTERM\tTYPE\tCOMMITTED\tOP\tKEY\n'
+    curl -s "http://localhost:808${i}/logs/get?start=1" |
+      jq -r '.entries[] | [.index,.term,.type,.committed,(.command.op // "-"),(.command.key // "-")]|@tsv'
+  } | column -t -s $'\t'
+  echo
+done
+```
+
+Every node should show identical `INDEX`/`TERM`/`TYPE` rows. `COMMITTED` is the column allowed to
+differ — a follower can hold an entry the leader has not told it is committed yet — and a row present
+on one node but missing on another is either normal lag or a real problem, which `/status` will settle.
 
 Omit `start` to default to 1; there is no `end` — it returns everything from `start` to the latest.
 
-### Key/value operations
+---
 
-These go through the state machine, so they are the ones that actually exercise replication. Values are
-raw JSON — whatever you send comes back unchanged. Writes must go to the leader.
+## Debug HTTP API — writes
+
+Everything above reads. Everything below writes, and does so the only way anything writes to this
+cluster: build a `Command`, `Propose` it, wait for it to commit, then wait for the result of applying
+it. Values are raw JSON — whatever you send comes back unchanged.
+
+Writes are leader-only. A follower refuses and returns the `leader_id` to redirect to.
 
 ```bash
 # set — send writes to the leader
@@ -308,6 +364,15 @@ for i in 1 2 3; do curl -s "http://localhost:808${i}/kv/get?key=user:1"; echo; d
 {"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer1","role":"FOLLOWER","commit_index":3,"leader_id":"peer3"}
 {"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer2","role":"FOLLOWER","commit_index":3,"leader_id":"peer3"}
 {"success":true,"key":"user:1","value":{"name":"alice"},"node_id":"peer3","role":"LEADER","commit_index":3}
+```
+
+Trimmed to just who-has-what:
+
+```bash
+for i in 1 2 3 4 5; do
+  curl -s "http://localhost:808${i}/kv/get?key=user:1" |
+    jq -c '{node:.node_id, role, commit_index, value, err:.error_msg}'
+done
 ```
 
 `/kv/get` is a **stale local read** — it never touches the log, so it reports whatever that node has
@@ -338,6 +403,52 @@ including a write sent to a follower, which returns the `leader_id` to redirect 
 # delete
 curl -s -X POST http://localhost:8083/kv/delete -d '{"key":"user:1"}'
 ```
+
+### Cluster membership
+
+Leader-only, one addition at a time. Both replicate a configuration entry through the log like any
+other write.
+
+```bash
+# add a member — rpc_url is how the *transport* reaches it, peer_state is VOTER or NONVOTER
+curl -s -X POST http://localhost:8084/cluster/add \
+  -d '{"id":"peer6","rpc_url":"peer6:50056","peer_state":"VOTER"}'
+```
+
+```bash
+# add a non-voting member — replicated to, never counted toward a majority
+curl -s -X POST http://localhost:8084/cluster/add \
+  -d '{"id":"peer6","rpc_url":"peer6:50056","peer_state":"NONVOTER"}'
+```
+
+```bash
+# remove a member (a leader may remove itself, then steps down)
+curl -s -X POST http://localhost:8084/cluster/remove -d '{"id":"peer6"}'
+```
+
+Both return the resulting configuration, so the change is visible without a follow-up `/status`:
+
+```bash
+curl -s -X POST http://localhost:8084/cluster/add \
+  -d '{"id":"peer6","rpc_url":"peer6:50056","peer_state":"VOTER"}' |
+  jq -r '.peers | to_entries[] | [.key,.value.peer_state,.value.next_index,.value.match_index]|@tsv' |
+  column -t -s $'\t'
+```
+
+Watch it land on every node — a new member shows up as `STAGING` while it catches up, then `VOTER`:
+
+```bash
+for i in 1 2 3 4 5; do
+  printf 'peer%s:\n' "$i"
+  curl -s http://localhost:808${i}/status |
+    jq -r '.peers | to_entries[] | [.key,.value.peer_state]|@tsv' | column -t -s $'\t'
+  echo
+done
+```
+
+`rpc_url` has to be supplied because the library tracks membership by ID and never learns addresses —
+that is the `Transport`'s concern. The endpoint dials the peer *before* calling `AddMember`, since
+catch-up runs over that connection, and drops it again if the addition fails.
 
 ---
 

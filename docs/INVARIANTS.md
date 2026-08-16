@@ -382,6 +382,25 @@ process the bytes before the error, and never send more of the buffer than `n`. 
 
 Read `docs/STATE.md` before starting — it records what is half-finished and why.
 
+### Do what was asked, and stop there.
+
+This repo is being written to learn Raft, so the value is in working the problems out, not
+in having them solved. An unrequested fix — even a correct one — takes that away.
+
+- **Asked for a log line? Add the log line.** Do not also change the condition it prints,
+  reorder the code around it, or "while I'm here" an adjacent bug.
+- **Found a real bug outside the request?** Say so, in a sentence, with the file and line.
+  Then stop. Do not fix it unless asked.
+- **A change of yours broke a test?** Report which test and why. Do not edit the test to
+  make it pass — the test is usually right, and if it isn't, that is a decision to make
+  deliberately.
+- **Behaviour changes are never a side effect of a logging, comment, or formatting task.**
+  If a log needs a guard to be correct, that guard is its own ask.
+
+The exception is a change that is *required* for the requested one to compile or run — a
+missing import, a signature the new code needs. Anything beyond that is a proposal, not an
+edit.
+
 When a session produces a non-obvious decision (a design chosen over an alternative, a signature
 changed for a reason, a bug whose root cause was subtle), write it down before the session ends:
 - A bug and what it taught → `docs/JOURNEY.md`
