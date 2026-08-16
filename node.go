@@ -226,6 +226,23 @@ func (n *Node) Start(ctx context.Context) {
 	zerolog.Ctx(n.ctx).Debug().Msg("Waiting for peers to be up")
 	n.waitForQuorum(n.ctx)
 
+	zerolog.Ctx(n.ctx).Debug().MsgFunc(func() string {
+		peers := n.peersSnapshot()
+		ids := make([]string, 0, len(peers))
+		for id := range peers {
+			ids = append(ids, id)
+		}
+		// Sorted, because map order is random and two boots of the same cluster
+		// should produce diffable output.
+		slices.Sort(ids)
+
+		str := "Bootstrapped peers:\n"
+		for _, id := range ids {
+			p := peers[id]
+			str += fmt.Sprintf("  %-12s state=%-8s next=%d match=%d\n", id, p.PeerState, p.NextIndex, p.MatchIndex)
+		}
+		return str
+	})
 	n.startElectionOut(n.ctx)
 	n.startApplyLoop(n.ctx)
 	n.startSnapshotLoop(n.ctx)

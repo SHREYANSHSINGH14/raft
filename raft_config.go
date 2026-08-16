@@ -48,6 +48,22 @@ const (
 	PeerState_NonVoter
 )
 
+// String makes PeerState printable with %s and %v. Without it every log line that
+// formats a Peer renders the state as %!s(raft.PeerState=2), which is both unreadable
+// and one enum renumbering away from being wrong.
+func (p PeerState) String() string {
+	switch p {
+	case PeerState_Staging:
+		return "STAGING"
+	case PeerState_Voter:
+		return "VOTER"
+	case PeerState_NonVoter:
+		return "NONVOTER"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 type Peer struct {
 	PeerState PeerState `json:"peer_state"`
 	// only populated when node is leader
