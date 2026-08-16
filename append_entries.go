@@ -27,11 +27,30 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 	}
 
 	if args.Term < uint64(currentTerm) {
+		zerolog.Ctx(ctx).Debug().
+			Str("leader", args.LeaderID).
+			Uint64("leader_term", args.Term).
+			Uint("our_term", currentTerm).
+			Msg("appendEntries rejected: stale term")
 		return AppendEntriesResponse{
 			Term:    uint64(currentTerm),
 			Success: false,
 		}, nil
 	}
+
+	// The receiving half of convergence. One line per AppendEntries says what the
+	// leader offered and from what anchor; the matching "accepted" line below says
+	// where this node ended up. Together they are the follower's side of the story
+	// that the leader's match-index and commit-index lines tell from the other end.
+	zerolog.Ctx(ctx).Debug().
+		Str("leader", args.LeaderID).
+		Uint64("term", args.Term).
+		Uint64("prev_log_index", args.PrevLogIndex).
+		Uint64("prev_log_term", args.PrevLogTerm).
+		Int("entries", len(args.Entries)).
+		Uint64("leader_commit", args.LeaderCommit).
+		Uint("our_commit", n.GetCommitIndex()).
+		Msg("appendEntries received")
 
 	if args.Term > uint64(currentTerm) {
 		err := n.store.SetCurrentTerm(ctx, uint(args.Term))
@@ -167,6 +186,17 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 		}
 
 		minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))
+		if prev := n.GetCommitIndex(); uint(minCommitIndex) > prev {
+			// Capped by our own last index, not the leader's: we can only commit what
+			// we actually hold. That cap is why a follower's commit can trail the
+			// leader's for a round even when nothing is wrong.
+			zerolog.Ctx(ctx).Debug().
+				Uint("from", prev).
+				Uint64("to", minCommitIndex).
+				Uint64("leader_commit", args.LeaderCommit).
+				Uint("our_last_log", lastLogIdx).
+				Msg("follower commit index advanced")
+		}
 		n.SetCommitIndex(uint(minCommitIndex))
 	}
 
@@ -175,6 +205,15 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 	}
 
 	n.signalElectionTimeout() // a live leader has spoken; hold off on campaigning
+
+	// last_log_index is derived, not read: a log line must not add a store call.
+	// On the success path the log ends exactly where the leader said it would.
+	zerolog.Ctx(ctx).Debug().
+		Str("leader", args.LeaderID).
+		Int("entries", len(args.Entries)).
+		Uint64("last_log_index", args.PrevLogIndex+uint64(len(args.Entries))).
+		Uint("commit_index", n.GetCommitIndex()).
+		Msg("appendEntries accepted")
 
 	return AppendEntriesResponse{
 		Term:    uint64(currentTerm),

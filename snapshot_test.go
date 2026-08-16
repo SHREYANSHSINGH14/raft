@@ -61,7 +61,7 @@ func writeFakeSnapshotTmp(t *testing.T, snapshotDir string, index, term uint) {
 func TestShouldTriggerSnapshot_ThresholdNotReached(t *testing.T) {
 	node := newNodeWithSnapshot(t, nil, nil)
 	writeFakeSnapshot(t, node.cfg.SnapshotDir, 90, 1)
-	triggered := shouldTriggerSnapshot(node.ctx, node.cfg.SnapshotDir, 95, 10)
+	triggered := shouldTriggerSnapshot(context.Background(), node.cfg.SnapshotDir, 95, 10)
 	assert.False(t, triggered)
 }
 
@@ -69,7 +69,7 @@ func TestShouldTriggerSnapshot_ThresholdNotReached(t *testing.T) {
 func TestShouldTriggerSnapshot_ThresholdReached(t *testing.T) {
 	node := newNodeWithSnapshot(t, nil, nil)
 	writeFakeSnapshot(t, node.cfg.SnapshotDir, 90, 1)
-	triggered := shouldTriggerSnapshot(node.ctx, node.cfg.SnapshotDir, 100, 10)
+	triggered := shouldTriggerSnapshot(context.Background(), node.cfg.SnapshotDir, 100, 10)
 	assert.True(t, triggered)
 }
 
@@ -80,18 +80,30 @@ func TestShouldTriggerSnapshot_EmptyDir_NoEntries(t *testing.T) {
 	assert.False(t, triggered)
 }
 
-// 4. Empty dir, lastApplied > 0 → trigger (first snapshot ever)
-func TestShouldTriggerSnapshot_EmptyDir_HasEntries(t *testing.T) {
+// 4. Empty dir, lastApplied past the threshold → trigger (first snapshot ever).
+// The first snapshot is not special: an empty directory still has to clear the
+// threshold, so a node that has applied a handful of entries does not snapshot.
+func TestShouldTriggerSnapshot_EmptyDir_PastThreshold(t *testing.T) {
 	tempDir := t.TempDir()
-	triggered := shouldTriggerSnapshot(context.Background(), tempDir, 5, 10)
+	triggered := shouldTriggerSnapshot(context.Background(), tempDir, 15, 10)
 	assert.True(t, triggered)
 }
 
-// 5. Dir contains only .tmp entries → treated as empty → triggers if lastApplied > 0
+// 4b. Empty dir, lastApplied below the threshold → no trigger.
+func TestShouldTriggerSnapshot_EmptyDir_BelowThreshold(t *testing.T) {
+	tempDir := t.TempDir()
+	triggered := shouldTriggerSnapshot(context.Background(), tempDir, 5, 10)
+	assert.False(t, triggered)
+}
+
+// 5. Dir contains only .tmp entries → treated as empty → triggers once the
+// threshold is cleared. lastApplied is above the threshold so this still tests what
+// it is named for: that the .tmp snapshot at index 100 is ignored rather than
+// counted as the latest, which would make the delta 0 and suppress the trigger.
 func TestShouldTriggerSnapshot_OnlyTmpEntries_TreatedAsEmpty(t *testing.T) {
 	tempDir := t.TempDir()
 	writeFakeSnapshotTmp(t, tempDir, 100, 1)
-	triggered := shouldTriggerSnapshot(context.Background(), tempDir, 5, 10)
+	triggered := shouldTriggerSnapshot(context.Background(), tempDir, 15, 10)
 	assert.True(t, triggered)
 }
 
@@ -103,8 +115,10 @@ func TestRunSnapshotOnce_SnapshotError_FlagReleased(t *testing.T) {
 	sm := new(MockStateMachine)
 	node := newNodeWithSnapshot(t, store, sm)
 
-	// dir is empty + lastApplied > 0 → threshold reached, snapshot triggered
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(5), nil)
+	// dir is empty + lastApplied past SnapshotThreshold (10) → snapshot triggered.
+	// Below the threshold runSnapshotOnce returns before setting the flag, and the
+	// assertion below would pass without ever exercising the release path.
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(15), nil)
 	sm.On(methodSnapshot, mock.Anything).Return(nil, errors.New("snap error"))
 
 	err := node.runSnapshotOnce(context.Background())
@@ -122,7 +136,7 @@ func TestRunSnapshotOnce_SecondGetLastAppliedError_FlagReleased(t *testing.T) {
 	snap := new(MockSnapshot)
 	node := newNodeWithSnapshot(t, store, sm)
 
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(5), nil).Once()
+	store.On(methodGetLastApplied, mock.Anything).Return(uint(15), nil).Once()
 	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), errors.New("db error")).Once()
 	sm.On(methodSnapshot, mock.Anything).Return(snap, nil)
 

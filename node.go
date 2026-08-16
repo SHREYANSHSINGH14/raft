@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -363,6 +365,12 @@ func (n *Node) seedConfigurationFromSnapshot(ctx context.Context, meta SnapshotM
 		// The log is missing entries the snapshot says were committed — we crashed
 		// after snapshotting but before compacting. DeleteLogs is idempotent, so
 		// drop everything up to the snapshot index.
+		zerolog.Ctx(ctx).Info().
+			Uint("delete_from", 1).
+			Uint("delete_to", meta.Index).
+			Uint("last_log_index", lastIndex).
+			Msg("compacting log at startup: finishing a compaction interrupted by a crash")
+
 		if err := n.store.DeleteLogs(ctx, 0, meta.Index); err != nil {
 			return err
 		}

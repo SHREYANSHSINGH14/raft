@@ -10,7 +10,11 @@ import (
 
 type ElectionResponse struct {
 	transitonRole ServerRole
-	err           error
+	// reason is what the role transition gets logged with. An election has several
+	// ways to end as a follower — lost pre-vote, higher term seen, too few votes,
+	// a failed write — and they are indistinguishable in the log without it.
+	reason string
+	err    error
 }
 
 func (n *Node) startElection(ctx context.Context) {
@@ -29,13 +33,13 @@ func (n *Node) startElection(ctx context.Context) {
 			// in both cases we should reset the election timeout and start waiting for next timeout
 			case <-n.electionTimeoutCh:
 				cancel() // cancel the previous election context to stop the previous election goroutine
-				n.becomeFollower()
+				n.becomeFollower("a leader or newer term reached us mid-election")
 				return
 
 			// if duration of election elapses without reaching a decision then we turn back to follower
 			case <-ticker.C:
 				cancel()
-				n.becomeFollower()
+				n.becomeFollower("election did not conclude within the election duration")
 				return
 
 			// if we receive a message on election result channel then that means we have reached a decision in current election
@@ -47,9 +51,9 @@ func (n *Node) startElection(ctx context.Context) {
 				cancel()
 				switch res.transitonRole {
 				case ServerRole_Leader:
-					n.becomeLeader()
+					n.becomeLeader(res.reason)
 				case ServerRole_Follower:
-					n.becomeFollower()
+					n.becomeFollower(res.reason)
 				}
 				return
 			case <-ctx.Done():
@@ -77,6 +81,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "could not persist our own vote"
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -124,6 +129,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	if !n.isVoter() {
 		zerolog.Ctx(ctx).Warn().Msg("not a voter in the live configuration, abandoning election")
 		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "not a voter in the live configuration"
 
 		resCh <- electionRes
 
@@ -147,8 +153,13 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// and no peer's state touched. The randomized election timer then decides when
 	// to try again.
 	if !n.preVote(ctx, voterPeers, voterCount, uint64(newTerm), uint64(lastLogIndex), lastLogTerm) {
-		zerolog.Ctx(ctx).Debug().Msgf("pre-vote for term %d not granted by a majority, staying follower", newTerm)
+		zerolog.Ctx(ctx).Debug().
+			Uint64("would_be_term", uint64(newTerm)).
+			Int("voters", voterCount).
+			Int("needed", majoritySize(voterCount)).
+			Msg("pre-vote not granted by a majority, staying follower")
 		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = fmt.Sprintf("lost pre-vote for term %d", newTerm)
 
 		resCh <- electionRes
 
@@ -159,6 +170,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "could not persist the new term"
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -226,7 +238,16 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 				continue
 			}
 			if uint(res.rpcRes.Term) > newTerm {
-				resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
+				zerolog.Ctx(ctx).Info().
+					Str("peer", res.id).
+					Uint64("peer_term", res.rpcRes.Term).
+					Uint64("our_term", uint64(newTerm)).
+					Msg("abandoning election: a voter reported a higher term")
+				resCh <- ElectionResponse{
+					transitonRole: ServerRole_Follower,
+					reason: fmt.Sprintf("peer %s reported a higher term %d during the vote",
+						res.id, res.rpcRes.Term),
+				}
 				return
 			}
 			if res.rpcRes.VoteGranted && n.GetRole() == ServerRole_Candidate {
@@ -236,10 +257,29 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	}
 
 	if votesReceived >= majority {
-		resCh <- ElectionResponse{transitonRole: ServerRole_Leader}
+		zerolog.Ctx(ctx).Info().
+			Uint64("term", uint64(newTerm)).
+			Int("votes", votesReceived).
+			Int("needed", majority).
+			Int("voters", voterCount).
+			Msg("election won")
+		resCh <- ElectionResponse{
+			transitonRole: ServerRole_Leader,
+			reason:        fmt.Sprintf("won election for term %d with %d/%d votes", newTerm, votesReceived, voterCount),
+		}
 		return
 	}
-	resCh <- ElectionResponse{transitonRole: ServerRole_Follower}
+
+	zerolog.Ctx(ctx).Info().
+		Uint64("term", uint64(newTerm)).
+		Int("votes", votesReceived).
+		Int("needed", majority).
+		Int("voters", voterCount).
+		Msg("election lost")
+	resCh <- ElectionResponse{
+		transitonRole: ServerRole_Follower,
+		reason:        fmt.Sprintf("lost election for term %d with %d/%d votes, needed %d", newTerm, votesReceived, voterCount, majority),
+	}
 	return
 }
 

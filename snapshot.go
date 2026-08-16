@@ -141,6 +141,17 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	if err := n.waitForCatchUpFloor(ctx, latestAppliedIndex); err != nil {
 		return err
 	}
+
+	// Every deletion of log entries is logged with its range and its justification.
+	// A log that shrinks is the one event that can silently lose data a peer still
+	// needs, and after the fact the range is the only way to tell a legitimate
+	// compaction from one that ran too far.
+	zerolog.Ctx(ctx).Info().
+		Uint("delete_from", 1).
+		Uint("delete_to", latestAppliedIndex).
+		Uint("snapshot_index", latestAppliedIndex).
+		Msg("compacting log: entries up to the new snapshot are now covered by it")
+
 	return n.store.DeleteLogs(ctx, 0, latestAppliedIndex)
 }
 
@@ -207,29 +218,60 @@ func parseSnapshotDirName(dirName string) (latestIdx uint, latestTerm uint, time
 }
 
 func shouldTriggerSnapshot(ctx context.Context, snapshotDir string, lastApplied, snapshotThreshold uint) bool {
-	entries, err := os.ReadDir(snapshotDir)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error reading snapshot directory")
+	latestSnapshotIndex := uint(0)
+	if _, err := os.Stat(snapshotDir); os.IsNotExist(err) {
+		if err := os.Mkdir(snapshotDir, os.ModeDir); err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error creating snapshot directory")
+			return false
+		}
+		zerolog.Ctx(ctx).Debug().
+			Uint("last_applied", lastApplied).
+			Uint("threshold", snapshotThreshold).
+			Str("snapshot_dir", snapshotDir).
+			Msg("shouldTriggerSnapshot: fresh node, created the snapshot directory")
+	} else if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error reading snapshot directory stats")
 		return false
-	}
-	files := make([]os.DirEntry, 0, len(entries))
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".tmp") {
-			files = append(files, e)
+	} else {
+		entries, err := os.ReadDir(snapshotDir)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error reading snapshot directory")
+			return false
+		}
+		files := make([]os.DirEntry, 0, len(entries))
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".tmp") {
+				files = append(files, e)
+			}
+		}
+		if len(files) == 0 && lastApplied > snapshotThreshold {
+			zerolog.Ctx(ctx).Debug().
+				Uint("last_applied", lastApplied).
+				Uint("latest_snapshot_index", 0).
+				Uint("threshold", snapshotThreshold).
+				Bool("triggered", true).
+				Msg("shouldTriggerSnapshot: snapshot dir is empty and entries have been applied")
+			return true
+		}
+		latestSnapshotIndex, err = getLatestSnapshotIndex(files)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error getting latest snapshot index")
+			return false
 		}
 	}
-	if len(files) == 0 && lastApplied > 0 {
-		return true
-	}
-	latestSnapshotIndex, err := getLatestSnapshotIndex(files)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("shouldTriggerSnapshot: error getting latest snapshot index")
-		return false
-	}
-	if lastApplied-latestSnapshotIndex >= snapshotThreshold {
-		return true
-	}
-	return false
+
+	diff := lastApplied - latestSnapshotIndex
+	triggered := diff >= snapshotThreshold
+
+	zerolog.Ctx(ctx).Debug().
+		Uint("last_applied", lastApplied).
+		Uint("latest_snapshot_index", latestSnapshotIndex).
+		Uint("threshold", snapshotThreshold).
+		Int("difference", int(diff)).
+		Bool("triggered", triggered).
+		Msg("shouldTriggerSnapshot: evaluated")
+
+	return triggered
 }
 
 func getLatestSnapshotIndex(dirs []os.DirEntry) (uint, error) {
@@ -369,6 +411,9 @@ func writeFileSynced(path string, write func(*os.File) error) error {
 func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *InstallSnapshotResponse, snapshotMeta SnapshotMeta, err error) {
 	latestSnapshotDir, err := getLatestSnapshotDir(n.cfg.SnapshotDir)
 	if err != nil {
+		if errors.Is(err, ErrNoSnapshot) {
+			return nil, SnapshotMeta{}, ErrNoSnapshot
+		}
 		return nil, SnapshotMeta{}, fmt.Errorf("callInstallSnapshot: getting latest snapshot directory: %w", err)
 	}
 	snapshotDirPath := n.cfg.SnapshotDir + "/" + latestSnapshotDir

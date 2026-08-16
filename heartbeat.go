@@ -99,11 +99,11 @@ func (n *Node) startSendLogs(ctx context.Context) {
 			// transition. order matters: cancel before becomeFollower so no zombie heartbeats
 			// race against the new follower state.
 			cancel()
-			n.becomeFollower()
+			n.becomeFollower("a peer reported a higher term while we were leading")
 			return
 		case <-n.electionTimeoutCh:
 			cancel()
-			n.becomeFollower()
+			n.becomeFollower("stepped down as leader (removed from the configuration, or a newer leader reached us)")
 			return
 		case id := <-n.memberAddedCh:
 			// A member finished catching up and was promoted, so it now needs the
@@ -151,9 +151,27 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			}
 
 			if commitIndexLog.Term == uint64(currentTerm) {
+				if prev := n.GetCommitIndex(); commitIndex > prev {
+					zerolog.Ctx(ctx).Debug().
+						Uint("from", prev).
+						Uint("to", commitIndex).
+						Uint("last_log_index", lastLogIndex).
+						Int("voters", n.voterCount()).
+						Msg("leader commit index advanced: a majority now holds this index")
+				}
 				n.SetCommitIndex(commitIndex)
 				n.advanceCommittedConfiguration(uint64(commitIndex))
 				n.processFutures(uint64(commitIndex))
+			} else {
+				// Ongaro §5.4.2: a leader may only commit an entry from its OWN term.
+				// Entries from an earlier term ride along once one of ours commits, so
+				// a commit index that sits still here is expected right after an
+				// election, not a fault.
+				zerolog.Ctx(ctx).Debug().
+					Uint("candidate_commit", commitIndex).
+					Uint64("entry_term", commitIndexLog.Term).
+					Uint("current_term", currentTerm).
+					Msg("majority match reached, but the entry is from an older term — not committing yet")
 			}
 		}
 	}
@@ -254,7 +272,6 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		return
 	}
 
-	fmt.Printf("\nCurrentTerm: %d\nRes Term: %d", currentTerm, res.Term)
 	if uint(res.Term) > currentTerm {
 		// BUG (fixed): we used to call n.becomeFollower() directly here.
 		// that meant a child goroutine was driving the role transition, bypassing
@@ -263,7 +280,11 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 		// for the full failure chain.
 		//
 		// now we just signal and return. startSendLogs owns the transition.
-		zerolog.Ctx(ctx).Debug().Msgf("stepping down peer: %s term is %d and current term %d", peerID, res.Term, currentTerm)
+		zerolog.Ctx(ctx).Info().
+			Str("peer", peerID).
+			Uint64("peer_term", res.Term).
+			Uint("our_term", currentTerm).
+			Msg("signalling step down: a follower rejected our AppendEntries with a higher term")
 		stepDownCh <- struct{}{}
 		errChan <- nil
 		return
@@ -274,12 +295,28 @@ func (n *Node) sendLogs(ctx context.Context, peerID string, errChan chan<- error
 			currentNext := n.GetPeerIndex(peerID).NextIndex
 			n.SetMatchPeerIndex(peerID, currentNext+peerLogLen-1)
 			n.SetNextPeerIndex(peerID, currentNext+peerLogLen)
+			// The leader's half of convergence: this peer now holds up to match, and
+			// the commit-index updater is about to re-run the majority arithmetic.
+			zerolog.Ctx(ctx).Debug().
+				Str("peer", peerID).
+				Uint("entries", peerLogLen).
+				Uint("match", currentNext+peerLogLen-1).
+				Uint("next", currentNext+peerLogLen).
+				Msg("peer accepted entries, match index advanced")
 			updateCommitIndexCh <- struct{}{}
 		}
 		// peerLogLen == 0 means pure heartbeat — follower is consistent, nothing to advance
 	} else {
 		currentNext := n.GetPeerIndex(peerID).NextIndex
 		if currentNext > 1 {
+			// The follower's log did not match at prevLogIndex. Back off by one and
+			// retry — the gap between this line and the next "match index advanced"
+			// for the same peer is the whole catch-up.
+			zerolog.Ctx(ctx).Debug().
+				Str("peer", peerID).
+				Uint("next_was", currentNext).
+				Uint("next_now", currentNext-1).
+				Msg("peer rejected entries, walking next index back")
 			n.SetNextPeerIndex(peerID, currentNext-1)
 		}
 	}

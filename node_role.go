@@ -16,8 +16,14 @@ import (
 // They also starts the necessary goroutines for that role like election timeout for follower and send logs for leader
 // -------------------------------------------
 
-func (n *Node) becomeFollower() {
-	zerolog.Ctx(n.ctx).Info().Msg("becoming follower")
+// becomeFollower steps down to follower. reason says what caused it — a role change
+// with no cause in the log is unreadable after the fact, because the interesting
+// question is never "what did it become" but "what made it".
+func (n *Node) becomeFollower(reason string) {
+	zerolog.Ctx(n.ctx).Info().
+		Str("from", string(n.GetRole())).
+		Str("reason", reason).
+		Msg("becoming follower")
 	// End the leadership term before anything else: any Propose still waiting on
 	// commit has to fail now rather than block on entries a new leader may never
 	// commit. A no-op when we were not leader (candidate losing, startup).
@@ -34,9 +40,13 @@ func (n *Node) becomeFollower() {
 	n.startElectionOut(n.ctx)
 }
 
-func (n *Node) becomeCandidate() {
-	zerolog.Ctx(n.ctx).Info().Msg("becoming candidate")
+func (n *Node) becomeCandidate(reason string) {
+	zerolog.Ctx(n.ctx).Info().
+		Str("from", string(n.GetRole())).
+		Str("reason", reason).
+		Msg("becoming candidate")
 	n.SetRole(ServerRole_Candidate)
+	n.SetLeaderID("")
 	n.startElection(n.ctx)
 }
 
@@ -79,13 +89,16 @@ func (n *Node) initLeaderTermState(lastIndex uint) {
 	n.memberAddedCh = make(chan string, 1)
 }
 
-func (n *Node) becomeLeader() {
-	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
+func (n *Node) becomeLeader(reason string) {
+	zerolog.Ctx(n.ctx).Info().
+		Str("from", string(n.GetRole())).
+		Str("reason", reason).
+		Msg("becoming leader")
 
 	lastIndex, err := n.store.GetLastIndex(n.ctx)
 	if err != nil {
 		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error getting latest log index")
-		n.becomeFollower()
+		n.becomeFollower("becomeLeader: could not read last log index")
 		return
 	}
 
@@ -96,7 +109,7 @@ func (n *Node) becomeLeader() {
 	if err != nil {
 		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error appending no-op log entry")
 		n.clientMu.Unlock()
-		n.becomeFollower()
+		n.becomeFollower("becomeLeader: could not initialise leadership state")
 		return
 	}
 	n.clientMu.Unlock()
@@ -124,7 +137,7 @@ func (n *Node) becomeLeader() {
 		if mErr != nil {
 			zerolog.Ctx(n.ctx).Error().Err(mErr).Msg("becomeLeader: failed to marshal config")
 			n.clientMu.Unlock()
-			n.becomeFollower()
+			n.becomeFollower("becomeLeader: staging cleanup could not marshal config")
 			return
 		}
 
@@ -135,7 +148,7 @@ func (n *Node) becomeLeader() {
 		if _, pErr := n.appendEntry(n.ctx, EntryType_Config, data); pErr != nil {
 			zerolog.Ctx(n.ctx).Warn().Err(pErr).Msg("becomeLeader: staging peer cleanup failed to append; it may remain")
 			n.clientMu.Unlock()
-			n.becomeFollower()
+			n.becomeFollower("becomeLeader: staging cleanup append failed")
 			return
 		}
 		n.clientMu.Unlock()
@@ -183,11 +196,14 @@ func (n *Node) startElectionOut(ctx context.Context) {
 				// on purpose — the point of the transfer is to reach the same
 				// place sooner, not to take a different path into the election.
 				ticker.Stop()
-				n.becomeCandidate()
+				n.becomeCandidate("TimeoutNow from the leader")
 				return
 			case <-ticker.C:
+				zerolog.Ctx(ctx).Debug().
+					Dur("timeout", timeOut).
+					Msg("election timer fired: no contact from a leader")
 				ticker.Stop()
-				n.becomeCandidate()
+				n.becomeCandidate("election timeout elapsed")
 				return
 			case <-ctx.Done():
 				ticker.Stop()
@@ -224,6 +240,15 @@ func (n *Node) waitForQuorum(ctx context.Context) {
 	// against the full-cluster majority, which is deliberately a touch strict —
 	// unchanged from before, just no longer relying on majoritySize's implicit +1.
 	voterIDs := n.voterPeerIDs()
+
+	if len(voterIDs) < 1 {
+		return
+	} else if len(voterIDs) == 1 {
+		if voterIDs[0] == n.GetID() {
+			return
+		}
+	}
+
 	majority := majoritySize(n.voterCount())
 
 	for {

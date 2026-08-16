@@ -66,6 +66,11 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 			commitIdx := n.commitIndex
 			n.commitMu.Unlock() // unlock before slow work
 
+			zerolog.Ctx(ctx).Debug().
+				Uint("from", lastApplied+1).
+				Uint("to", commitIdx).
+				Msg("applying committed entries")
+
 			if err := n.applyEntries(ctx, lastApplied, commitIdx); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop error")
 				// The entries up to commitIdx are committed and cannot be taken back, and
@@ -77,6 +82,13 @@ func (n *Node) startApplyLoop(ctx context.Context) {
 				}
 				return
 			}
+
+			// The final hop: committed -> applied. A waiter released by processFutures
+			// has only been told the entry is durable; it is this line that means the
+			// state machine can answer for it.
+			zerolog.Ctx(ctx).Debug().
+				Uint("last_applied", commitIdx).
+				Msg("entries applied")
 
 			lastApplied = commitIdx
 			n.commitMu.Lock() // reacquire before next condition check

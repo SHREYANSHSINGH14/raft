@@ -173,6 +173,16 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	log, err := n.store.GetLogByIndex(ctx, uint(req.SnapshotMetadata.LastIncludedIndex))
 	if err != nil {
 		if err == ErrNotFound {
+			// We hold nothing at the snapshot's last-included index, so no entry we
+			// have is provably consistent with it. The whole log goes; the snapshot
+			// is now the only truth on this node.
+			zerolog.Ctx(ctx).Info().
+				Uint("delete_from", 1).
+				Uint("delete_to", lastLogIndex).
+				Uint64("snapshot_index", req.SnapshotMetadata.LastIncludedIndex).
+				Str("leader", req.LeaderID).
+				Msg("discarding entire log: no entry at the snapshot's last-included index")
+
 			err = n.store.DeleteLogs(ctx, 0, lastLogIndex)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
@@ -185,6 +195,17 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			return
 		}
 	} else if log.Term != req.SnapshotMetadata.LastIncludedTerm {
+		// We have an entry at that index but from a different term, so it belongs to
+		// a branch the cluster discarded. Everything we hold is suspect.
+		zerolog.Ctx(ctx).Info().
+			Uint("delete_from", 1).
+			Uint("delete_to", lastLogIndex).
+			Uint64("snapshot_index", req.SnapshotMetadata.LastIncludedIndex).
+			Uint64("our_term_at_index", log.Term).
+			Uint64("snapshot_term", req.SnapshotMetadata.LastIncludedTerm).
+			Str("leader", req.LeaderID).
+			Msg("discarding entire log: our entry at the snapshot index is from a different term")
+
 		err = n.store.DeleteLogs(ctx, 0, lastLogIndex)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
@@ -192,6 +213,15 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 			return
 		}
 	} else {
+		// Our entry at that index agrees with the snapshot, so everything after it is
+		// still good. Only the prefix the snapshot covers is dropped.
+		zerolog.Ctx(ctx).Info().
+			Uint("delete_from", 1).
+			Uint64("delete_to", req.SnapshotMetadata.LastIncludedIndex).
+			Uint("keeping_through", lastLogIndex).
+			Str("leader", req.LeaderID).
+			Msg("compacting log: the snapshot matches our entry at its index, keeping the suffix")
+
 		err = n.store.DeleteLogs(ctx, 0, uint(req.SnapshotMetadata.LastIncludedIndex))
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error compacting logs")
