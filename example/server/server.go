@@ -36,6 +36,11 @@ type Server struct {
 	// library's own peerIDs() is unexported.
 	peerIDs []string
 
+	// transport is held so membership changes can introduce a peer's address. The
+	// library never learns addresses — that is the Transport's concern — so adding a
+	// member is two steps that only the embedding can sequence.
+	transport *grpcTransport
+
 	baseUrl   string
 	port      string
 	debugPort string
@@ -119,6 +124,7 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 	server.SM = sm
 	server.peerIDs = append([]string{cfg.ID}, slices.Collect(maps.Keys(cfg.ServerIDS))...)
 	slices.Sort(server.peerIDs)
+	server.transport = transport
 	server.baseUrl = cfg.BaseURL
 	server.port = cfg.Port
 	server.debugPort = cfg.DebugPort
@@ -196,26 +202,75 @@ func (s *Server) Start() {
 // InstallSnapshot by snapshot size. A context.WithTimeout here would keep whichever
 // deadline is earlier, so a flat per-transport timeout would silently override that
 // scaling and cap a large catch-up at the budget for a heartbeat.
+//
+// The client map is mutable: AddMember introduces peers the process did not start
+// with, so it is guarded by mu and every method reads it through client().
 type grpcTransport struct {
-	clients map[string]types.RaftRpcClient
+	mu      sync.RWMutex
+	clients map[string]peerConn
+}
+
+// peerConn keeps the connection alongside the client so RemovePeer can close it.
+type peerConn struct {
+	client types.RaftRpcClient
+	conn   *grpc.ClientConn
 }
 
 func newGRPCTransport(peerURLs map[string]string) (*grpcTransport, error) {
-	clients := make(map[string]types.RaftRpcClient, len(peerURLs))
+	t := &grpcTransport{clients: make(map[string]peerConn, len(peerURLs))}
 	for id, url := range peerURLs {
-		conn, err := grpc.NewClient(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to connect to peer %s at %s: %w", id, url, err)
+		if err := t.AddPeer(id, url); err != nil {
+			return nil, err
 		}
-		clients[id] = types.NewRaftRpcClient(conn)
 	}
-	return &grpcTransport{
-		clients: clients,
-	}, nil
+	return t, nil
+}
+
+// AddPeer dials a peer and makes it addressable.
+//
+// It must run *before* Node.AddMember, not after it succeeds: AddMember catches the
+// new member up over this very transport, so a peer that is not in the map yet cannot
+// be reached, catch-up fails, and the addition rolls itself back. Undo with RemovePeer
+// if AddMember then fails.
+//
+// grpc.NewClient does not connect — it builds a lazy client — so dialling a peer that
+// is ultimately rejected costs nothing but the map entry.
+func (t *grpcTransport) AddPeer(id, url string) error {
+	conn, err := grpc.NewClient(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("failed to connect to peer %s at %s: %w", id, url, err)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if existing, ok := t.clients[id]; ok {
+		// Replacing an address: close the old connection rather than leaking it.
+		_ = existing.conn.Close()
+	}
+	t.clients[id] = peerConn{client: types.NewRaftRpcClient(conn), conn: conn}
+	return nil
+}
+
+// RemovePeer drops a peer and closes its connection. Safe to call for an id that was
+// never added.
+func (t *grpcTransport) RemovePeer(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if pc, ok := t.clients[id]; ok {
+		_ = pc.conn.Close()
+		delete(t.clients, id)
+	}
+}
+
+func (t *grpcTransport) client(peerID string) (types.RaftRpcClient, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	pc, ok := t.clients[peerID]
+	return pc.client, ok
 }
 
 func (t *grpcTransport) RequestVote(ctx context.Context, peerID string, args raft.RequestVoteArgs) (raft.RequestVoteResponse, error) {
-	client, ok := t.clients[peerID]
+	client, ok := t.client(peerID)
 	if !ok {
 		return raft.RequestVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
@@ -235,7 +290,7 @@ func (t *grpcTransport) RequestVote(ctx context.Context, peerID string, args raf
 }
 
 func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args raft.AppendEntriesArgs) (raft.AppendEntriesResponse, error) {
-	client, ok := t.clients[peerID]
+	client, ok := t.client(peerID)
 	if !ok {
 		return raft.AppendEntriesResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
@@ -257,7 +312,7 @@ func (t *grpcTransport) AppendEntries(ctx context.Context, peerID string, args r
 }
 
 func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.PreVoteArgs) (raft.PreVoteResponse, error) {
-	client, ok := t.clients[peerID]
+	client, ok := t.client(peerID)
 	if !ok {
 		return raft.PreVoteResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
@@ -277,7 +332,7 @@ func (t *grpcTransport) PreVote(ctx context.Context, peerID string, args raft.Pr
 }
 
 func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft.TimeoutNowArgs) (raft.TimeoutNowResponse, error) {
-	client, ok := t.clients[peerID]
+	client, ok := t.client(peerID)
 	if !ok {
 		return raft.TimeoutNowResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
@@ -295,7 +350,7 @@ func (t *grpcTransport) TimeoutNow(ctx context.Context, peerID string, args raft
 }
 
 func (t *grpcTransport) InstallSnapshot(ctx context.Context, peerID string, args raft.InstallSnapshotArgs) (raft.InstallSnapshotResponse, error) {
-	client, ok := t.clients[peerID]
+	client, ok := t.client(peerID)
 	if !ok {
 		return raft.InstallSnapshotResponse{}, fmt.Errorf("unknown peer: %s", peerID)
 	}
@@ -329,7 +384,18 @@ func (t *grpcTransport) InstallSnapshot(ctx context.Context, peerID string, args
 		return raft.InstallSnapshotResponse{}, err
 	}
 
-	chunks := make([]byte, 64*statemachine.KB)
+	// Chunk at 10% of the snapshot, so a transfer is always ~10 messages whatever its
+	// size — the streaming path gets exercised even by a tiny test snapshot, instead
+	// of fitting in one message and never proving anything.
+	//
+	// Both bounds are load-bearing. The floor stops a zero-length buffer, which Read
+	// fills with 0 bytes and no error, forever. The ceiling keeps a message under
+	// gRPC's 4MB default receive limit — 10% of a large snapshot would otherwise be
+	// rejected by the far side rather than sent.
+	chunkSize := int(args.SnapshotSize / 10)
+	chunkSize = min(max(chunkSize, 4*statemachine.KB), statemachine.MB)
+
+	chunks := make([]byte, chunkSize)
 	for {
 		n, err := args.Reader.Read(chunks)
 		if n > 0 {
@@ -357,4 +423,28 @@ func (t *grpcTransport) InstallSnapshot(ctx context.Context, peerID string, args
 		Term:    res.Term,
 		Success: res.Success,
 	}, nil
+}
+
+// trackedPeerIDs returns the members this server knows to ask the node about. It is
+// mutable because AddMember and RemoveMember change the cluster at runtime, and
+// cfg.ServerIDS is only the bootstrap seed.
+func (s *Server) trackedPeerIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.peerIDs)
+}
+
+func (s *Server) trackPeer(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.Contains(s.peerIDs, id) {
+		s.peerIDs = append(s.peerIDs, id)
+		slices.Sort(s.peerIDs)
+	}
+}
+
+func (s *Server) untrackPeer(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peerIDs = slices.DeleteFunc(s.peerIDs, func(p string) bool { return p == id })
 }

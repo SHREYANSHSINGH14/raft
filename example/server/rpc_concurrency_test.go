@@ -427,7 +427,7 @@ func TestInterleaving_AppendEntries_ConcurrentFromSameLeader(t *testing.T) {
 	}
 
 	// No extra logs should exist beyond index 3
-	lastIdx, err := store.GetLastLogIndex(ctx)
+	lastIdx, err := store.GetLastIndex(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, uint(3), lastIdx,
 		"unexpected logs appended beyond the expected range")

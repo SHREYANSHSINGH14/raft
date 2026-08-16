@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/SHREYANSHSINGH14/raft/example/statemachine"
+	"github.com/rs/zerolog"
 )
 
 // POST /kv/set
@@ -145,8 +147,19 @@ func (d *DebugServer) runCommand(w http.ResponseWriter, r *http.Request, key str
 // error path too — a command that failed still occupies an index, and that is where
 // /logs/get will show it.
 func (d *DebugServer) propose(ctx context.Context, cmd *statemachine.Command) (uint64, error) {
+	// Each stage is logged separately because they fail for unrelated reasons, and a
+	// single "propose failed" line cannot tell you which one you are looking at:
+	// appended-but-not-committed is a leadership problem, committed-but-refused is a
+	// state machine verdict, and they want opposite responses from the caller.
+	log := zerolog.Ctx(ctx).With().
+		Str("command_id", cmd.ID).
+		Str("op", string(cmd.Op)).
+		Str("key", cmd.Key).
+		Logger()
+
 	data, err := cmd.Marshal()
 	if err != nil {
+		log.Error().Err(err).Msg("propose: could not marshal command")
 		return 0, err
 	}
 
@@ -154,20 +167,48 @@ func (d *DebugServer) propose(ctx context.Context, cmd *statemachine.Command) (u
 	d.server.SM.Register(ctx, cmd.ID)
 	defer d.server.SM.Forget(cmd.ID)
 
+	start := time.Now()
 	future, err := d.server.Node.Propose(ctx, raft.EntryType_Command, data)
 	if err != nil {
+		log.Warn().Err(err).Msg("propose: not appended")
 		return 0, err
 	}
 	idx := future.Index()
+	log.Debug().Uint64("index", idx).Msg("propose: appended, waiting for commit")
 
 	// Two waits, answering two different questions. The future answers "did it
 	// commit"; WaitForResult answers "what did applying it produce". A future that
 	// fails — ErrLeadershipLost, a cancelled request — must not fall through to the
 	// second, because nothing will ever complete that waiter.
 	if err := future.Wait(ctx); err != nil {
+		// The entry is in this node's log either way. Not committed means we cannot
+		// say whether it ever will be — a new leader may commit it or truncate it —
+		// so this is the one outcome a caller must not retry blindly.
+		log.Warn().Err(err).
+			Uint64("index", idx).
+			Dur("waited", time.Since(start)).
+			Msg("propose: NOT committed")
 		return idx, err
 	}
-	return idx, d.server.SM.WaitForResult(cmd.ID)
+	committedAt := time.Since(start)
+	log.Debug().Uint64("index", idx).Dur("commit_ms", committedAt).Msg("propose: committed")
+
+	if err := d.server.SM.WaitForResult(cmd.ID); err != nil {
+		// Committed and applied — the command itself was refused, or its caller went
+		// away. The log entry stands regardless.
+		log.Info().Err(err).
+			Uint64("index", idx).
+			Dur("total", time.Since(start)).
+			Msg("propose: committed, but applying it did not succeed")
+		return idx, err
+	}
+
+	log.Info().
+		Uint64("index", idx).
+		Dur("commit", committedAt).
+		Dur("total", time.Since(start)).
+		Msg("propose: committed and applied")
+	return idx, nil
 }
 
 // rawOrNil keeps an absent JSON field absent. NewCommand marshals any non-nil value,
@@ -193,9 +234,13 @@ func decodeKVRequest(w http.ResponseWriter, r *http.Request, dst any) bool {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return false
 	}
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := decodeJSON(r, dst); err != nil {
 		writeJSON(w, http.StatusBadRequest, KVResponse{ErrorMsg: "invalid request body: " + err.Error()})
 		return false
 	}
 	return true
+}
+
+func decodeJSON(r *http.Request, dst any) error {
+	return json.NewDecoder(r.Body).Decode(dst)
 }

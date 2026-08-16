@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/rs/zerolog"
 )
 
@@ -20,13 +19,14 @@ func NewDebugServer(server *Server) *DebugServer {
 
 func (d *DebugServer) Start(port string) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/logs/append", d.handleAppendLogs)
 	mux.HandleFunc("/logs/get", d.handleGetLogs)
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/kv/set", d.handleKVSet)
 	mux.HandleFunc("/kv/delete", d.handleKVDelete)
 	mux.HandleFunc("/kv/cas", d.handleKVCAS)
 	mux.HandleFunc("/kv/get", d.handleKVGet)
+	mux.HandleFunc("/cluster/add", d.handleClusterAdd)
+	mux.HandleFunc("/cluster/remove", d.handleClusterRemove)
 
 	go func() {
 		zerolog.Ctx(d.server.ctx).Debug().Str("port", port).Msg("debug server started")
@@ -34,44 +34,6 @@ func (d *DebugServer) Start(port string) {
 			zerolog.Ctx(d.server.ctx).Error().Err(err).Msg("debug server error")
 		}
 	}()
-}
-
-// POST /logs/append
-// body: {"data": "set x=5"}
-func (d *DebugServer) handleAppendLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req AppendLogsDebugRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, AppendLogsDebugResponse{
-			Success:  false,
-			ErrorMsg: "invalid request body: " + err.Error(),
-		})
-		return
-	}
-
-	// Propose now returns as soon as the entry is appended, so the endpoint keeps its
-	// old contract — respond once the entry is committed — by waiting on the future.
-	// Both are scoped to the request: if the caller hangs up, the wait ends. The entry
-	// stays proposed and will commit on its own; only the reply is abandoned.
-	ctx := r.Context()
-	future, err := d.server.Node.Propose(ctx, raft.EntryType_Command, []byte(req.Data))
-	if err == nil {
-		err = future.Wait(ctx)
-	}
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, AppendLogsDebugResponse{
-			Success:  false,
-			ErrorMsg: err.Error(),
-			LeaderID: d.server.Node.GetLeaderID(),
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, AppendLogsDebugResponse{Success: true})
 }
 
 // GET /logs/get?start=1&end=10
@@ -140,7 +102,7 @@ func (d *DebugServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.LastLogIndex = logs[len(logs)-1].Index
 	}
 
-	for _, id := range d.server.peerIDs {
+	for _, id := range d.server.trackedPeerIDs() {
 		peer := d.server.Node.GetPeerIndex(id)
 		resp.Peers[id] = &PeerDebug{
 			PeerState:  peerStateName(peer.PeerState),

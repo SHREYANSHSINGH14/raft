@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/SHREYANSHSINGH14/raft"
@@ -43,16 +44,6 @@ type KVResponse struct {
 	CommandID string `json:"command_id,omitempty"`
 	Index     uint64 `json:"index,omitempty"`
 
-	ErrorMsg string `json:"error_msg,omitempty"`
-	LeaderID string `json:"leader_id,omitempty"`
-}
-
-type AppendLogsDebugRequest struct {
-	Data string `json:"data"`
-}
-
-type AppendLogsDebugResponse struct {
-	Success  bool   `json:"success"`
 	ErrorMsg string `json:"error_msg,omitempty"`
 	LeaderID string `json:"leader_id,omitempty"`
 }
@@ -202,3 +193,33 @@ func rawIfValid(b []byte) json.RawMessage {
 	}
 	return nil
 }
+
+// Cluster membership requests for the debug server.
+
+type ClusterAddRequest struct {
+	ID string `json:"id"`
+	// RPCUrl is unavoidable here. The library tracks membership by ID and never
+	// learns addresses — that is the Transport's concern — so the caller supplies
+	// the address the same way peers.yaml does at startup.
+	RPCUrl string `json:"rpc_url"`
+	// PeerState is VOTER or NONVOTER; empty defaults to VOTER. STAGING is not
+	// accepted — it is the transient state AddMember moves through on its own.
+	PeerState string `json:"peer_state"`
+}
+
+type ClusterRemoveRequest struct {
+	ID string `json:"id"`
+}
+
+type ClusterResponse struct {
+	Success  bool                  `json:"success"`
+	ID       string                `json:"id,omitempty"`
+	NodeID   string                `json:"node_id,omitempty"`
+	Role     string                `json:"role,omitempty"`
+	Peers    map[string]*PeerDebug `json:"peers,omitempty"`
+	ErrorMsg string                `json:"error_msg,omitempty"`
+	LeaderID string                `json:"leader_id,omitempty"`
+}
+
+// errPeerState is returned for a peer_state the caller may not ask for.
+var errPeerState = errors.New("peer_state must be VOTER or NONVOTER")
