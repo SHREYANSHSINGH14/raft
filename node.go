@@ -338,7 +338,7 @@ func (n *Node) seedConfigurationFromSnapshot(ctx context.Context, meta SnapshotM
 	n.setLatestConfiguration(members, uint64(meta.Index))
 	n.setCommittedConfiguration(members, uint64(meta.Index))
 
-	lastIndex, err := n.store.GetLastLogIndex(ctx)
+	lastIndex, err := n.store.GetLastIndex(ctx)
 	if err != nil {
 		return err
 	}

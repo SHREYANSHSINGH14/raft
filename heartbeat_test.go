@@ -549,14 +549,14 @@ func TestStartCommitIndexUpdater_NoMajority_CommitIndexUnchanged(t *testing.T) {
 		"commitIndex must not advance without majority replication")
 }
 
-// ── 19. DB error on GetLastLogIndex → continues, does not die ────────────────
+// ── 19. DB error on GetLastIndex → continues, does not die ────────────────
 
-func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
+func TestStartCommitIndexUpdater_DBErr_GetLastIndex_Continues(t *testing.T) {
 	mockStore := new(MockStorage)
 
 	// first call errors, all subsequent calls succeed — proves the loop continued past the error
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), errors.New("db error")).Once()
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(1), nil)
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(0), errors.New("db error")).Once()
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(1), nil)
 	mockStore.On("GetLogByIndex", mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 
@@ -570,7 +570,7 @@ func TestStartCommitIndexUpdater_DBErr_GetLastLogIndex_Continues(t *testing.T) {
 
 	updateCommitCh := make(chan struct{}, 1)
 	go node.startCommitIndexUpdater(ctx, updateCommitCh)
-	updateCommitCh <- struct{}{} // first signal → GetLastLogIndex errors, loop continues
+	updateCommitCh <- struct{}{} // first signal → GetLastIndex errors, loop continues
 
 	// if the goroutine dies on first error, commitIndex never advances.
 	// each Eventually poll tries to send another signal so the goroutine gets a retry.

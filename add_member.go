@@ -44,7 +44,7 @@ func (n *Node) AddMember(ctx context.Context, peerID string, peerState PeerState
 		// The member addition was committed, but we are no longer the leader. The
 		// new member is still Staging, and the next leader will either finish the
 		// addition or roll it back. We are done here.
-		return nil
+		return fmt.Errorf("addMember: leadership lost")
 	}
 
 	// NOTE: we keep a single addition path that handles both Voter and NonVoter
@@ -128,8 +128,24 @@ send_snapshot:
 	sendSnapshotCount++
 	res, snapshotMeta, err := n.callInstallSnapshot(ctx, peerID)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: failed to send snapshot")
-		return err
+		if !errors.Is(err, ErrNoSnapshot) {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: failed to send snapshot")
+			return err
+		}
+		firstIdx, err := n.firstIndex(ctx)
+		if err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: failed to get first log index")
+			return err
+		}
+		// firstIndex reports 1 for a genuinely fresh node, so this stays a real
+		// assertion: no snapshot exists, therefore the log must still start at 1 or
+		// entries the new member needs have been compacted away with nothing to
+		// replace them.
+		if firstIdx != 1 {
+			err = fmt.Errorf("snapshot not present and first index is not equal to 1")
+			zerolog.Ctx(ctx).Error().Err(err).Msg("addMember: " + err.Error())
+			return err
+		}
 	}
 
 	if !res.Success {
@@ -139,6 +155,12 @@ send_snapshot:
 	}
 
 	defer n.setCatchingUpIdx(DefaultCatchingUpIdx)
+	if snapshotMeta.Index == 0 {
+		snapshotMeta = SnapshotMeta{
+			Index: 0,
+			Term:  0,
+		}
+	}
 	n.setCatchingUpIdx(int64(snapshotMeta.Index + 1))
 	_, err = n.store.GetLogByIndex(ctx, snapshotMeta.Index+1)
 	if err != nil {

@@ -65,7 +65,16 @@ func (n *Node) HandleRequestVote(ctx context.Context, args RequestVoteArgs) (Req
 		}, nil
 	}
 
-	lastLog, err := n.store.GetLastLogEntry(ctx)
+	// Same two-call shape as HandlePreVote: lastIndex applies the snapshot fallback,
+	// logTermAt resolves the term whether the entry is still in the log or has been
+	// compacted into the snapshot.
+	lastLogIndex, err := n.lastIndex(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
+		return RequestVoteResponse{}, err
+	}
+
+	lastLogTerm, _, err := n.logTermAt(ctx, uint64(lastLogIndex))
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 		return RequestVoteResponse{}, err
@@ -77,8 +86,8 @@ func (n *Node) HandleRequestVote(ctx context.Context, args RequestVoteArgs) (Req
 	// the log with the later term is more up-to-date. If the logs
 	// end with the same term, then whichever log is longer is
 	// more up-to-date.
-	if lastLog.Index > 0 {
-		if args.LastLogTerm < lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex < lastLog.Index) {
+	if lastLogIndex > 0 {
+		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < uint64(lastLogIndex)) {
 			return RequestVoteResponse{
 				Term:        uint64(currentTerm),
 				VoteGranted: false,

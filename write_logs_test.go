@@ -119,7 +119,7 @@ func TestPropose_NotLeader_ReturnsError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not the leader")
-	store.AssertNotCalled(t, methodGetLastLogIndex, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	assert.Empty(t, pendingFutures(node), "a rejected proposal must not register a waiter")
 	// The zero Future is not a live one: its nil leaderClose means "not leading",
 	// so a caller that ignores err and waits anyway is told so rather than hanging.
@@ -128,11 +128,11 @@ func TestPropose_NotLeader_ReturnsError(t *testing.T) {
 
 // ── DB error cases ────────────────────────────────────────────────────────────
 
-// 2. GetLastLogIndex fails → error, nothing appended
-func TestPropose_GetLastLogIndexFails_ReturnsError(t *testing.T) {
+// 2. GetLastIndex fails → error, nothing appended
+func TestPropose_GetLastIndexFails_ReturnsError(t *testing.T) {
 	node, store := setupProposeTest(t)
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), errors.New("db error"))
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
 
@@ -145,7 +145,7 @@ func TestPropose_GetLastLogIndexFails_ReturnsError(t *testing.T) {
 func TestPropose_GetCurrentTermFails_ReturnsError(t *testing.T) {
 	node, store := setupProposeTest(t)
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.Propose(context.Background(), EntryType_Command, []byte("cmd"))
@@ -163,7 +163,7 @@ func TestPropose_AppendLogsFails_ReturnsError(t *testing.T) {
 	node, store := setupProposeTest(t)
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(errors.New("db error"))
 
@@ -183,7 +183,7 @@ func TestPropose_Success_RegistersFutureForAppendedIndex(t *testing.T) {
 
 	// entry lands at index 3 (lastLogIndex=2, +1)
 	expected := LogEntry{Index: 3, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(2), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(2), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -206,7 +206,7 @@ func TestFutureWait_AlreadyCommitted_ReturnsNilImmediately(t *testing.T) {
 	node, store := setupProposeTest(t)
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -226,7 +226,7 @@ func TestFutureWait_CommitAdvancesToEntryIndex_ReturnsNil(t *testing.T) {
 	node, store := setupProposeTest(t)
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -249,7 +249,7 @@ func TestFutureWait_MultiplePartialCommits_EventuallyReturnsNil(t *testing.T) {
 
 	// entry will land at index 3 (lastLogIndex=2, +1)
 	expected := LogEntry{Index: 3, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(2), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(2), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -280,7 +280,7 @@ func TestFutureWait_ContextCancelledWhileWaiting_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -307,7 +307,7 @@ func TestFutureWait_ContextAlreadyCancelled_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -333,7 +333,7 @@ func TestFutureWait_LeadershipLostWhileWaiting_ReturnsErrLeadershipLost(t *testi
 	node, store := setupProposeTest(t)
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -361,7 +361,7 @@ func TestFutureWait_RegisteredWithoutLeaderChannel_ReturnsErrLeadershipLost(t *t
 	node.Role = ServerRole_Leader // role says leader, but leaderCloseCh was never opened
 
 	expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -381,7 +381,7 @@ func TestFutureWait_CommittedBeforeStepDown_ReturnsNil(t *testing.T) {
 		node, store := setupProposeTest(t)
 
 		expected := LogEntry{Index: 1, Term: 5, Data: []byte("cmd")}
-		store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+		store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 		store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 		store.On(methodAppendLogs, mock.Anything, []LogEntry{expected}).Return(nil)
 
@@ -424,7 +424,7 @@ func TestPropose_ConcurrentCallers_ProduceConsistentLog(t *testing.T) {
 			case <-stopCh:
 				return
 			default:
-				lastIdx, _ := store.GetLastLogIndex(ctx)
+				lastIdx, _ := store.GetLastIndex(ctx)
 				commitTo(node, lastIdx)
 				time.Sleep(time.Millisecond)
 			}
@@ -482,7 +482,7 @@ func TestPropose_PendingLimitReached_RejectsWithoutAppending(t *testing.T) {
 	node, store := setupProposeTest(t)
 	node.cfg.MaxPendingProposals = 3
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 
@@ -506,7 +506,7 @@ func TestPropose_PendingLimitClearsAfterCommit_AdmitsAgain(t *testing.T) {
 	node, store := setupProposeTest(t)
 	node.cfg.MaxPendingProposals = 2
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 
@@ -530,7 +530,7 @@ func TestPropose_PendingLimitReached_ConfigEntryStillAdmitted(t *testing.T) {
 	node, store := setupProposeTest(t)
 	node.cfg.MaxPendingProposals = 1
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 
@@ -550,7 +550,7 @@ func TestPropose_UnsetLimit_UsesDefault(t *testing.T) {
 	node, store := setupProposeTest(t)
 	node.cfg.MaxPendingProposals = 0
 
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 

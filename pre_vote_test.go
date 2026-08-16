@@ -73,7 +73,7 @@ func TestPreVote_Grant(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "node-2",
@@ -102,7 +102,7 @@ func TestPreVote_CandidateNotInConfiguration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, resp.VoteGranted)
 	// The log is never consulted — membership decided it.
-	store.AssertNotCalled(t, methodGetLastLogEntry, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	store.AssertExpectations(t)
 	assertNoSideEffects(t, node, store)
 }
@@ -118,7 +118,7 @@ func TestPreVote_EmptyConfiguration_GrantsToUnknownCandidate(t *testing.T) {
 	node := preVoteNode(store, map[string]PeerState{})
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(0), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "stranger",
@@ -147,7 +147,7 @@ func TestPreVote_HaveLeader_RejectsChallenger(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.False(t, resp.VoteGranted)
-	store.AssertNotCalled(t, methodGetLastLogEntry, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	store.AssertExpectations(t)
 	assertNoSideEffects(t, node, store)
 }
@@ -160,7 +160,7 @@ func TestPreVote_HaveLeader_GrantsToThatLeader(t *testing.T) {
 	node.SetLeaderID("node-2")
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "node-2",
@@ -189,7 +189,7 @@ func TestPreVote_TermLessThanCurrent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, resp.VoteGranted)
 	assert.Equal(t, uint64(5), resp.Term)
-	store.AssertNotCalled(t, methodGetLastLogEntry, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	store.AssertExpectations(t)
 	assertNoSideEffects(t, node, store)
 }
@@ -204,7 +204,7 @@ func TestPreVote_TermEqualCurrent_Grants(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "node-2",
@@ -225,7 +225,7 @@ func TestPreVote_TermGreaterThanCurrent_EchoesCandidateTerm(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "node-2",
@@ -278,7 +278,7 @@ func TestPreVote_StagingPeer_Rejected(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.False(t, resp.VoteGranted)
-	store.AssertNotCalled(t, methodGetLastLogEntry, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	store.AssertExpectations(t)
 	assertNoSideEffects(t, node, store)
 }
@@ -322,7 +322,7 @@ func TestPreVote_NonVoterWithBetterLog_StillRejected(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.False(t, resp.VoteGranted)
-	store.AssertNotCalled(t, methodGetLastLogEntry, mock.Anything)
+	store.AssertNotCalled(t, methodGetLastIndex, mock.Anything)
 	store.AssertExpectations(t)
 	assertNoSideEffects(t, node, store)
 }
@@ -334,7 +334,8 @@ func TestPreVote_CandidateLogTermBehind_Rejected(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID:  "node-2",
@@ -354,7 +355,8 @@ func TestPreVote_SameLogTermIndexBehind_Rejected(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID:  "node-2",
@@ -374,7 +376,8 @@ func TestPreVote_SameLogTermIndexEqual_Granted(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID:  "node-2",
@@ -395,7 +398,8 @@ func TestPreVote_CandidateLogTermAheadButShorter_Granted(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 3}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 3}, nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID:  "node-2",
@@ -417,7 +421,7 @@ func TestPreVote_OurLogEmpty_Granted(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID:  "node-2",
@@ -450,12 +454,12 @@ func TestPreVote_DBErr_GetCurrentTerm(t *testing.T) {
 	assertNoSideEffects(t, node, store)
 }
 
-func TestPreVote_DBErr_GetLastLogEntry(t *testing.T) {
+func TestPreVote_DBErr_GetLastIndex(t *testing.T) {
 	store := new(MockStorage)
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, errors.New("db error"))
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.HandlePreVote(context.Background(), PreVoteArgs{
 		CandidateID: "node-2",
@@ -477,7 +481,7 @@ func TestPreVote_RepeatedProbesReturnSameAnswer(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	args := PreVoteArgs{CandidateID: "node-2", Term: 5}
 	for i := 0; i < 3; i++ {
@@ -500,7 +504,8 @@ func TestPreVote_ConcurrentCallers(t *testing.T) {
 	node := preVoteNode(store, twoVoters())
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 3, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
 
 	const callers = 32
 	results := make([]PreVoteResponse, callers)

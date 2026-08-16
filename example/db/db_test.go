@@ -174,7 +174,7 @@ func TestAppendLogs_EmptySlice(t *testing.T) {
 	err := store.AppendLogs(ctx, []raft.LogEntry{})
 	assert.NoError(t, err)
 
-	idx, err := store.GetLastLogIndex(ctx)
+	idx, err := store.GetLastIndex(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, uint(0), idx)
 }
@@ -486,7 +486,7 @@ func TestTruncateLogs_FromFirstIndex_RemovesAll(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, got, "all logs should be removed when truncating from index 1")
 
-	idx, err := store.GetLastLogIndex(ctx)
+	idx, err := store.GetLastIndex(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, uint(0), idx)
 }
@@ -506,7 +506,7 @@ func TestTruncateLogs_ThenReappend(t *testing.T) {
 	err = store.DeleteLogs(ctx, 2, 0)
 	assert.NoError(t, err)
 
-	idx, err := store.GetLastLogIndex(ctx)
+	idx, err := store.GetLastIndex(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, uint(1), idx, "last index should reflect truncation")
 

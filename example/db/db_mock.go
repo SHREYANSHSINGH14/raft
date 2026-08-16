@@ -115,25 +115,18 @@ func (m *MockStore) GetLastLogTerm(ctx context.Context) (uint, error) {
 	return args.Get(0).(uint), args.Error(1)
 }
 
-func (m *MockStore) GetLastLogIndex(ctx context.Context) (uint, error) {
+func (m *MockStore) GetLastIndex(ctx context.Context) (uint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx)
 	return args.Get(0).(uint), args.Error(1)
 }
 
-func (m *MockStore) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) {
+func (m *MockStore) GetFirstIndex(ctx context.Context) (uint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx)
-	return args.Get(0).(raft.LogEntry), args.Error(1)
-}
-
-func (m *MockStore) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	args := m.Called(ctx)
-	return args.Get(0).(raft.LogEntry), args.Error(1)
+	return args.Get(0).(uint), args.Error(1)
 }
 
 // MockKVStore is a stateful in-memory implementation of raft.Storage.
@@ -246,7 +239,7 @@ func (m *MockKVStore) GetVotedFor(_ context.Context) (string, error) {
 
 // ── Log metadata ─────────────────────────────────────────────────────────────
 
-func (m *MockKVStore) GetLastLogIndex(_ context.Context) (uint, error) {
+func (m *MockKVStore) GetLastIndex(_ context.Context) (uint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	keys := m.sortedLogKeys()
@@ -257,32 +250,29 @@ func (m *MockKVStore) GetLastLogIndex(_ context.Context) (uint, error) {
 	return uint(idx), err
 }
 
-func (m *MockKVStore) GetLastLogTerm(ctx context.Context) (uint, error) {
-	entry, err := m.GetLastLogEntry(ctx)
+func (m *MockKVStore) GetLastLogTerm(_ context.Context) (uint, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	keys := m.sortedLogKeys()
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	entry, err := m.unmarshalEntry([]byte(keys[len(keys)-1]))
 	if err != nil {
 		return 0, err
 	}
 	return uint(entry.Term), nil
 }
 
-func (m *MockKVStore) GetLastLogEntry(_ context.Context) (raft.LogEntry, error) {
+func (m *MockKVStore) GetFirstIndex(_ context.Context) (uint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	keys := m.sortedLogKeys()
 	if len(keys) == 0 {
-		return raft.LogEntry{}, nil
+		return 0, nil
 	}
-	return m.unmarshalEntry([]byte(keys[len(keys)-1]))
-}
-
-func (m *MockKVStore) GetFirstLogEntry(_ context.Context) (raft.LogEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	keys := m.sortedLogKeys()
-	if len(keys) == 0 {
-		return raft.LogEntry{}, nil
-	}
-	return m.unmarshalEntry([]byte(keys[0]))
+	idx, err := indexFromLogKey(keys[0])
+	return uint(idx), err
 }
 
 // ── Log CRUD ──────────────────────────────────────────────────────────────────

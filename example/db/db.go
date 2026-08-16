@@ -161,7 +161,7 @@ func (s *Store) GetVotedFor(ctx context.Context) (string, error) {
 }
 
 // Logs
-func (s *Store) GetLastLogIndex(ctx context.Context) (uint, error) {
+func (s *Store) GetLastIndex(ctx context.Context) (uint, error) {
 	iterOptions := &pebble.IterOptions{
 		LowerBound: []byte(LogPrefix),
 		UpperBound: upperBound([]byte(LogPrefix)),
@@ -186,7 +186,7 @@ func (s *Store) GetLastLogIndex(ctx context.Context) (uint, error) {
 }
 
 func (s *Store) GetLastLogTerm(ctx context.Context) (uint, error) {
-	lastIdx, err := s.GetLastLogIndex(ctx)
+	lastIdx, err := s.GetLastIndex(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -217,39 +217,7 @@ func (s *Store) GetLastLogTerm(ctx context.Context) (uint, error) {
 	return uint(log.Term), nil
 }
 
-func (s *Store) GetLastLogEntry(ctx context.Context) (raft.LogEntry, error) {
-	lastIdx, err := s.GetLastLogIndex(ctx)
-	if err != nil {
-		return raft.LogEntry{}, err
-	}
-
-	if lastIdx == 0 {
-		return raft.LogEntry{}, nil // no logs yet
-	}
-
-	key := logKey(uint64(lastIdx))
-
-	val, closer, err := s.db.Get(key)
-	if err != nil {
-		return raft.LogEntry{}, err
-	}
-
-	var log types.LogEntry
-
-	err = proto.Unmarshal(val, &log)
-	if err != nil {
-		return raft.LogEntry{}, err
-	}
-
-	err = closer.Close()
-	if err != nil {
-		return raft.LogEntry{}, err
-	}
-
-	return types.LogEntryToRaft(&log), nil
-}
-
-func (s *Store) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
+func (s *Store) GetFirstIndex(ctx context.Context) (uint, error) {
 	iterOptions := &pebble.IterOptions{
 		LowerBound: []byte(LogPrefix),
 		UpperBound: upperBound([]byte(LogPrefix)),
@@ -258,22 +226,19 @@ func (s *Store) GetFirstLogEntry(ctx context.Context) (raft.LogEntry, error) {
 	iter, err := s.db.NewIter(iterOptions)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
-			return raft.LogEntry{}, nil // no logs yet
+			return 0, nil // no logs yet
 		}
-		return raft.LogEntry{}, err
+		return 0, err
 	}
 	defer iter.Close()
 
 	if !iter.First() {
-		return raft.LogEntry{}, nil // no logs yet
+		return 0, nil // no logs yet
 	}
 
-	var log types.LogEntry
-	if err := proto.Unmarshal(iter.Value(), &log); err != nil {
-		return raft.LogEntry{}, err
-	}
-
-	return types.LogEntryToRaft(&log), nil
+	key := iter.Key()
+	indexBytes := key[len(LogPrefix):] // strip prefix
+	return bytesToUint(indexBytes)
 }
 
 // Note: we leave the entry.Index and index key check to business logic

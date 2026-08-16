@@ -10,11 +10,10 @@ import (
 )
 
 const (
-	methodGetCurrentTerm  = "GetCurrentTerm"
-	methodSetCurrentTerm  = "SetCurrentTerm"
-	methodGetVotedFor     = "GetVotedFor"
-	methodSetVotedFor     = "SetVotedFor"
-	methodGetLastLogEntry = "GetLastLogEntry"
+	methodGetCurrentTerm = "GetCurrentTerm"
+	methodSetCurrentTerm = "SetCurrentTerm"
+	methodGetVotedFor    = "GetVotedFor"
+	methodSetVotedFor    = "SetVotedFor"
 )
 
 // ── 1. Empty candidate ID ─────────────────────────────────────────────────────
@@ -62,7 +61,7 @@ func TestRequestVote_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(nil) // reset
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil) // nobody voted
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -88,7 +87,7 @@ func TestRequestVote_TermEqualCurrent_VotedForEmpty(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	// SetCurrentTerm and SetVotedFor("") must NOT be called
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -115,7 +114,7 @@ func TestRequestVote_AlreadyVotedForSameCandidate(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("candidate-1", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -159,7 +158,7 @@ func TestRequestVote_NoLogs_AllowVote(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -183,7 +182,8 @@ func TestRequestVote_CandidateLogTermBehind(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
 		CandidateID:  "candidate-1",
@@ -206,7 +206,8 @@ func TestRequestVote_SameTermCandidateIndexBehind(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
 		CandidateID:  "candidate-1",
@@ -229,7 +230,8 @@ func TestRequestVote_SameTermCandidateIndexEqual(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 4}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 4}, nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -253,7 +255,8 @@ func TestRequestVote_CandidateLogTermAhead(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{Index: 10, Term: 3}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 3}, nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	resp, err := node.HandleRequestVote(ctx, RequestVoteArgs{
@@ -338,14 +341,14 @@ func TestRequestVote_DBErr_GetVotedFor(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// 18. GetLastLogEntry fails
-func TestRequestVote_DBErr_GetLastLogEntry(t *testing.T) {
+// 18. GetLastIndex fails
+func TestRequestVote_DBErr_GetLastIndex(t *testing.T) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, errors.New("db error"))
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.HandleRequestVote(context.Background(), RequestVoteArgs{
 		CandidateID: "candidate-1",
@@ -363,7 +366,7 @@ func TestRequestVote_DBErr_SetVotedForCandidate(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(errors.New("db error"))
 
 	_, err := node.HandleRequestVote(context.Background(), RequestVoteArgs{
@@ -389,7 +392,7 @@ func TestRequestVote_ZeroValueLastLog_CandidateAhead_AllowVote(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetVotedFor, mock.Anything).Return("", nil)
-	store.On(methodGetLastLogEntry, mock.Anything).Return(LogEntry{}, nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 	store.On(methodSetVotedFor, mock.Anything, "candidate-1").Return(nil)
 
 	// candidate has real logs, node has none — candidate is strictly ahead

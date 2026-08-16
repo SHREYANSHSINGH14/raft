@@ -90,7 +90,17 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 		return reject()
 	}
 
-	lastLog, err := n.store.GetLastLogEntry(ctx)
+	// Index and term come from two calls, not one entry: after compaction the last
+	// index can live in the snapshot rather than the log, and GetLogByIndex would not
+	// find it. lastIndex applies the snapshot fallback, logTermAt resolves the term
+	// from whichever of the two holds it.
+	lastLogIndex, err := n.lastIndex(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("pre vote db err: %s", err.Error())
+		return PreVoteResponse{}, err
+	}
+
+	lastLogTerm, _, err := n.logTermAt(ctx, uint64(lastLogIndex))
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("pre vote db err: %s", err.Error())
 		return PreVoteResponse{}, err
@@ -99,8 +109,8 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	// Same up-to-date test as the real vote: the log with the later last term
 	// wins; on equal terms the longer log wins. An empty log (Index 0) can lose
 	// to nobody, so the comparison is skipped.
-	if lastLog.Index > 0 {
-		if args.LastLogTerm < lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex < lastLog.Index) {
+	if lastLogIndex > 0 {
+		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < uint64(lastLogIndex)) {
 			return reject()
 		}
 	}

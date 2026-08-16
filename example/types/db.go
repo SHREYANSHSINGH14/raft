@@ -28,6 +28,6 @@ type RaftDBInterface interface {
 
 	// Log metadata
 	GetLastLogTerm(context.Context) (uint, error)
-	GetLastLogIndex(context.Context) (uint, error)
-	GetLastLogEntry(context.Context) (*LogEntry, error)
+	GetLastIndex(context.Context) (uint, error)
+	GetFirstIndex(context.Context) (uint, error)
 }

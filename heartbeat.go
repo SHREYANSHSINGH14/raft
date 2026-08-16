@@ -127,7 +127,7 @@ func (n *Node) startCommitIndexUpdater(ctx context.Context, updateCommitCh <-cha
 			for len(updateCommitCh) > 0 {
 				<-updateCommitCh
 			}
-			lastLogIndex, err := n.store.GetLastLogIndex(ctx)
+			lastLogIndex, err := n.store.GetLastIndex(ctx)
 			if err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).Msgf("commit index updater db error: %s", err.Error())
 				continue

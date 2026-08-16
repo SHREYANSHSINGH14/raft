@@ -90,14 +90,7 @@ func (m *MockStorage) DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error
 	return args.Error(0)
 }
 
-func (m *MockStorage) GetLastLogEntry(ctx context.Context) (LogEntry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	args := m.Called(ctx)
-	return args.Get(0).(LogEntry), args.Error(1)
-}
-
-func (m *MockStorage) GetLastLogIndex(ctx context.Context) (uint, error) {
+func (m *MockStorage) GetLastIndex(ctx context.Context) (uint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx)
@@ -111,11 +104,11 @@ func (m *MockStorage) GetLastLogTerm(ctx context.Context) (uint, error) {
 	return args.Get(0).(uint), args.Error(1)
 }
 
-func (m *MockStorage) GetFirstLogEntry(ctx context.Context) (LogEntry, error) {
+func (m *MockStorage) GetFirstIndex(ctx context.Context) (uint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	args := m.Called(ctx)
-	return args.Get(0).(LogEntry), args.Error(1)
+	return args.Get(0).(uint), args.Error(1)
 }
 
 // MemStorage is a stateful in-memory implementation of Storage used in tests.
@@ -222,16 +215,7 @@ func (m *MemStorage) DeleteLogs(_ context.Context, fromIdx, toIdx uint) error {
 	return nil
 }
 
-func (m *MemStorage) GetLastLogEntry(_ context.Context) (LogEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if len(m.logs) == 0 {
-		return LogEntry{}, nil
-	}
-	return m.logs[len(m.logs)-1], nil
-}
-
-func (m *MemStorage) GetLastLogIndex(_ context.Context) (uint, error) {
+func (m *MemStorage) GetLastIndex(_ context.Context) (uint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.logs) == 0 {
@@ -249,11 +233,11 @@ func (m *MemStorage) GetLastLogTerm(_ context.Context) (uint, error) {
 	return uint(m.logs[len(m.logs)-1].Term), nil
 }
 
-func (m *MemStorage) GetFirstLogEntry(_ context.Context) (LogEntry, error) {
+func (m *MemStorage) GetFirstIndex(_ context.Context) (uint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.logs) == 0 {
-		return LogEntry{}, nil
+		return 0, nil
 	}
-	return m.logs[0], nil
+	return uint(m.logs[0].Index), nil
 }

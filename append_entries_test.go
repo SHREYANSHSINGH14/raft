@@ -14,7 +14,7 @@ const (
 	methodGetLogByIndex   = "GetLogByIndex"
 	methodDeleteLogs      = "DeleteLogs"
 	methodAppendLogs      = "AppendLogs"
-	methodGetLastLogIndex = "GetLastLogIndex"
+	methodGetLastIndex = "GetLastIndex"
 )
 
 // ── 1. Empty leader ID ────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ func TestAppendEntries_TermEqualCurrent_NoReset(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	// SetCurrentTerm and SetVotedFor("") must NOT be called
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -110,7 +110,7 @@ func TestAppendEntries_TermGreaterThanCurrent(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodSetCurrentTerm, mock.Anything, uint(5)).Return(nil)
 	store.On(methodSetVotedFor, mock.Anything, "").Return(nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -198,7 +198,7 @@ func TestAppendEntries_PrevLogNil_Continue(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -247,7 +247,7 @@ func TestAppendEntries_DBErr_DeleteLogs(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(4), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(4), nil)
 	// stored entry at index 4 is from term 2; the incoming one is term 5 → conflict,
 	// which is what triggers the suffix truncation this test exercises.
 	store.On(methodGetLogByIndex, mock.Anything, uint(4)).Return(LogEntry{Index: 4, Term: 2}, nil)
@@ -277,7 +277,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
 	// No entries → no conflict scan hits, no DeleteLogs, no AppendLogs.
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -306,7 +306,7 @@ func TestAppendEntries_DBErr_AppendLogs(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
 	// lastLogIdx is 3, so entry index 4 is genuinely new → no conflict, no DeleteLogs.
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(errors.New("db error"))
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
@@ -333,10 +333,10 @@ func TestAppendEntries_LeaderCommitNotAhead(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	// GetLastLogIndex is called exactly ONCE (the conflict scan). Because
+	// GetLastIndex is called exactly ONCE (the conflict scan). Because
 	// leaderCommit (4) <= commitIndex (5), the commit block is skipped and does
 	// not call it a second time — Times(1) asserts that.
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil).Times(1)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil).Times(1)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -364,7 +364,7 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(6), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(6), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -382,16 +382,16 @@ func TestAppendEntries_LeaderCommitAhead_SetsMin(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// ── 16. GetLastLogIndex fails ─────────────────────────────────────────────────
+// ── 16. GetLastIndex fails ─────────────────────────────────────────────────
 
-func TestAppendEntries_DBErr_GetLastLogIndex(t *testing.T) {
+func TestAppendEntries_DBErr_GetLastIndex(t *testing.T) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
 	node.commitIndex = 2
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), errors.New("db error"))
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), errors.New("db error"))
 
 	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -416,7 +416,7 @@ func TestAppendEntries_LeaderIDUpdated(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "new-leader",
@@ -441,7 +441,7 @@ func TestAppendEntries_ElectionTimeoutReset(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -474,11 +474,11 @@ func TestAppendEntries_HappyPath(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 4}, nil)
 	// entries 4,5 are beyond our last index (3) → new, no conflict, no DeleteLogs.
-	// GetLastLogIndex is called twice: first (3) during the conflict scan, then (5)
+	// GetLastIndex is called twice: first (3) during the conflict scan, then (5)
 	// in the commit block after the append has grown the log.
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil).Once()
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil).Once()
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(5), nil).Once()
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(5), nil).Once()
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -509,7 +509,7 @@ func TestAppendEntries_PrevLogIndex0_NotFound_Continues(t *testing.T) {
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(0), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(0), nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
 		LeaderID:     "leader-1",
@@ -576,7 +576,7 @@ func TestAppendEntries_ConflictOnlyTruncation(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil) // prevLog
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(4), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(4), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(2)).Return(LogEntry{Index: 2, Term: 5}, nil) // match → skip
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 5}, nil) // match → skip
 	store.On(methodGetLogByIndex, mock.Anything, uint(4)).Return(LogEntry{Index: 4, Term: 2}, nil) // conflict
@@ -628,7 +628,7 @@ func TestAppendEntries_TruncationRollsBackLatestConfig(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(2)).Return(LogEntry{Index: 2, Term: 5}, nil) // prevLog
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(3), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(3), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(3)).Return(LogEntry{Index: 3, Term: 2}, nil) // conflict at the config index
 	store.On(methodDeleteLogs, mock.Anything, uint(3), uint(0)).Return(nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
@@ -679,7 +679,7 @@ func TestAppendEntries_ConfigEntryUpdatesLatest(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil) // prevLog
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(1), nil)                            // entry 2 is new, no conflict
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(1), nil)                            // entry 2 is new, no conflict
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -717,7 +717,7 @@ func TestAppendEntries_PrevLogAtSnapshotBoundary_Accepted(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)
 	// index 5 is compacted; logTermAt resolves it from the snapshot, so NO
 	// GetLogByIndex(5) is expected. lastLogIdx is 5, so entry 6 is new.
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(5), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(5), nil)
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{

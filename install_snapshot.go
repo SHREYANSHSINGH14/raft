@@ -163,7 +163,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *InstallSnapshotAr
 	}
 	n.commitMu.Unlock()
 
-	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
+	lastLogIndex, err := n.store.GetLastIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("install snapshot: error getting last log index")
 		success = false

@@ -88,7 +88,7 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// it too — it asks the same up-to-date question the real vote does. Reading it
 	// once and reusing it for both rounds also guarantees the two rounds describe
 	// the same log, which a re-read between them would not.
-	lastLogIndex, err := n.store.GetLastLogIndex(ctx)
+	lastLogIndex, err := n.store.GetLastIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower

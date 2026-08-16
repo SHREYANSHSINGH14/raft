@@ -220,7 +220,7 @@ func TestElection_DBErr_SetCurrentTerm(t *testing.T) {
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 	// The log state is read before the term bump now, because the pre-vote round
 	// needs it. With no voting peers the pre-vote passes on our own vote alone.
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), nil)
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(0), nil)
 	mockStore.On("SetCurrentTerm", mock.Anything, uint(6)).Return(errors.New("db error"))
 
 	node := &Node{
@@ -246,7 +246,7 @@ func TestElection_DBErr_SetCurrentTerm(t *testing.T) {
 func TestElection_DBErr_SetVotedFor(t *testing.T) {
 	mockStore := new(MockStorage)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), nil)
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(0), nil)
 	mockStore.On("SetCurrentTerm", mock.Anything, uint(6)).Return(nil)
 	mockStore.On("SetVotedFor", mock.Anything, "node-1").Return(errors.New("db error"))
 
@@ -269,13 +269,13 @@ func TestElection_DBErr_SetVotedFor(t *testing.T) {
 	assert.Error(t, res.err)
 }
 
-// 11. GetLastLogIndex fails
-func TestElection_DBErr_GetLastLogIndex(t *testing.T) {
+// 11. GetLastIndex fails
+func TestElection_DBErr_GetLastIndex(t *testing.T) {
 	mockStore := new(MockStorage)
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 	mockStore.On("SetCurrentTerm", mock.Anything, uint(6)).Return(nil)
 	mockStore.On("SetVotedFor", mock.Anything, "node-1").Return(nil)
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(0), errors.New("db error"))
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(0), errors.New("db error"))
 
 	node := &Node{
 		ID:                "node-1",
@@ -302,7 +302,7 @@ func TestElection_DBErr_GetLogByIndex(t *testing.T) {
 	mockStore.On("GetCurrentTerm", mock.Anything).Return(uint(5), nil)
 	mockStore.On("SetCurrentTerm", mock.Anything, uint(6)).Return(nil)
 	mockStore.On("SetVotedFor", mock.Anything, "node-1").Return(nil)
-	mockStore.On("GetLastLogIndex", mock.Anything).Return(uint(3), nil) // has logs
+	mockStore.On("GetLastIndex", mock.Anything).Return(uint(3), nil) // has logs
 	mockStore.On("GetLogByIndex", mock.Anything, uint(3)).Return(LogEntry{}, errors.New("db error"))
 
 	node := &Node{

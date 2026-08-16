@@ -358,7 +358,7 @@ func TestAddMember_StagingInProgress(t *testing.T) {
 func TestAddMember_RollbackRemovesStagingPeer(t *testing.T) {
 	store := new(MockStorage)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(10), nil) // for appendEntry
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil) // for appendEntry
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 
 	node, transport := newCatchUpTestNode(t, store)
@@ -379,7 +379,7 @@ func TestAddMember_RollbackRemovesStagingPeer(t *testing.T) {
 func TestAddMember_PromotesOnSuccess(t *testing.T) {
 	store := new(MockStorage)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(10), nil) // for appendEntry
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil) // for appendEntry
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(6)).Return(LogEntry{Index: 6, Term: 2}, nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(8)).Return(LogEntry{Index: 8, Term: 2}, nil)

@@ -37,7 +37,7 @@ func newRemoveTestNode(t *testing.T, store Storage) (*Node, *MockTransport) {
 func storeForPropose() *MockStorage {
 	store := new(MockStorage)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(nil)
 	return store
 }
@@ -107,7 +107,7 @@ func TestRemoveMember_ConfigEntryCarriesWholeMembershipInclSelf(t *testing.T) {
 	var appended []LogEntry
 	store.ExpectedCalls = nil
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) { appended = args.Get(1).([]LogEntry) }).
 		Return(nil)
@@ -131,7 +131,7 @@ func TestRemoveMember_ConfigEntryCarriesWholeMembershipInclSelf(t *testing.T) {
 func TestRemoveMember_ProposeFails_PeerIsRestored(t *testing.T) {
 	store := new(MockStorage)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
-	store.On(methodGetLastLogIndex, mock.Anything).Return(uint(10), nil)
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
 	store.On(methodAppendLogs, mock.Anything, mock.Anything).Return(errors.New("db error"))
 
 	node, _ := newRemoveTestNode(t, store)

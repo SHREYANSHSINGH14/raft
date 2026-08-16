@@ -524,6 +524,50 @@ func (n *Node) GetCommitIndex() uint {
 // prevLog anchor even though that entry has been compacted away.
 // =============================================================================
 
+// lastIndex returns the index of the last entry the node holds, falling back to the
+// snapshot when the log itself is empty.
+//
+// The store cannot answer this on its own. A node that has snapshotted and compacted
+// has an empty log and a real last index — the store reports 0, which is
+// indistinguishable from a node that has never held anything. Only the snapshot
+// metadata, which lives here and not in Storage, separates the two.
+//
+// 0 means genuinely fresh: no entries, no snapshot.
+func (n *Node) lastIndex(ctx context.Context) (uint, error) {
+	idx, err := n.store.GetLastIndex(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if idx != 0 {
+		return idx, nil
+	}
+	if snapIdx := n.GetSnapshotLatestIndex(); snapIdx != 0 {
+		return snapIdx, nil
+	}
+	return 0, nil
+}
+
+// firstIndex returns the lowest index the node can still serve from its log, with the
+// same snapshot fallback as lastIndex.
+//
+// With an empty log and a snapshot at N, the log floor is N+1: N itself lives inside
+// the snapshot, not in the log. 1 means genuinely fresh — no entries, no snapshot —
+// which is what makes "first index is 1" a usable assertion that nothing has been
+// compacted away.
+func (n *Node) firstIndex(ctx context.Context) (uint, error) {
+	idx, err := n.store.GetFirstIndex(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if idx != 0 {
+		return idx, nil
+	}
+	if snapIdx := n.GetSnapshotLatestIndex(); snapIdx != 0 {
+		return snapIdx + 1, nil
+	}
+	return 1, nil
+}
+
 // SetSnapshotLatest records the latest snapshot's last-included index and term
 // together, under one lock, so a reader never sees a torn (index, term) pair.
 func (n *Node) SetSnapshotLatest(idx, term uint) {

@@ -82,15 +82,15 @@ type Storage interface {
 	//   - DeleteLogs(ctx, 0, 0)        removes all log entries.
 	DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error
 
-	GetLastLogEntry(ctx context.Context) (LogEntry, error)
-
 	// Note: returns 0 and error nil when no logs are present
-	GetLastLogIndex(ctx context.Context) (uint, error)
+	GetLastIndex(ctx context.Context) (uint, error)
 	// Note: returns 0 and error nil when no logs are present
 	GetLastLogTerm(ctx context.Context) (uint, error)
 
-	// GetFirstLogEntry returns the first log entry in the log i.e. the log entry with the smallest
-	// index. This is used to determine if a snapshot is needed when a follower's nextIndex is less than the
-	// first log entry index. In that case, the follower needs to install a snapshot to catch up.
-	GetFirstLogEntry(ctx context.Context) (LogEntry, error)
+	// GetFirstIndex returns the index of the first entry in the log, i.e. the
+	// smallest index still stored. Used to decide whether a follower's nextIndex has
+	// fallen below what the log still holds, in which case it needs a snapshot.
+	//
+	// Note: returns 0 and error nil when no logs are present
+	GetFirstIndex(ctx context.Context) (uint, error)
 }

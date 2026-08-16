@@ -82,7 +82,7 @@ func (n *Node) initLeaderTermState(lastIndex uint) {
 func (n *Node) becomeLeader() {
 	zerolog.Ctx(n.ctx).Info().Msg("becoming leader")
 
-	lastIndex, err := n.store.GetLastLogIndex(n.ctx)
+	lastIndex, err := n.store.GetLastIndex(n.ctx)
 	if err != nil {
 		zerolog.Ctx(n.ctx).Error().Err(err).Msg("error getting latest log index")
 		n.becomeFollower()

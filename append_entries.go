@@ -95,7 +95,7 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 	//   - the first TERM CONFLICT (same index, different term) is where we delete
 	//     our suffix and take the leader's version from that index onward.
 	// Only that conflict case truncates, and only from the conflicting index.
-	lastLogIdx, err := n.store.GetLastLogIndex(ctx)
+	lastLogIdx, err := n.store.GetLastIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 		return AppendEntriesResponse{}, err
@@ -160,7 +160,7 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 	}
 
 	if args.LeaderCommit >= uint64(n.GetCommitIndex()) {
-		lastLogIdx, err := n.store.GetLastLogIndex(ctx)
+		lastLogIdx, err := n.store.GetLastIndex(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return AppendEntriesResponse{}, err
