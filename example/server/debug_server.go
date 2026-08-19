@@ -85,21 +85,29 @@ func (d *DebugServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	currentTerm, _ := d.server.Node.GetCurrentTerm(ctx)
 
 	resp := StatusDebugResponse{
-		ID:            d.server.Node.GetID(),
-		Role:          string(d.server.Node.GetRole()),
-		IsLeader:      d.server.Node.IsLeader(),
-		Term:          currentTerm,
-		LeaderID:      d.server.Node.GetLeaderID(),
-		CommitIndex:   d.server.Node.GetCommitIndex(),
-		SnapshotIndex: d.server.Node.GetSnapshotLatestIndex(),
-		SnapshotTerm:  d.server.Node.GetSnapshotLatestTerm(),
-		Peers:         map[string]*PeerDebug{},
+		ID:             d.server.Node.GetID(),
+		Role:           string(d.server.Node.GetRole()),
+		IsLeader:       d.server.Node.IsLeader(),
+		Term:           currentTerm,
+		LeaderID:       d.server.Node.GetLeaderID(),
+		CommitIndex:    d.server.Node.GetCommitIndex(),
+		SnapshotIndex:  d.server.Node.GetSnapshotLatestIndex(),
+		SnapshotTerm:   d.server.Node.GetSnapshotLatestTerm(),
+		SnapshotCaller: d.server.Node.GetSnapshotSetCaller(),
+		LastApplied:    d.server.Node.GetLastApplied(),
+		Peers:          map[string]*PeerDebug{},
 	}
 
 	// The tail of the log, so "how far behind is this node" is answerable from one
-	// call: last_log_index is what it has, commit_index is what it may apply.
-	if logs, err := d.server.Node.GetLogs(ctx, 1); err == nil && len(logs) > 0 {
-		resp.LastLogIndex = logs[len(logs)-1].Index
+	// call: last_log_index is what it has, commit_index is what it may apply,
+	// last_applied is what the state machine has actually consumed.
+	//
+	// Asked of the node rather than derived from GetLogs(ctx, 1). Scanning from
+	// index 1 reports 0 on any node whose log has been compacted — the entries are
+	// in the snapshot, not the log — which reads as "this node has nothing" for a
+	// node that is perfectly caught up. GetLastIndex applies the snapshot fallback.
+	if lastLogIndex, err := d.server.Node.GetLastIndex(ctx); err == nil {
+		resp.LastLogIndex = uint64(lastLogIndex)
 	}
 
 	for _, id := range d.server.trackedPeerIDs() {

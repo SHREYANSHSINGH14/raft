@@ -101,10 +101,12 @@ type StatusDebugResponse struct {
 	LeaderID string `json:"leader_id"`
 
 	CommitIndex  uint   `json:"commit_index"`
+	LastApplied  uint   `json:"last_applied"`
 	LastLogIndex uint64 `json:"last_log_index"`
 
-	SnapshotIndex uint `json:"snapshot_index"`
-	SnapshotTerm  uint `json:"snapshot_term"`
+	SnapshotIndex  uint   `json:"snapshot_index"`
+	SnapshotTerm   uint   `json:"snapshot_term"`
+	SnapshotCaller string `json:"snapshot_caller"`
 
 	// Peers is the live configuration as this node sees it — configurations.latest,
 	// not the bootstrap seed. NextIndex/MatchIndex are only meaningful on a leader.

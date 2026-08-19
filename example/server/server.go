@@ -113,6 +113,7 @@ func NewServer(ctx context.Context, cfg config.Config) (*Server, error) {
 		SnapshotInterval:  snapshotInterval,
 		SnapshotThreshold: cfg.SnapshotThreshold,
 
+		InstallSnapshotBaseMs:                cfg.InstallSnapshotBaseMs,
 		InstallSnapshotDeadlineScaleSizeByte: cfg.InstallSnapshotDeadlineScaleSizeByte,
 		InstallSnapshotDeadlineScaleTimeMs:   cfg.InstallSnapshotDeadlineScaleTimeMs,
 	}
