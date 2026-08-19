@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/SHREYANSHSINGH14/raft"
 	"github.com/SHREYANSHSINGH14/raft/example/types"
@@ -39,6 +40,39 @@ func (s *Store) DB() *pebble.DB {
 }
 
 var _ raft.Storage = &Store{}
+
+func (s *Store) NewBatch() raft.Batch {
+	// &Batch, because the methods have pointer receivers — the pointer belongs on the
+	// concrete type going into the interface, never on the interface itself.
+	return &Batch{
+		s: s.db.NewIndexedBatch(),
+	}
+}
+
+// Apply commits a batch produced by NewBatch. Staging plus a separate Apply is what
+// lets a caller build the destructive half of a sequence and simply never apply it
+// when a later step fails — "do not apply" rather than "revert".
+//
+// The parameter is raft.Batch, not *Batch, because that is what the interface
+// declares; the assertion is what keeps the concrete pebble batch reachable.
+func (s *Store) Apply(b raft.Batch) error {
+	sb, ok := b.(*Batch)
+	if !ok {
+		return fmt.Errorf("Store.Apply: foreign batch type %T", b)
+	}
+	return sb.s.Commit(pebble.Sync)
+}
+
+// Close discards a batch without committing it. This is the unwind path: a caller
+// that stages the destructive half of a sequence and then hits a failure closes the
+// batch instead of reverting anything, because nothing has been written yet.
+func (s *Store) Close(b raft.Batch) error {
+	sb, ok := b.(*Batch)
+	if !ok {
+		return fmt.Errorf("Store.Close: foreign batch type %T", b)
+	}
+	return sb.s.Close()
+}
 
 // LastApplied
 //
@@ -414,4 +448,49 @@ func upperBound(prefix []byte) []byte {
 	upper[len(upper)-1]++
 
 	return upper
+}
+
+type Batch struct {
+	s *pebble.Batch
+}
+
+func (b *Batch) SetCurrentTerm(ctx context.Context, term uint) error {
+	key := []byte(CurrentTermKey)
+	val := uintToBytes(term)
+
+	err := b.s.Set(key, val, pebble.Sync)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while setting current term")
+		return err
+	}
+	return nil
+}
+
+func (b *Batch) SetVotedFor(ctx context.Context, id string) error {
+	key := []byte(VotedForKey)
+	val := []byte(id)
+
+	err := b.s.Set(key, val, pebble.Sync)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("error while setting voted for")
+		return err
+	}
+	return nil
+}
+
+func (b *Batch) DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error {
+	// DeleteRange deletes [lower, upper) — lower inclusive, upper exclusive.
+	lower := logKey(uint64(fromIdx)) // fromIdx==0 -> logKey(0), below every real entry
+	var upper []byte
+	if toIdx == 0 {
+		upper = upperBound([]byte(LogPrefix)) // past the last log key
+	} else {
+		upper = logKey(uint64(toIdx) + 1) // +1 so toIdx itself is included
+	}
+	err := b.s.DeleteRange(lower, upper, nil)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("error while deleting logs [%d, %d]", fromIdx, toIdx)
+		return err
+	}
+	return nil
 }

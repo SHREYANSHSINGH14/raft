@@ -118,27 +118,8 @@ func TestRunSnapshotOnce_SnapshotError_FlagReleased(t *testing.T) {
 	// dir is empty + lastApplied past SnapshotThreshold (10) → snapshot triggered.
 	// Below the threshold runSnapshotOnce returns before setting the flag, and the
 	// assertion below would pass without ever exercising the release path.
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(15), nil)
+	node.SetLastApplied(15)
 	sm.On(methodSnapshot, mock.Anything).Return(nil, errors.New("snap error"))
-
-	err := node.runSnapshotOnce(context.Background())
-
-	assert.Error(t, err)
-	assert.False(t, node.snapShotInProgress.Load())
-	store.AssertExpectations(t)
-	sm.AssertExpectations(t)
-}
-
-// 7. Second GetLastApplied (post-snapshot) returns error → flag released
-func TestRunSnapshotOnce_SecondGetLastAppliedError_FlagReleased(t *testing.T) {
-	store := new(MockStorage)
-	sm := new(MockStateMachine)
-	snap := new(MockSnapshot)
-	node := newNodeWithSnapshot(t, store, sm)
-
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(15), nil).Once()
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), errors.New("db error")).Once()
-	sm.On(methodSnapshot, mock.Anything).Return(snap, nil)
 
 	err := node.runSnapshotOnce(context.Background())
 
@@ -158,7 +139,7 @@ func TestRunSnapshotOnce_PersistError_TmpDirCleaned(t *testing.T) {
 	snap := new(MockSnapshot)
 	node := newNodeWithSnapshot(t, store, sm)
 
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(10), nil)
+	node.SetLastApplied(10)
 	store.On(methodGetLogByIndex, mock.Anything, uint(10)).Return(LogEntry{Index: 10, Term: 1}, nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(9)).Return(LogEntry{Index: 9, Term: 1}, nil)
 	sm.On(methodSnapshot, mock.Anything).Return(snap, nil)

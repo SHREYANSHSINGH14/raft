@@ -19,13 +19,26 @@ const (
 	metaFileName     = "meta.json"
 )
 
+// Callers recorded in SnapshotMeta.Caller and in Node.snapshotSetCaller. Shared
+// constants so the value on disk and the value reported by /status are the same
+// string rather than two literals that drift.
+const (
+	snapshotCallerRunOnce = "run snapshot once"
+	snapshotCallerInstall = "install snapshot"
+	snapshotCallerRestore = "node restore"
+)
+
 type SnapshotMeta struct {
-	Index        uint                 `json:"index"`
-	Term         uint                 `json:"term"`
-	PrevIndex    uint                 `json:"prev_index"`
-	PrevTerm     uint                 `json:"prev_term"`
-	ID           string               `json:"id"` // Server ID of the node that created/got the snapshot
-	LeaderID     string               `json:"leader_id"`
+	Index     uint   `json:"index"`
+	Term      uint   `json:"term"`
+	PrevIndex uint   `json:"prev_index"`
+	PrevTerm  uint   `json:"prev_term"`
+	ID        string `json:"id"` // Server ID of the node that created/got the snapshot
+	LeaderID  string `json:"leader_id"`
+	// Caller is which path produced this snapshot on this node — it took one of
+	// its own, or a leader pushed one in. The two leave identical Index/Term on
+	// disk, so without this a snapshot directory cannot say where it came from.
+	Caller       string               `json:"caller"`
 	MemberConfig map[string]PeerState `json:"member_config"`
 	Timestamp    time.Time            `json:"timestamp"`
 }
@@ -48,10 +61,11 @@ func (n *Node) startSnapshotLoop(ctx context.Context) {
 }
 
 func (n *Node) runSnapshotOnce(ctx context.Context) error {
-	latestAppliedIndex, err := n.store.GetLastApplied(ctx)
-	if err != nil {
-		return fmt.Errorf("getting last applied index: %w", err)
-	}
+	latestAppliedIndex := n.GetLastApplied()
+	zerolog.Ctx(ctx).Debug().
+		Uint("last_applied", latestAppliedIndex).
+		Msg("runSnapshotOnce: read last applied index")
+
 	if !shouldTriggerSnapshot(ctx, n.cfg.SnapshotDir, latestAppliedIndex, n.cfg.SnapshotThreshold) {
 		return nil
 	}
@@ -62,11 +76,13 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		n.snapShotInProgress.Store(false)
 		return fmt.Errorf("taking snapshot: %w", err)
 	}
-	latestAppliedIndex, err = n.store.GetLastApplied(ctx)
-	if err != nil {
-		n.snapShotInProgress.Store(false)
-		return fmt.Errorf("getting latest applied index: %w", err)
-	}
+	prevAppliedIndex := latestAppliedIndex
+	latestAppliedIndex = n.GetLastApplied()
+	zerolog.Ctx(ctx).Debug().
+		Uint("last_applied_before_snapshot", prevAppliedIndex).
+		Uint("last_applied_after_snapshot", latestAppliedIndex).
+		Msg("runSnapshotOnce: re-read last applied index after taking the snapshot")
+
 	n.snapShotInProgress.Store(false)
 
 	// snapShotInProgress just went false, and that flag is half of the apply loop's
@@ -75,6 +91,9 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 
 	latestAppliedLog, err := n.store.GetLogByIndex(ctx, latestAppliedIndex)
 	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).
+			Uint("index", latestAppliedIndex).
+			Msg("runSnapshotOnce: could not read the log entry at the last applied index")
 		return fmt.Errorf("getting latest log entry: %w", err)
 	}
 
@@ -124,6 +143,7 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 		Term:         uint(latestAppliedLog.Term),
 		ID:           n.GetID(),
 		LeaderID:     n.GetLeaderID(),
+		Caller:       snapshotCallerRunOnce,
 		MemberConfig: memberConfig,
 		Timestamp:    timestamp,
 		PrevIndex:    uint(prevLastAppliedLog.Index),
@@ -133,7 +153,14 @@ func (n *Node) runSnapshotOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("writing snapshot to disk: %w", err)
 	}
-	n.SetSnapshotLatest(latestAppliedIndex, uint(latestAppliedLog.Term))
+	zerolog.Ctx(ctx).Info().
+		Uint("from_index", n.GetSnapshotLatestIndex()).
+		Uint("from_term", n.GetSnapshotLatestTerm()).
+		Uint("to_index", latestAppliedIndex).
+		Uint("to_term", uint(latestAppliedLog.Term)).
+		Str("caller", snapshotCallerRunOnce).
+		Msg("snapshotLatest: we snapshotted our own state machine")
+	n.SetSnapshotLatest(latestAppliedIndex, uint(latestAppliedLog.Term), snapshotCallerRunOnce)
 
 	// Delay (do not skip) compaction while a catching-up member still needs logs at
 	// or below latestAppliedIndex. Parks until the floor clears rather than busy-
@@ -408,6 +435,10 @@ func writeFileSynced(path string, write func(*os.File) error) error {
 	return f.Close()
 }
 
+func removeSnapshotDir(path string) error {
+	return os.RemoveAll(path)
+}
+
 func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *InstallSnapshotResponse, snapshotMeta SnapshotMeta, err error) {
 	latestSnapshotDir, err := getLatestSnapshotDir(n.cfg.SnapshotDir)
 	if err != nil {
@@ -450,7 +481,7 @@ func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *Ins
 
 	req := InstallSnapshotArgs{
 		Term:     uint64(currentTerm),
-		LeaderID: n.GetLeaderID(),
+		LeaderID: n.GetID(), // Leader is the who calls this
 		SnapshotMetadata: SnapshotMetadata{
 			LastIncludedIndex: uint64(meta.Index),
 			LastIncludedTerm:  uint64(meta.Term),
@@ -461,9 +492,20 @@ func (n *Node) callInstallSnapshot(ctx context.Context, target string) (res *Ins
 		SnapshotSize: uint64(snapshotFileSize),
 	}
 
-	deadLineTime := n.cfg.RPCTimeoutMs + ((int(snapshotFileSize) / n.cfg.InstallSnapshotDeadlineScaleSizeByte) * n.cfg.InstallSnapshotDeadlineScaleTimeMs)
+	// Base is InstallSnapshotBaseMs, not RPCTimeoutMs — see the field comment. The
+	// size term is what scales with the transfer; the base is what pays for the
+	// receiver's fsyncs and Restore, which a small snapshot needs just as much.
+	baseMs := n.cfg.InstallSnapshotBaseMs
+	if baseMs <= 0 {
+		baseMs = DefaultInstallSnapshotBaseMs
+	}
+	deadLineTime := baseMs
+	if n.cfg.InstallSnapshotDeadlineScaleSizeByte > 0 {
+		deadLineTime += (int(snapshotFileSize) / n.cfg.InstallSnapshotDeadlineScaleSizeByte) * n.cfg.InstallSnapshotDeadlineScaleTimeMs
+	}
 	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(deadLineTime)*time.Millisecond)
 	defer cancel()
+	zerolog.Ctx(ctx).Debug().Msgf("callInstallSnapshot: sending snapshot with dealine of %d ms", deadLineTime)
 	resp, err := n.transport.InstallSnapshot(deadLineCtx, target, req)
 	if err != nil {
 		return nil, SnapshotMeta{}, err

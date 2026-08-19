@@ -50,14 +50,26 @@ type Snapshot interface {
 // Storage is implemented by the caller. The library calls it for all persistence
 // operations — term, votedFor, and log entries.
 type Storage interface {
+	// Batch is embedded, not *Batch. An interface value already carries a type
+	// pointer and a data pointer, so a pointer to one is a pointer to that pair —
+	// nothing implements it and every call needs a dereference first. Worse here,
+	// embedding a non-interface type turns Storage into a *type constraint* rather
+	// than a usable type, and every `var s Storage` in the codebase stops compiling
+	// with an error that never mentions this line.
+	Batch
+
+	// NewBatch stages term, vote and log-deletion writes so they land together or
+	// not at all. Apply commits one; Close discards it. Staging plus an explicit
+	// commit is what turns "revert on failure" into "never apply".
+	NewBatch() Batch
+	Apply(Batch) error
+	Close(Batch) error
+
 	SetCurrentTerm(ctx context.Context, term uint) error
 	GetCurrentTerm(ctx context.Context) (uint, error)
 
 	SetVotedFor(ctx context.Context, id string) error
 	GetVotedFor(ctx context.Context) (string, error)
-
-	SetLastApplied(ctx context.Context, term uint) error
-	GetLastApplied(ctx context.Context) (uint, error)
 
 	AppendLogs(ctx context.Context, entries []LogEntry) error
 	// GetLogs returns every log entry whose index lies in the half-open range
@@ -93,4 +105,10 @@ type Storage interface {
 	//
 	// Note: returns 0 and error nil when no logs are present
 	GetFirstIndex(ctx context.Context) (uint, error)
+}
+
+type Batch interface {
+	SetCurrentTerm(ctx context.Context, term uint) error
+	SetVotedFor(ctx context.Context, id string) error
+	DeleteLogs(ctx context.Context, fromIdx, toIdx uint) error
 }

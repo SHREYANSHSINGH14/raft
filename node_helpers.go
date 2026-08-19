@@ -524,6 +524,59 @@ func (n *Node) GetCommitIndex() uint {
 // prevLog anchor even though that entry has been compacted away.
 // =============================================================================
 
+// setTermAndVote persists currentTerm and votedFor as ONE durable write.
+//
+// They have to land together. Written separately, a crash between them leaves a node
+// holding a term it has entered with a vote belonging to the previous one — and in
+// election(), that is a node which has already campaigned in term N coming back up
+// believing it has not voted in term N. It can then grant that term's vote to someone
+// else, which is a second vote in one term and the exact thing persisting votedFor
+// exists to prevent.
+//
+// The other callers adopt a higher term and clear the vote; there the same split is a
+// liveness bug rather than a safety one — a stale votedFor makes this node refuse a
+// legitimate candidate — but it is the same write and the same fix.
+func (n *Node) setTermAndVote(ctx context.Context, term uint, votedFor string) error {
+	batch := n.store.NewBatch()
+
+	if err := batch.SetCurrentTerm(ctx, term); err != nil {
+		n.discardBatch(ctx, batch)
+		return err
+	}
+	if err := batch.SetVotedFor(ctx, votedFor); err != nil {
+		n.discardBatch(ctx, batch)
+		return err
+	}
+
+	if err := n.store.Apply(batch); err != nil {
+		n.discardBatch(ctx, batch)
+		return err
+	}
+	return nil
+}
+
+// GetLastApplied returns the durable last-applied index, i.e. how far the state
+// machine has consumed the log. Read straight from the store rather than cached,
+// because the apply loop tracks it locally and nothing on Node mirrors it.
+
+// GetLastIndex returns the index of the last entry this node holds, with the
+// snapshot fallback applied — see lastIndex.
+func (n *Node) GetLastIndex(ctx context.Context) (uint, error) {
+	return n.lastIndex(ctx)
+}
+
+func (n *Node) SetLastApplied(idx uint) {
+	n.commitMu.Lock()
+	defer n.commitMu.Unlock()
+	n.lastApplied = idx
+}
+
+func (n *Node) GetLastApplied() uint {
+	n.commitMu.Lock()
+	defer n.commitMu.Unlock()
+	return n.lastApplied
+}
+
 // lastIndex returns the index of the last entry the node holds, falling back to the
 // snapshot when the log itself is empty.
 //
@@ -568,13 +621,73 @@ func (n *Node) firstIndex(ctx context.Context) (uint, error) {
 	return 1, nil
 }
 
+// nodeStateSnapshot is the in-memory state an InstallSnapshot overwrites: who we
+// think the leader is, where our snapshot boundary sits, and the live configuration.
+//
+// None of it is staged the way a storage batch is — they are plain field writes — so
+// unwinding a half-finished install means putting the old values back explicitly.
+type nodeStateSnapshot struct {
+	leaderID       string
+	snapshotIndex  uint
+	snapshotTerm   uint
+	snapshotCaller string
+	peers          map[string]Peer
+	peersIndex     uint64
+}
+
+// captureNodeState records what restoreNodeState will put back.
+//
+// It captures the node's whole configuration rather than the members the incoming
+// snapshot happens to name. That is not just simpler — SetPeerState creates an entry
+// for an id that was not there (the map read yields a zero Peer and writes it back),
+// so restoring only the named members would leave those new entries behind with an
+// Unknown state. Replacing the map wholesale makes them disappear.
+func (n *Node) captureNodeState() nodeStateSnapshot {
+	n.mu.Lock()
+	latestIndex := n.configurations.latestIndex
+	n.mu.Unlock()
+
+	return nodeStateSnapshot{
+		leaderID:       n.GetLeaderID(),
+		snapshotIndex:  n.GetSnapshotLatestIndex(),
+		snapshotTerm:   n.GetSnapshotLatestTerm(),
+		snapshotCaller: n.GetSnapshotSetCaller(),
+		peers:          n.peersSnapshot(),
+		peersIndex:     latestIndex,
+	}
+}
+
+// restoreNodeState puts back exactly what captureNodeState recorded, and nothing
+// else. It takes clientMu itself, so callers must not be holding it.
+//
+// The snapshot boundary is the field that makes this necessary. Set before
+// sm.Restore, a failed restore would leave the node claiming a boundary its state
+// machine never reached — and logTermAt would then anchor the leader's prevLogIndex
+// against a snapshot that is not there.
+func (n *Node) restoreNodeState(ctx context.Context, prev nodeStateSnapshot) {
+	n.clientMu.Lock()
+	defer n.clientMu.Unlock()
+
+	n.SetLeaderID(prev.leaderID)
+	n.SetSnapshotLatest(prev.snapshotIndex, prev.snapshotTerm, prev.snapshotCaller)
+	n.setLatestConfiguration(prev.peers, prev.peersIndex)
+
+	zerolog.Ctx(ctx).Warn().
+		Uint("snapshot_index", prev.snapshotIndex).
+		Uint("snapshot_term", prev.snapshotTerm).
+		Str("leader_id", prev.leaderID).
+		Int("peers", len(prev.peers)).
+		Msg("reverted node state after a failed install")
+}
+
 // SetSnapshotLatest records the latest snapshot's last-included index and term
 // together, under one lock, so a reader never sees a torn (index, term) pair.
-func (n *Node) SetSnapshotLatest(idx, term uint) {
+func (n *Node) SetSnapshotLatest(idx, term uint, caller string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.snapshotLatestIndex = idx
 	n.snapshotLatestTerm = term
+	n.snapshotSetCaller = caller
 }
 
 func (n *Node) GetSnapshotLatestIndex() uint {
@@ -587,6 +700,12 @@ func (n *Node) GetSnapshotLatestTerm() uint {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.snapshotLatestTerm
+}
+
+func (n *Node) GetSnapshotSetCaller() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snapshotSetCaller
 }
 
 // =============================================================================

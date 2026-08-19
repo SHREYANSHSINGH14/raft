@@ -53,18 +53,12 @@ func (n *Node) HandleAppendEntries(ctx context.Context, args AppendEntriesArgs) 
 		Msg("appendEntries received")
 
 	if args.Term > uint64(currentTerm) {
-		err := n.store.SetCurrentTerm(ctx, uint(args.Term))
-		if err != nil {
+		// Adopting the term and clearing the vote is one write — see setTermAndVote.
+		if err := n.setTermAndVote(ctx, uint(args.Term), ""); err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
 			return AppendEntriesResponse{}, err
 		}
 		currentTerm = uint(args.Term)
-
-		err = n.store.SetVotedFor(ctx, "")
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("append entries db err: %s", err.Error())
-			return AppendEntriesResponse{}, err
-		}
 	}
 
 	// prevLog consistency check. logTermAt returns the term at prevLogIndex,

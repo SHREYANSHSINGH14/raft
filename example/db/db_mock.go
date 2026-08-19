@@ -365,3 +365,94 @@ func (m *MockKVStore) unmarshalEntry(key []byte) (raft.LogEntry, error) {
 	}
 	return types.LogEntryToRaft(&entry), nil
 }
+
+// ── Batch ─────────────────────────────────────────────────────────────────────
+
+// NewBatch returns the mock itself, which already satisfies raft.Batch. Staged calls
+// land on the same expectations as direct ones, so a test that batches needs no extra
+// setup beyond Commit. A testify mock cannot model rollback; use MockKVStore when a
+// test needs an uncommitted batch to genuinely leave state untouched.
+func (m *MockStore) NewBatch() raft.Batch {
+	return m
+}
+
+func (m *MockStore) Apply(b raft.Batch) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(b)
+	return args.Error(0)
+}
+
+func (m *MockStore) Close(b raft.Batch) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	args := m.Called(b)
+	return args.Error(0)
+}
+
+// kvBatch stages mutations and applies them to the parent only on Commit, so a batch
+// that is never committed leaves the store untouched — the property batching exists
+// for, and the one a rollback test needs to be real.
+type kvBatch struct {
+	s   *MockKVStore
+	ops []func()
+}
+
+func (m *MockKVStore) NewBatch() raft.Batch {
+	return &kvBatch{s: m}
+}
+
+// Apply runs every staged mutation under one lock hold, so a reader never sees half a
+// batch. A batch never handed to Apply leaves the store untouched.
+func (m *MockKVStore) Apply(b raft.Batch) error {
+	kb, ok := b.(*kvBatch)
+	if !ok {
+		return fmt.Errorf("MockKVStore.Apply: foreign batch type %T", b)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, op := range kb.ops {
+		op()
+	}
+	kb.ops = nil
+	return nil
+}
+
+// Close discards a batch without applying it — dropping the staged ops is the whole
+// of it, since nothing has touched the store yet.
+func (m *MockKVStore) Close(b raft.Batch) error {
+	kb, ok := b.(*kvBatch)
+	if !ok {
+		return fmt.Errorf("MockKVStore.Close: foreign batch type %T", b)
+	}
+	kb.ops = nil
+	return nil
+}
+
+func (b *kvBatch) SetCurrentTerm(_ context.Context, term uint) error {
+	b.ops = append(b.ops, func() { b.s.data[CurrentTermKey] = uintToBytes(term) })
+	return nil
+}
+
+func (b *kvBatch) SetVotedFor(_ context.Context, id string) error {
+	b.ops = append(b.ops, func() { b.s.data[VotedForKey] = []byte(id) })
+	return nil
+}
+
+func (b *kvBatch) DeleteLogs(_ context.Context, fromIdx, toIdx uint) error {
+	b.ops = append(b.ops, func() {
+		startKey := string(logKey(uint64(fromIdx)))
+		var endKey string
+		if toIdx == 0 {
+			endKey = string(upperBound([]byte(LogPrefix)))
+		} else {
+			endKey = string(logKey(uint64(toIdx) + 1))
+		}
+		for k := range b.s.data {
+			if k >= startKey && k < endKey {
+				delete(b.s.data, k)
+			}
+		}
+	})
+	return nil
+}

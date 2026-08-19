@@ -84,7 +84,8 @@ type Node struct {
 
 	// signals the election-timeout goroutine to reset its timer when a valid
 	// leader heartbeat or granted vote is received.
-	electionTimeoutCh chan struct{}
+	electionTimeoutCh     chan struct{}
+	stopElectionTimeoutCh chan struct{}
 
 	// timeoutNowCh carries the TimeoutNow signal (Ongaro §3.10, leadership
 	// transfer): the election-timeout goroutine selects on it and campaigns at
@@ -123,12 +124,26 @@ type Node struct {
 	//potentially diverging lastApplied index from the snapshot index
 	snapShotInProgress atomic.Bool
 
+	// Set while a leader is streaming a snapshot into this node. The election timer
+	// consults it when it fires: a snapshot arriving IS contact from a live leader, it
+	// just does not arrive as AppendEntries, and an install can outlast an election
+	// timeout — the receiver has to write the payload, fsync it, restore the state
+	// machine and compact the log.
+	//
+	// A flag rather than a pause/resume signal on purpose. Pause and resume are
+	// balanced state, and an unmatched resume — the install failing in between, or the
+	// pause landing while the timer goroutine is being torn down during a role
+	// transition, when nothing is receiving — leaves this node never campaigning again
+	// with nothing to detect it. A flag cleared by defer cannot get out of balance.
+	installSnapshotInProgress atomic.Bool
+
 	// Set every time a snapshot is taken (leader) or installed (follower): the
 	// last-included index and term of the latest snapshot. The term is what lets
 	// HandleAppendEntries accept prevLogIndex == snapshotLatestIndex as a valid
 	// consistency anchor even though that entry is compacted (see logTermAt).
 	snapshotLatestIndex uint
 	snapshotLatestTerm  uint
+	snapshotSetCaller   string
 
 	// catchingUpIdx is the retain floor a catching-up member publishes: while it is
 	// not DefaultCatchingUpIdx, the compactor must not delete logs at or above it.
@@ -141,22 +156,23 @@ type Node struct {
 
 func NewNode(cfg Config, storage Storage, transport Transport, sm StateMachine) *Node {
 	node := Node{
-		ID:                  cfg.ID,
-		Role:                ServerRole_Follower,
-		transport:           transport,
-		sm:                  sm,
-		store:               storage,
-		cfg:                 cfg,
-		commitIndex:         0,
-		lastApplied:         0,
-		LeaderID:            "",
-		electionTimeoutCh:   make(chan struct{}, 2),
-		timeoutNowCh:        make(chan struct{}, 1),
-		mu:                  sync.Mutex{},
-		commitMu:            sync.Mutex{},
-		clientMu:            sync.Mutex{},
-		snapshotLatestIndex: 0,
-		catchUpSignal:       make(chan struct{}, 1),
+		ID:                    cfg.ID,
+		Role:                  ServerRole_Follower,
+		transport:             transport,
+		sm:                    sm,
+		store:                 storage,
+		cfg:                   cfg,
+		commitIndex:           0,
+		lastApplied:           0,
+		LeaderID:              "",
+		electionTimeoutCh:     make(chan struct{}, 2),
+		stopElectionTimeoutCh: make(chan struct{}, 2),
+		timeoutNowCh:          make(chan struct{}, 1),
+		mu:                    sync.Mutex{},
+		commitMu:              sync.Mutex{},
+		clientMu:              sync.Mutex{},
+		snapshotLatestIndex:   0,
+		catchUpSignal:         make(chan struct{}, 1),
 	}
 
 	// No member is catching up at startup. The zero value of atomic.Int64 is 0,
@@ -272,48 +288,37 @@ func (n *Node) Stop() {
 //
 // The one exception is an interrupted InstallSnapshot — see below.
 func (n *Node) restore(ctx context.Context) error {
-	lastApplied, err := n.store.GetLastApplied(ctx)
-	if err != nil {
-		return err
-	}
-
 	dir, meta, err := n.readLatestSnapshotMeta(ctx)
 	if err != nil {
 		return err
 	}
 
-	if dir != "" {
-		if err := n.seedConfigurationFromSnapshot(ctx, meta); err != nil {
-			return err
-		}
-		n.SetSnapshotLatest(meta.Index, meta.Term)
-
-		// lastApplied is normally >= the snapshot index, because our own snapshots
-		// are taken at the applied index. Lower means a leader-pushed
-		// InstallSnapshot was interrupted: it writes the snapshot to disk before
-		// calling sm.Restore and SetLastApplied, so a crash anywhere in that window
-		// leaves a snapshot the state machine may never have taken.
-		//
-		// It does not matter where in that window it died. Restore is a wholesale
-		// replace, so re-running it when the state machine is already at meta.Index
-		// changes nothing; the crash point stops being a case to distinguish.
-		if meta.Index > lastApplied {
-			zerolog.Ctx(ctx).Warn().Msgf(
-				"snapshot at index %d is ahead of lastApplied %d; finishing interrupted install",
-				meta.Index, lastApplied)
-			if err := n.installSnapshotFromDisk(ctx, dir, meta); err != nil {
-				return err
-			}
-			lastApplied = meta.Index
-		}
+	if dir == "" {
+		// fresh node
+		return nil
 	}
 
+	if err := n.seedConfigurationFromSnapshot(ctx, meta); err != nil {
+		return err
+	}
+	zerolog.Ctx(ctx).Info().
+		Uint("from_index", n.GetSnapshotLatestIndex()).
+		Uint("from_term", n.GetSnapshotLatestTerm()).
+		Uint("to_index", meta.Index).
+		Uint("to_term", meta.Term).
+		Str("caller", snapshotCallerRestore).
+		Msg("snapshotLatest: adopting the snapshot found on disk at startup")
+	n.SetSnapshotLatest(meta.Index, meta.Term, snapshotCallerRestore)
+
+	if err := n.installSnapshotFromDisk(ctx, dir, meta); err != nil {
+		return err
+	}
 	// Only committed entries are ever applied, so lastApplied is a safe lower bound
 	// for commitIndex. The real value may have been higher when we crashed; the
 	// leader's next AppendEntries carries it, and SetCommitIndex ignores decreases.
-	n.SetCommitIndex(lastApplied)
+	n.SetCommitIndex(n.lastApplied)
 
-	return n.replayConfigurations(ctx, meta.Index, lastApplied)
+	return n.replayConfigurations(ctx, meta.Index, n.GetLastApplied())
 }
 
 // readLatestSnapshotMeta decodes meta.json from the newest snapshot directory.
@@ -391,7 +396,8 @@ func (n *Node) installSnapshotFromDisk(ctx context.Context, dir string, meta Sna
 	if err := n.sm.Restore(ctx, snapshotFile); err != nil {
 		return err
 	}
-	return n.store.SetLastApplied(ctx, meta.Index)
+	n.SetLastApplied(meta.Index)
+	return nil
 }
 
 // replayConfigurations walks the log above the snapshot index and re-applies every

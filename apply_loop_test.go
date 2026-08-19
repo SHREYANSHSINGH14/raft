@@ -11,10 +11,8 @@ import (
 )
 
 const (
-	methodGetLastApplied = "GetLastApplied"
-	methodSetLastApplied = "SetLastApplied"
-	methodGetLogs        = "GetLogs"
-	methodApply          = "Apply"
+	methodGetLogs = "GetLogs"
+	methodApply   = "Apply"
 )
 
 // awaitCall blocks until done is closed, failing the test if it takes too long.
@@ -30,23 +28,24 @@ func awaitCall(t *testing.T, done <-chan struct{}, label string) {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 // 1. GetLastApplied fails at startup → goroutine exits, nothing applied
-func TestApplyLoop_GetLastAppliedFails_GoroutineExits(t *testing.T) {
+// lastApplied is volatile node state, so the startup read cannot fail and there is no
+// "store error at startup" path left to test. What is still worth pinning is what that
+// read is FOR: the loop seeds from the node's own lastApplied, and applies nothing at
+// or below it — a loop that seeded from zero would re-apply the whole log on a node
+// that had already consumed it.
+func TestApplyLoop_SeedsLastAppliedFromNode(t *testing.T) {
 	store := new(MockStorage)
 	sm := new(MockStateMachine)
 	node := NewNodeMock(store, sm)
 
-	called := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).
-		Run(func(_ mock.Arguments) { close(called) }).
-		Return(uint(0), errors.New("db error"))
+	node.SetLastApplied(5)
+	node.SetCommitIndex(5) // nothing committed above what is already applied
 
 	node.startApplyLoop(context.Background())
-
-	awaitCall(t, called, "GetLastApplied")
 	time.Sleep(20 * time.Millisecond)
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
-	store.AssertExpectations(t)
+	store.AssertNotCalled(t, methodGetLogs, mock.Anything, mock.Anything, mock.Anything)
 }
 
 // 2. GetLastApplied returns non-zero → apply loop starts from correct offset, not 0
@@ -61,19 +60,23 @@ func TestApplyLoop_NonZeroLastApplied_StartsFromCorrectOffset(t *testing.T) {
 	start, end := uint(3), uint(4)
 	entries := []LogEntry{{Index: 3, Term: 1, Data: []byte("c")}}
 
+	// lastApplied lives on the node now, not in the store, so it is seeded directly
+	// and its advance is observed the same way — there is no SetLastApplied call to
+	// hang the assertion on.
+	node.SetLastApplied(2)
+
 	done := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(2), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, mock.Anything, entries).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(3)).
+	sm.On(methodApply, mock.Anything, entries).
 		Run(func(_ mock.Arguments) { close(done) }).
 		Return(nil)
 
 	node.startApplyLoop(ctx)
 	node.SetCommitIndex(3)
 
-	awaitCall(t, done, "SetLastApplied")
+	awaitCall(t, done, "Apply")
 
+	assert.Equal(t, uint(3), node.GetLastApplied())
 	store.AssertExpectations(t)
 	sm.AssertExpectations(t)
 }
@@ -97,17 +100,17 @@ func TestApplyLoop_SingleBroadcast_AppliesEntriesAndPersists(t *testing.T) {
 	start, end := uint(1), uint(4)
 
 	done := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, mock.Anything, entries).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(3)).
+	sm.On(methodApply, mock.Anything, entries).
 		Run(func(_ mock.Arguments) { close(done) }).
 		Return(nil)
 
 	node.startApplyLoop(ctx)
 	node.SetCommitIndex(3)
 
-	awaitCall(t, done, "SetLastApplied")
+	awaitCall(t, done, "Apply")
+
+	assert.Equal(t, uint(3), node.GetLastApplied())
 
 	store.AssertExpectations(t)
 	sm.AssertExpectations(t)
@@ -130,7 +133,6 @@ func TestApplyLoop_CommitAdvancesDuringApply_SecondIterationAppliesWithoutBroadc
 	start2, end2 := uint(4), uint(7)
 
 	done := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start1, &end1).Return(entries1, nil)
 	store.On(methodGetLogs, mock.Anything, &start2, &end2).Return(entries2, nil)
 	sm.On(methodApply, mock.Anything, entries1).
@@ -139,16 +141,14 @@ func TestApplyLoop_CommitAdvancesDuringApply_SecondIterationAppliesWithoutBroadc
 			node.SetCommitIndex(6)
 		}).
 		Return(nil)
-	sm.On(methodApply, mock.Anything, entries2).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(3)).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(6)).
+	sm.On(methodApply, mock.Anything, entries2).
 		Run(func(_ mock.Arguments) { close(done) }).
 		Return(nil)
 
 	node.startApplyLoop(ctx)
 	node.SetCommitIndex(3)
 
-	awaitCall(t, done, "second SetLastApplied")
+	awaitCall(t, done, "second Apply")
 
 	store.AssertExpectations(t)
 	sm.AssertExpectations(t)
@@ -164,8 +164,6 @@ func TestApplyLoop_SpuriousWakeup_NothingApplied(t *testing.T) {
 	node := NewNodeMock(store, sm)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
-
 	node.startApplyLoop(ctx)
 
 	// commitIndex is still 0 — a wake-up should not trigger an apply
@@ -173,7 +171,6 @@ func TestApplyLoop_SpuriousWakeup_NothingApplied(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
-	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 
 	cancel()
 	node.signalCommit() // wake the loop so it can observe ctx.Err
@@ -190,7 +187,6 @@ func TestApplyLoop_GetLogsFails_GoroutineExits(t *testing.T) {
 
 	start, end := uint(1), uint(4)
 	called := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).
 		Run(func(_ mock.Arguments) { close(called) }).
 		Return(nil, errors.New("db error"))
@@ -214,7 +210,6 @@ func TestApplyLoop_ApplyFails_GoroutineExits(t *testing.T) {
 	start, end := uint(1), uint(4)
 	entries := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
 	called := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
 	sm.On(methodApply, mock.Anything, entries).
 		Run(func(_ mock.Arguments) { close(called) }).
@@ -224,33 +219,6 @@ func TestApplyLoop_ApplyFails_GoroutineExits(t *testing.T) {
 	node.SetCommitIndex(3)
 
 	awaitCall(t, called, "Apply")
-	time.Sleep(20 * time.Millisecond)
-
-	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
-	store.AssertExpectations(t)
-	sm.AssertExpectations(t)
-}
-
-// 8. SetLastApplied fails → goroutine exits
-func TestApplyLoop_SetLastAppliedFails_GoroutineExits(t *testing.T) {
-	store := new(MockStorage)
-	sm := new(MockStateMachine)
-	node := NewNodeMock(store, sm)
-
-	start, end := uint(1), uint(4)
-	entries := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
-	called := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
-	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
-	sm.On(methodApply, mock.Anything, entries).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(3)).
-		Run(func(_ mock.Arguments) { close(called) }).
-		Return(errors.New("db error"))
-
-	node.startApplyLoop(context.Background())
-	node.SetCommitIndex(3)
-
-	awaitCall(t, called, "SetLastApplied")
 	time.Sleep(20 * time.Millisecond)
 
 	store.AssertExpectations(t)
@@ -265,8 +233,6 @@ func TestApplyLoop_ContextCancelledWhileWaiting_GoroutineExits(t *testing.T) {
 	sm := new(MockStateMachine)
 	node := NewNodeMock(store, sm)
 	ctx, cancel := context.WithCancel(context.Background())
-
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 
 	node.startApplyLoop(ctx)
 	time.Sleep(20 * time.Millisecond) // let goroutine reach Wait()
@@ -291,17 +257,15 @@ func TestApplyLoop_ContextCancelledBetweenIterations_GoroutineExits(t *testing.T
 	entries1 := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
 
 	firstCycleDone := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start1, &end1).Return(entries1, nil)
-	sm.On(methodApply, mock.Anything, entries1).Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, uint(3)).
+	sm.On(methodApply, mock.Anything, entries1).
 		Run(func(_ mock.Arguments) { close(firstCycleDone) }).
 		Return(nil)
 
 	node.startApplyLoop(ctx)
 	node.SetCommitIndex(3)
 
-	awaitCall(t, firstCycleDone, "first SetLastApplied")
+	awaitCall(t, firstCycleDone, "first Apply")
 
 	// cancel between iterations; advance commitIndex to show it won't be applied
 	cancel()
@@ -324,8 +288,6 @@ func TestApplyLoop_CommitIndexZero_WakeDoesNotApply(t *testing.T) {
 	node := NewNodeMock(store, sm)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
-
 	node.startApplyLoop(ctx)
 
 	// wake with commitIndex still 0 — inner loop condition (0 <= 0) stays true
@@ -334,7 +296,6 @@ func TestApplyLoop_CommitIndexZero_WakeDoesNotApply(t *testing.T) {
 
 	sm.AssertNotCalled(t, methodApply, mock.Anything, mock.Anything)
 	store.AssertNotCalled(t, methodGetLogs, mock.Anything, mock.Anything, mock.Anything)
-	store.AssertNotCalled(t, methodSetLastApplied, mock.Anything, mock.Anything)
 
 	cancel()
 	node.signalCommit()
@@ -363,7 +324,6 @@ func TestApplyLoop_CommitBurstDuringSlowApply_DoesNotWedge(t *testing.T) {
 	defer cancel()
 
 	applying := make(chan struct{})
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, mock.Anything, mock.Anything).
 		Return([]LogEntry{{Index: 1, Term: 1}}, nil)
 	sm.On(methodApply, mock.Anything, mock.Anything).
@@ -375,7 +335,6 @@ func TestApplyLoop_CommitBurstDuringSlowApply_DoesNotWedge(t *testing.T) {
 			time.Sleep(300 * time.Millisecond)
 		}).
 		Return(nil)
-	store.On(methodSetLastApplied, mock.Anything, mock.Anything).Return(nil)
 
 	node.startApplyLoop(ctx)
 	node.SetCommitIndex(1)
@@ -452,7 +411,6 @@ func TestApplyLoop_ApplyFails_ReportsFatal(t *testing.T) {
 
 	start, end := uint(1), uint(4)
 	entries := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 	store.On(methodGetLogs, mock.Anything, &start, &end).Return(entries, nil)
 	sm.On(methodApply, mock.Anything, entries).Return(errors.New("apply error"))
 
@@ -464,21 +422,6 @@ func TestApplyLoop_ApplyFails_ReportsFatal(t *testing.T) {
 	assert.ErrorContains(t, err, "3", "the commit index we could not reach is the useful detail")
 }
 
-// The startup read is the worse failure of the two: the loop never runs at all, so
-// without Fatal the node applies nothing for its whole life while looking healthy.
-func TestApplyLoop_GetLastAppliedFails_ReportsFatal(t *testing.T) {
-	store := new(MockStorage)
-	sm := new(MockStateMachine)
-	node := NewNodeMock(store, sm)
-
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), errors.New("db error"))
-
-	node.startApplyLoop(context.Background())
-
-	err := awaitFatal(t, node)
-	assert.ErrorContains(t, err, "db error")
-}
-
 // Shutdown is not a failure. If a cancelled context tripped Fatal, every clean stop
 // would look like a broken replica and callers would learn to ignore the signal.
 func TestApplyLoop_ContextCancelled_DoesNotReportFatal(t *testing.T) {
@@ -486,8 +429,6 @@ func TestApplyLoop_ContextCancelled_DoesNotReportFatal(t *testing.T) {
 	sm := new(MockStateMachine)
 	node := NewNodeMock(store, sm)
 	ctx, cancel := context.WithCancel(context.Background())
-
-	store.On(methodGetLastApplied, mock.Anything).Return(uint(0), nil)
 
 	node.startApplyLoop(ctx)
 	cancel()

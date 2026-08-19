@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	methodGetLogByIndex   = "GetLogByIndex"
-	methodDeleteLogs      = "DeleteLogs"
-	methodAppendLogs      = "AppendLogs"
-	methodGetLastIndex = "GetLastIndex"
+	methodGetLogByIndex = "GetLogByIndex"
+	methodDeleteLogs    = "DeleteLogs"
+	methodAppendLogs    = "AppendLogs"
+	methodGetLastIndex  = "GetLastIndex"
 )
 
 // ── 1. Empty leader ID ────────────────────────────────────────────────────────
@@ -679,7 +679,7 @@ func TestAppendEntries_ConfigEntryUpdatesLatest(t *testing.T) {
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(5), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(1)).Return(LogEntry{Index: 1, Term: 5}, nil) // prevLog
-	store.On(methodGetLastIndex, mock.Anything).Return(uint(1), nil)                            // entry 2 is new, no conflict
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(1), nil)                               // entry 2 is new, no conflict
 	store.On(methodAppendLogs, mock.Anything, entries).Return(nil)
 
 	resp, err := node.HandleAppendEntries(ctx, AppendEntriesArgs{
@@ -709,7 +709,7 @@ func TestAppendEntries_ConfigEntryUpdatesLatest(t *testing.T) {
 func TestAppendEntries_PrevLogAtSnapshotBoundary_Accepted(t *testing.T) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
-	node.SetSnapshotLatest(5, 3) // snapshot covers up to index 5, term 3
+	node.SetSnapshotLatest(5, 3, "appendEntry test") // snapshot covers up to index 5, term 3
 	ctx := context.Background()
 
 	entries := []LogEntry{{Index: 6, Term: 4}}
@@ -741,7 +741,7 @@ func TestAppendEntries_PrevLogAtSnapshotBoundary_Accepted(t *testing.T) {
 func TestAppendEntries_PrevLogAtSnapshotBoundary_TermMismatch_Rejected(t *testing.T) {
 	store := new(MockStorage)
 	node := NewNodeMock(store, nil)
-	node.SetSnapshotLatest(5, 3)
+	node.SetSnapshotLatest(5, 3, "appendEntry test")
 	ctx := context.Background()
 
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(4), nil)

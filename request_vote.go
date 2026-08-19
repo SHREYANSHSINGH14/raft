@@ -37,19 +37,14 @@ func (n *Node) HandleRequestVote(ctx context.Context, args RequestVoteArgs) (Req
 	// In both cases we can just ignore the request and return false because we have already voted for some candidate in this term
 	// that happens at voteFor check below where we check if votedFor is empty or candidateId
 	if args.Term > uint64(currentTerm) {
-		err := n.store.SetCurrentTerm(ctx, uint(args.Term))
-		if err != nil {
+		// Adopting the term and clearing the vote is one write: a stale votedFor
+		// carried into the new term would make us refuse a legitimate candidate.
+		if err := n.setTermAndVote(ctx, uint(args.Term), ""); err != nil {
 			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
 			return RequestVoteResponse{}, err
 		}
 
 		currentTerm = uint(args.Term)
-
-		err = n.store.SetVotedFor(ctx, "")
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("request vote db err: %s", err.Error())
-			return RequestVoteResponse{}, err
-		}
 	}
 
 	votedFor, err := n.store.GetVotedFor(ctx)

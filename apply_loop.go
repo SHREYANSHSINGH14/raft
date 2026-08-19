@@ -30,19 +30,7 @@ import (
 func (n *Node) startApplyLoop(ctx context.Context) {
 	go func() {
 		// read once at startup — tracked locally after that, no DB call in hot path
-		lastApplied, err := n.store.GetLastApplied(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msg("startApplyLoop db error: error getting lastapplied")
-			// Fatal, and the worst kind: the loop never starts at all, so this node
-			// would apply nothing for its entire life while looking healthy from the
-			// outside. Unless we are simply shutting down, in which case the error is
-			// just the cancelled context on its way out.
-			if ctx.Err() == nil {
-				n.setFatal(ctx, fmt.Errorf("apply loop could not start: reading last applied: %w", err))
-			}
-			return
-		}
-
+		lastApplied := n.GetLastApplied()
 		n.commitMu.Lock()
 
 		for ctx.Err() == nil {
@@ -120,10 +108,26 @@ func (n *Node) applyEntries(ctx context.Context, lastApplied, commitIdx uint) er
 		}
 		commandEntries = append(commandEntries, log)
 	}
-	if len(commandEntries) > 0 {
-		if err = n.sm.Apply(ctx, commandEntries); err != nil {
+	// Hand the entries over in chunks of ApplyBatchSize. lastApplied advances after
+	// each chunk rather than once at the end: a chunk that has applied is durable, and
+	// leaving lastApplied behind it would re-apply it if a later chunk failed.
+	batchSize := n.cfg.ApplyBatchSize
+	if batchSize <= 0 {
+		batchSize = len(commandEntries)
+	}
+
+	for start := 0; start < len(commandEntries); start += batchSize {
+		end := min(start+batchSize, len(commandEntries))
+		chunk := commandEntries[start:end]
+
+		if err = n.sm.Apply(ctx, chunk); err != nil {
 			return err
 		}
+		n.SetLastApplied(uint(chunk[len(chunk)-1].Index))
 	}
-	return n.store.SetLastApplied(ctx, commitIdx)
+
+	// Past the last command entry there may be no-op or config entries the state
+	// machine never sees; commitIdx accounts for them.
+	n.SetLastApplied(commitIdx)
+	return nil
 }

@@ -1,5 +1,10 @@
 package raft
 
+// DefaultInstallSnapshotBaseMs is the fixed half of the InstallSnapshot deadline:
+// enough for the receiver's fsyncs, directory rename and state machine Restore
+// before any size-proportional time is added.
+const DefaultInstallSnapshotBaseMs = 5000
+
 type Config struct {
 	ID    string
 	Peers map[string]Peer // peer IDs only; addresses are the Transport's concern
@@ -9,6 +14,22 @@ type Config struct {
 	ElectionMinMs int
 	ElectionMaxMs int
 
+	// InstallSnapshot RPC deadline. Unlike every other RPC this one does not start
+	// from RPCTimeoutMs, and that is the whole point: RPCTimeoutMs is pinned below
+	// HeartbeatMs because a heartbeat that outlives its interval piles up goroutines.
+	// An InstallSnapshot has nothing to do with that budget — the receiver has to
+	// fsync the snapshot file, fsync its metadata, rename the directory, run a full
+	// state machine Restore and commit a compaction batch. That fixed cost is
+	// hundreds of milliseconds and is independent of how big the snapshot is, so
+	// borrowing the heartbeat budget as a base fails a 2KB transfer as reliably as a
+	// 2MB one.
+	//
+	//   deadline = InstallSnapshotBaseMs
+	//              + (snapshotBytes / InstallSnapshotDeadlineScaleSizeByte)
+	//                * InstallSnapshotDeadlineScaleTimeMs
+	//
+	// Zero means DefaultInstallSnapshotBaseMs.
+	InstallSnapshotBaseMs                int
 	InstallSnapshotDeadlineScaleSizeByte int
 	InstallSnapshotDeadlineScaleTimeMs   int
 
@@ -21,6 +42,22 @@ type Config struct {
 	// scaling and use a flat RPCTimeoutMs.
 	AppendEntriesDeadlineScaleCount  int
 	AppendEntriesDeadlineScaleTimeMs int
+
+	// ApplyBatchSize caps how many command entries are handed to StateMachine.Apply
+	// in one call. Zero (the default) means no cap: everything newly committed goes
+	// in a single call, which is the fewest state machine commits and the fewest
+	// fsyncs.
+	//
+	// Set it to 1 when a caller waits on the result of its own command. Apply is
+	// all-or-nothing per call and results are only released once the call returns, so
+	// with one big call every waiter is held until the slowest entry in the range has
+	// applied. One entry per call releases each waiter as soon as its own entry is
+	// durable, at the cost of a commit per entry.
+	//
+	// It changes batching only. The library still applies entries in index order and
+	// still advances lastApplied monotonically, so no state machine can tell the
+	// difference except in latency and commit count.
+	ApplyBatchSize int
 
 	SnapshotDir string
 	// will only be used by snapshot loop

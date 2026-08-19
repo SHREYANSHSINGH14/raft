@@ -93,10 +93,11 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 	// it too — it asks the same up-to-date question the real vote does. Reading it
 	// once and reusing it for both rounds also guarantees the two rounds describe
 	// the same log, which a re-read between them would not.
-	lastLogIndex, err := n.store.GetLastIndex(ctx)
+	lastLogIndex, err := n.lastIndex(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "could not read the last log index"
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -104,19 +105,16 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	var lastLogTerm uint64
-	if lastLogIndex > 0 {
-		lastLog, err := n.store.GetLogByIndex(ctx, lastLogIndex)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-			electionRes.transitonRole = ServerRole_Follower
-			electionRes.err = err
+	lastLogTerm, _, err := n.logTermAt(ctx, uint64(lastLogIndex))
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
+		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "could not read the term at the last log index"
+		electionRes.err = err
 
-			resCh <- electionRes
+		resCh <- electionRes
 
-			return
-		}
-		lastLogTerm = lastLog.Term
+		return
 	}
 
 	// voterPeers is who we ask (everyone but us); voterCount is what a majority is
@@ -166,22 +164,12 @@ func (n *Node) election(ctx context.Context, resCh chan ElectionResponse) {
 		return
 	}
 
-	err = n.store.SetCurrentTerm(ctx, newTerm)
-	if err != nil {
+	// One write: entering the term and spending its vote on ourselves cannot be
+	// separated, or a crash between them lets us vote twice in this term.
+	if err := n.setTermAndVote(ctx, newTerm, n.ID); err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
 		electionRes.transitonRole = ServerRole_Follower
-		electionRes.reason = "could not persist the new term"
-		electionRes.err = err
-
-		resCh <- electionRes
-
-		return
-	}
-
-	err = n.store.SetVotedFor(ctx, n.ID)
-	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("election db error: %s", err.Error())
-		electionRes.transitonRole = ServerRole_Follower
+		electionRes.reason = "could not persist the new term and our own vote"
 		electionRes.err = err
 
 		resCh <- electionRes
@@ -379,9 +367,21 @@ func (n *Node) sendPreVote(ctx context.Context, peerID string, nextTerm, lastLog
 	deadLineCtx, cancel := context.WithTimeout(ctx, time.Duration(n.cfg.RPCTimeoutMs)*time.Millisecond)
 	defer cancel()
 
+	zerolog.Ctx(ctx).Debug().
+		Str("peer", peerID).
+		Uint64("would_be_term", nextTerm).
+		Uint64("last_log_index", lastLogIndex).
+		Uint64("last_log_term", lastLogTerm).
+		Msg("sendPreVote: asking whether we could win")
+
 	rpcRes, err := n.transport.PreVote(deadLineCtx, peerID, rpcReq)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("error sending pre vote rpc to peer %s: %s", peerID, err.Error())
+		// An unreachable peer is a withheld pre-vote, not a failure of the round —
+		// so this is logged per peer and the tally goes on without it.
+		zerolog.Ctx(ctx).Error().Err(err).
+			Str("peer", peerID).
+			Uint64("would_be_term", nextTerm).
+			Msgf("sendPreVote: error sending pre vote rpc to peer %s: %s", peerID, err.Error())
 		res.err = err
 		res.id = peerID
 
@@ -389,6 +389,13 @@ func (n *Node) sendPreVote(ctx context.Context, peerID string, nextTerm, lastLog
 
 		return
 	}
+
+	zerolog.Ctx(ctx).Debug().
+		Str("peer", peerID).
+		Bool("granted", rpcRes.VoteGranted).
+		Uint64("peer_term", rpcRes.Term).
+		Uint64("would_be_term", nextTerm).
+		Msg("sendPreVote: reply")
 
 	res.rpcRes = rpcRes
 	res.id = peerID
