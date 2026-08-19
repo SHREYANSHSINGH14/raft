@@ -40,6 +40,15 @@ func writeSnapshotFixture(t *testing.T, dir string, index, term uint) {
 // newCatchUpTestNode wires a leader node whose catchUpMember can run: a temp
 // SnapshotDir for callInstallSnapshot to read, a MockTransport, and non-zero
 // InstallSnapshot deadline-scale config (else callInstallSnapshot divides by zero).
+// maxCatchUpRoundsForTest mirrors the unexported maxCatchUpRounds in catchUpMember.
+const maxCatchUpRoundsForTest = 10
+
+// startsAtIndex matches a GetLogs call whose start bound is want. GetLogs takes
+// *uint, so the value has to be compared through the pointer.
+func startsAtIndex(want uint) any {
+	return mock.MatchedBy(func(start *uint) bool { return start != nil && *start == want })
+}
+
 func newCatchUpTestNode(t *testing.T, store Storage) (*Node, *MockTransport) {
 	t.Helper()
 	transport := NewMockTransport()
@@ -217,8 +226,18 @@ func TestCatchUpMember_TooSlowAborts(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(6)).Return(LogEntry{Index: 6, Term: 2}, nil)
 	store.On(methodGetLogByIndex, mock.Anything, uint(8)).Return(LogEntry{Index: 8, Term: 2}, nil)
-	store.On(methodGetLogs, mock.Anything, mock.Anything, mock.Anything).
-		Return([]LogEntry{{Index: 6, Term: 2}, {Index: 7, Term: 2}}, nil)
+	// GetLogs must answer per start index: it returns the suffix >= start, so one
+	// unconditional expectation would keep handing back entries the round has already
+	// sent. catchUpMember now compares logs[0].Index against startIdx to detect a
+	// compacted gap, so a mock that ignores start looks like a compacted log.
+	for round := 0; round < maxCatchUpRoundsForTest+2; round++ {
+		start := uint(6 + 2*round)
+		store.On(methodGetLogs, mock.Anything, startsAtIndex(start), mock.Anything).
+			Return([]LogEntry{
+				{Index: uint64(start), Term: 2},
+				{Index: uint64(start) + 1, Term: 2},
+			}, nil)
+	}
 
 	node, transport := newCatchUpTestNode(t, store)
 	node.cfg.ElectionMinMs = 0 // every round counts as "slower than an election timeout"
@@ -234,24 +253,33 @@ func TestCatchUpMember_TooSlowAborts(t *testing.T) {
 
 // ── Rejected all the way to the start of the log → abort ─────────────────────
 
-func TestCatchUpMember_RejectedAtStartOfLog(t *testing.T) {
+// A member that keeps rejecting cannot be backed off past our snapshot boundary:
+// logTermAt treats index 0 as the empty-log anchor and would accept it, but claiming
+// an empty log when a snapshot exists at index 1 is a lie, and it would leave startIdx
+// below the log floor for every round after. The member disagreeing with us at the
+// anchor is what a snapshot resend is for, so the back-off resends instead — and
+// resending forever eventually exhausts the attempt budget.
+func TestCatchUpMember_BackoffStopsAtSnapshotBoundary(t *testing.T) {
 	store := new(MockStorage)
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(1), nil)
+	// catchUpMember still probes the entry after the snapshot before entering the
+	// round loop.
 	store.On(methodGetLogByIndex, mock.Anything, uint(2)).Return(LogEntry{Index: 2, Term: 1}, nil)
-	store.On(methodGetLogs, mock.Anything, mock.Anything, mock.Anything).
+	store.On(methodGetLogs, mock.Anything, startsAtIndex(2), mock.Anything).
 		Return([]LogEntry{{Index: 2, Term: 1}}, nil)
 
 	node, transport := newCatchUpTestNode(t, store)
 	writeSnapshotFixture(t, node.cfg.SnapshotDir, 1, 1) // snapshot at index 1 → prevLogIdx starts at 1
+	// The boundary guard reads the node's cached snapshot index, not the fixture on
+	// disk — callInstallSnapshot never sets it.
+	node.SetSnapshotLatest(1, 1, "test")
 	transport.On(methodInstallSnapshot, "node-2", mock.Anything).
 		Return(InstallSnapshotResponse{Success: true, Term: 1}, nil)
-	// Always rejected: round 1 backs off 1→0 (logTermAt(0) is the empty-log anchor),
-	// round 2 has prevLogIdx==0 and is rejected → give up.
 	transport.On(methodAppendEntries, "node-2", mock.Anything).
 		Return(AppendEntriesResponse{Success: false, Term: 1}, nil)
 
 	err := node.catchUpMember(context.Background(), "node-2")
-	assert.ErrorContains(t, err, "rejected at start of log")
+	assert.ErrorContains(t, err, "install snapshot is slow")
 }
 
 // ── DB error reading the logs to send ────────────────────────────────────────
@@ -299,6 +327,10 @@ func TestCatchUpMember_CompactedResendAborts(t *testing.T) {
 	store.On(methodGetCurrentTerm, mock.Anything).Return(uint(2), nil)
 	// The first entry after the snapshot is never there → resend snapshot each time.
 	store.On(methodGetLogByIndex, mock.Anything, uint(6)).Return(LogEntry{}, ErrNotFound)
+	// The log still runs past the snapshot, so index 6 being gone means we compacted
+	// past it rather than having nothing left to send. Without this the missing entry
+	// would mean "member is already at our head" and catch-up would succeed instead.
+	store.On(methodGetLastIndex, mock.Anything).Return(uint(10), nil)
 
 	node, transport := newCatchUpTestNode(t, store)
 	writeSnapshotFixture(t, node.cfg.SnapshotDir, 5, 2)
