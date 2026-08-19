@@ -199,6 +199,19 @@ func (n *Node) startElectionOut(ctx context.Context) {
 				n.becomeCandidate("TimeoutNow from the leader")
 				return
 			case <-ticker.C:
+				// A snapshot being streamed to us is contact from a live leader; it
+				// simply does not arrive as AppendEntries, so electionTimeoutCh never
+				// fires for it. Re-arm rather than suspend: the timer keeps running and
+				// only declines to campaign, so when the install ends the next fire
+				// behaves normally with nothing to un-pause.
+				if n.installSnapshotInProgress.Load() {
+					zerolog.Ctx(ctx).Debug().
+						Dur("timeout", timeOut).
+						Msg("election timer fired during an install snapshot: staying follower")
+					ticker.Reset(timeOut)
+					continue
+				}
+
 				zerolog.Ctx(ctx).Debug().
 					Dur("timeout", timeOut).
 					Msg("election timer fired: no contact from a leader")
