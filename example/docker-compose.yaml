@@ -24,9 +24,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml  # all peers share same yaml
       - peer1_data:/app/data
+      - peer1_snapshots:/app/snapshots
 
   peer2:
     build:
@@ -53,9 +60,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer2_data:/app/data
+      - peer2_snapshots:/app/snapshots
 
   peer3:
     build:
@@ -82,9 +96,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer3_data:/app/data
+      - peer3_snapshots:/app/snapshots
 
   peer4:
     build:
@@ -111,9 +132,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer4_data:/app/data
+      - peer4_snapshots:/app/snapshots
 
   peer5:
     build:
@@ -140,9 +168,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer5_data:/app/data
+      - peer5_snapshots:/app/snapshots
 
   # peer6 and peer7 are NOT part of the initial configuration and are absent from
   # peers.yaml. They start, idle, and wait to be joined at runtime:
@@ -173,9 +208,16 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer6_data:/app/data
+      - peer6_snapshots:/app/snapshots
 
   peer7:
     build:
@@ -198,15 +240,29 @@ services:
       - SNAPSHOT_DIR=snapshots
       - SNAPSHOT_INTERVAL_S=30
       - SNAPSHOT_THRESHOLD=10
+      # InstallSnapshot deadline: a fixed base for the receiver's fsyncs,
+      # rename and Restore, plus 1s per MB transferred. Deliberately not
+      # derived from RPC_TIMEOUT_MS — that one is capped below HEARTBEAT_MS.
+      - INSTALL_SNAPSHOT_BASE_MS=5000
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE=1048576
+      - INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS=1000
     volumes:
       - ./peers.yaml:/app/peers.yaml
       - peer7_data:/app/data
+      - peer7_snapshots:/app/snapshots
 
 volumes:
   peer1_data:
+  peer1_snapshots:
   peer2_data:
+  peer2_snapshots:
   peer3_data:
+  peer3_snapshots:
   peer4_data:
+  peer4_snapshots:
   peer5_data:
+  peer5_snapshots:
   peer6_data:
+  peer6_snapshots:
   peer7_data:
+  peer7_snapshots:

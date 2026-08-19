@@ -1,3 +1,4 @@
 /data
 raftd
 /.claude
+/example/scripts/cluster-flow-report.md

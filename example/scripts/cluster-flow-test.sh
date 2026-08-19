@@ -69,6 +69,9 @@ WRITE_BURST="${WRITE_BURST:-20}"             # scenario 4/5 burst size
 CONVERGE_TIMEOUT_MS="${CONVERGE_TIMEOUT_MS:-10000}"
 POLL_MS="${POLL_MS:-50}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-30}"       # max wait for a leader / a restarted node
+# Scenario 5 waits for the snapshot loop, which only ticks every
+# SNAPSHOT_INTERVAL_S (compose ships 30s), so this has to exceed one full tick.
+SNAPSHOT_WAIT_S="${SNAPSHOT_WAIT_S:-120}"
 
 # ============================================================================
 # Plumbing
@@ -441,7 +444,13 @@ scenario_snapshot_rejoin() {
     [[ "$p" == "$LEADER_PORT" ]] && continue
     victim="peer$i"; vport="$p"; break
   done
-  info "sidelining ${victim}"
+  # Where the victim stops is the whole point of the scenario: the leader has to
+  # snapshot and compact PAST this index before the victim comes back, or the
+  # entries it is missing are still in the log and it catches up over plain
+  # AppendEntries — the exact path this scenario is not trying to test.
+  local victim_last
+  victim_last="$(status_of "$vport" | jq -r '.last_log_index // 0')"
+  info "sidelining ${victim} at last_log_index=${victim_last}"
 
   peer_stop "$victim"
   sleep 2
@@ -458,15 +467,26 @@ scenario_snapshot_rejoin() {
   done
   ok "wrote ${WRITE_BURST} entries while ${victim} was down"
 
-  info "waiting for the snapshot loop…"
-  local deadline=$(( $(date +%s) + BOOT_TIMEOUT_S )) snap=0
+  # Wait for a snapshot that actually covers what the victim is missing. "> 0" is
+  # not enough — a snapshot taken at or below victim_last leaves every entry the
+  # victim needs still in the log. The wait is generous because the snapshot loop
+  # only ticks every SNAPSHOT_INTERVAL_S.
+  info "waiting for the leader to snapshot past index ${victim_last}…"
+  local deadline=$(( $(date +%s) + SNAPSHOT_WAIT_S )) snap=0
   while (( $(date +%s) < deadline )); do
     snap="$(status_of "$LEADER_PORT" | jq -r '.snapshot_index // 0')"
-    (( snap > 0 )) && break
+    (( snap > victim_last )) && break
     sleep 2
   done
-  if (( snap > 0 )); then ok "leader snapshotted at index ${snap}"
-  else warn "no snapshot within ${BOOT_TIMEOUT_S}s — rejoin will catch up from the log, not a snapshot"; fi
+
+  local via_snapshot=0
+  if (( snap > victim_last )); then
+    via_snapshot=1
+    ok "leader snapshotted at index ${snap}, past the victim's ${victim_last} — catch-up must go through InstallSnapshot"
+  else
+    warn "leader snapshot index is ${snap}, not past ${victim_last} after ${SNAPSHOT_WAIT_S}s — the victim will catch up over AppendEntries and InstallSnapshot stays untested"
+    warn "raise WRITE_BURST above SNAPSHOT_THRESHOLD, or SNAPSHOT_WAIT_S above SNAPSHOT_INTERVAL_S, to exercise it"
+  fi
 
   call "leader status before rejoin" GET "$HOST:$LEADER_PORT/status"
 
@@ -480,7 +500,11 @@ scenario_snapshot_rejoin() {
     bad "${victim} never caught up after rejoining"
     call "${victim} status after failed catch-up" GET "$HOST:$vport/status"
   else
-    ok "${victim} caught up $(( $(now_ms) - start ))ms after restart"
+    if (( via_snapshot == 1 )); then
+      ok "${victim} caught up $(( $(now_ms) - start ))ms after restart, via InstallSnapshot"
+    else
+      ok "${victim} caught up $(( $(now_ms) - start ))ms after restart, via AppendEntries"
+    fi
   fi
 
   call "${victim} status after rejoin" GET "$HOST:$vport/status"
