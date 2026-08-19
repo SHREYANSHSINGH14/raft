@@ -56,12 +56,12 @@ func (n *Node) Propose(ctx context.Context, entryType EntryType, data []byte) (F
 // appendEntry builds a LogEntry with the next log index and the current term,
 // appends it to the store, and returns it. Callers must hold clientMu.
 func (n *Node) appendEntry(ctx context.Context, entryType EntryType, data []byte) (LogEntry, error) {
-	lastLogIndex, err := n.store.GetLastIndex(ctx)
+	lastLogIndex, err := n.lastIndex(ctx)
 	if err != nil {
 		return LogEntry{}, fmt.Errorf("failed to get last log index: %w", err)
 	}
 
-	currentTerm, err := n.store.GetCurrentTerm(ctx)
+	currentTerm, err := n.GetCurrentTerm(ctx)
 	if err != nil {
 		return LogEntry{}, fmt.Errorf("failed to get current term: %w", err)
 	}

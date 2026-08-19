@@ -36,15 +36,23 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	n.clientMu.Lock()
 	defer n.clientMu.Unlock()
 
+	zerolog.Ctx(ctx).Debug().
+		Str("candidate", args.CandidateID).
+		Uint64("candidate_term", args.Term).
+		Uint64("candidate_last_log_index", args.LastLogIndex).
+		Uint64("candidate_last_log_term", args.LastLogTerm).
+		Msg("handlePreVote: received")
+
 	if strings.TrimSpace(args.CandidateID) == "" {
 		err := fmt.Errorf("candidate id is empty")
-		zerolog.Ctx(ctx).Error().Err(err).Msg("candidate id is empty")
+		zerolog.Ctx(ctx).Error().Err(err).Msg("handlePreVote: candidate id is empty")
 		return PreVoteResponse{}, err
 	}
 
 	currentTerm, err := n.store.GetCurrentTerm(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("pre vote db err: %s", err.Error())
+		zerolog.Ctx(ctx).Error().Err(err).Str("candidate", args.CandidateID).
+			Msg("handlePreVote: db err reading current term")
 		return PreVoteResponse{}, err
 	}
 
@@ -53,7 +61,17 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 		respTerm = args.Term
 	}
 
-	reject := func() (PreVoteResponse, error) {
+	// reject takes its reason rather than logging at the call site, so a refusal
+	// path cannot be added without one — two of them used to return silently, and a
+	// pre-vote that is refused with no line is indistinguishable from one that never
+	// arrived.
+	reject := func(reason string) (PreVoteResponse, error) {
+		zerolog.Ctx(ctx).Warn().
+			Str("candidate", args.CandidateID).
+			Uint64("candidate_term", args.Term).
+			Uint("our_term", currentTerm).
+			Str("reason", reason).
+			Msg("handlePreVote: not granted")
 		return PreVoteResponse{Term: respTerm, VoteGranted: false}, nil
 	}
 
@@ -63,8 +81,7 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	peer, inConfig, configSize := n.lookupPeer(args.CandidateID)
 
 	if configSize > 0 && !inConfig {
-		zerolog.Ctx(ctx).Warn().Msgf("rejecting pre vote from %s: not in the latest configuration", args.CandidateID)
-		return reject()
+		return reject("candidate is not in the latest configuration")
 	}
 
 	// A node that already believes in a leader refuses to encourage a challenger.
@@ -72,13 +89,12 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	// election timer is short would happily pre-vote for anyone and the probe
 	// would succeed even though the cluster is healthy.
 	if leaderID := n.GetLeaderID(); leaderID != "" && leaderID != args.CandidateID {
-		zerolog.Ctx(ctx).Warn().Msgf("rejecting pre vote from %s: we already have leader %s", args.CandidateID, leaderID)
-		return reject()
+		return reject(fmt.Sprintf("we already have leader %s", leaderID))
 	}
 
 	// A candidate probing a term we have already passed cannot win it.
 	if args.Term < uint64(currentTerm) {
-		return reject()
+		return reject("candidate term is behind ours")
 	}
 
 	// A peer that is in the configuration but is not a Voter (Staging, still
@@ -86,8 +102,7 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	// refused regardless of how good its log is. This is the case a node
 	// demoted from Voter to NonVoter would otherwise slip through.
 	if configSize > 0 && peer.PeerState != PeerState_Voter {
-		zerolog.Ctx(ctx).Warn().Msgf("rejecting pre vote from %s: peer is not a voter", args.CandidateID)
-		return reject()
+		return reject(fmt.Sprintf("candidate is %s, not a voter", peer.PeerState))
 	}
 
 	// Index and term come from two calls, not one entry: after compaction the last
@@ -96,13 +111,17 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	// from whichever of the two holds it.
 	lastLogIndex, err := n.lastIndex(ctx)
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("pre vote db err: %s", err.Error())
+		zerolog.Ctx(ctx).Error().Err(err).Str("candidate", args.CandidateID).
+			Msg("handlePreVote: db err reading last log index")
 		return PreVoteResponse{}, err
 	}
 
 	lastLogTerm, _, err := n.logTermAt(ctx, uint64(lastLogIndex))
 	if err != nil {
-		zerolog.Ctx(ctx).Error().Err(err).Msgf("pre vote db err: %s", err.Error())
+		zerolog.Ctx(ctx).Error().Err(err).
+			Str("candidate", args.CandidateID).
+			Uint("last_log_index", lastLogIndex).
+			Msg("handlePreVote: db err reading the term at the last log index")
 		return PreVoteResponse{}, err
 	}
 
@@ -111,9 +130,16 @@ func (n *Node) HandlePreVote(ctx context.Context, args PreVoteArgs) (PreVoteResp
 	// to nobody, so the comparison is skipped.
 	if lastLogIndex > 0 {
 		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < uint64(lastLogIndex)) {
-			return reject()
+			return reject(fmt.Sprintf("candidate log (%d,%d) is behind ours (%d,%d)",
+				args.LastLogTerm, args.LastLogIndex, lastLogTerm, lastLogIndex))
 		}
 	}
+
+	zerolog.Ctx(ctx).Debug().
+		Str("candidate", args.CandidateID).
+		Uint64("candidate_term", args.Term).
+		Uint64("resp_term", respTerm).
+		Msg("handlePreVote: granted")
 
 	return PreVoteResponse{
 		Term:        respTerm,
