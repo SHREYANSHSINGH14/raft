@@ -169,6 +169,45 @@ leader would otherwise heartbeat its own address forever), `becomeLeader` skips 
 indexes for it, and `getMajorityMatchIndex` substitutes our real last log index for our meaningless
 stored `MatchIndex`.
 
+### A successful `AppendEntries` leaves the follower's log a prefix of the leader's.
+
+`HandleAppendEntries` advances the follower with
+
+```go
+minCommitIndex := min(args.LeaderCommit, uint64(lastLogIdx))   // our whole log
+```
+
+where Ongaro Figure 2 says `min(leaderCommit, index of last new entry)`. The deviation looks unsafe —
+the consistency check only proves agreement up to `prevLogIndex + len(entries)`, so a follower holding
+entries above that would be capping against unverified state. It is safe, and the reason is worth
+stating because it is not local to this function.
+
+**The leader's batch always starts at `nextIndex`.** `nextIndex` is by definition the first index not
+yet confirmed for that peer, so the first entry the truncation loop compares is the first possible
+point of divergence. If the follower disagrees anywhere at or above it, the mismatch fires on that
+first comparison and `DeleteLogs(entry.Index, 0)` removes the entire suffix, not just the compared
+range. The follower's log is then a strict prefix of the leader's, ending exactly at
+`prevLogIndex + len(entries)`.
+
+That is the invariant: **after any successful `AppendEntries`, the follower holds a prefix of the
+leader's log.** Given it, `min(leaderCommit, ourLastIndex)` is safe unconditionally, because both
+operands index the same log. A follower can still hold entries beyond the batch — but only entries the
+leader also has, since divergent ones would have been truncated — and committing those up to
+`leaderCommit` is correct.
+
+Two consequences that are easy to get wrong when reasoning about this:
+
+- **Batching does not threaten it.** A max-entries-per-batch cap shortens the *end* of a batch and
+  never moves its *start*, so the divergence check happens in the same place regardless. Simulated
+  against this handler across batch caps 1..17, divergence points, and stale tails running past the
+  leader's last index: no case commits a stale entry.
+- **The no-op is not what saves it either.** It guarantees a divergent follower's first mismatch is
+  reachable, but the prefix property comes from where the batch begins, not from what it contains.
+
+Changing the cap to `args.PrevLogIndex + len(args.Entries)` — Figure 2's rule, generalising to
+`prevLogIndex` on a heartbeat — is a robustness choice, not a fix: it makes the follower's safety
+independent of how the leader picks `nextIndex`. That independence is the only thing it buys.
+
 ### Pre-vote runs before anything irreversible.
 
 `election()` reads term and log state, runs the pre-vote round, and only then calls `SetCurrentTerm`

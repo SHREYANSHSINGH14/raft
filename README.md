@@ -220,29 +220,46 @@ through `/kv/*` so that what lands in the log is something the state machine can
 ### Check all nodes at once
 
 ```bash
-{ printf 'ID\tROLE\tTERM\tCOMMIT\tLASTLOG\tLEADER\n'
+{ printf 'ID\tROLE\tTERM\tLASTLOG\tCOMMIT\tAPPLIED\tSNAP\tSNAPBY\tLEADER\n'
   for i in 1 2 3 4 5; do
     curl -s http://localhost:808${i}/status |
-      jq -r '[.id,.role,.term,.commit_index,.last_log_index,.leader_id]|@tsv'
+      jq -r '[.id,.role,.term,.last_log_index,.commit_index,.last_applied,.snapshot_index,(.snapshot_caller // "-"),.leader_id]|@tsv'
   done
 } | column -t -s $'\t'
 ```
 ```
-ID     ROLE      TERM  COMMIT  LASTLOG  LEADER
-peer1  FOLLOWER  1     3       3        peer4
-peer2  FOLLOWER  1     3       3        peer4
-peer3  FOLLOWER  1     3       3        peer4
-peer4  LEADER    1     3       3
-peer5  FOLLOWER  1     3       3        peer4
+ID     ROLE      TERM  LASTLOG  COMMIT  APPLIED  SNAP  SNAPBY           LEADER
+peer1  FOLLOWER  1     46       46      46       46    installSnapshot  peer4
+peer2  FOLLOWER  1     46       46      46       46    installSnapshot  peer4
+peer3  FOLLOWER  1     46       46      46       46    runSnapshotOnce  peer4
+peer4  LEADER    1     46       46      46       46    runSnapshotOnce
+peer5  FOLLOWER  1     46       46      46       46    runSnapshotOnce
 ```
 
-`commit_index` versus `last_log_index` is the "how far behind is this node" check: entries it holds
-versus entries it may apply. `leader_id` is blank on the leader itself.
+Read those four numbers left to right — they are the stages an entry passes through, and each gap
+localises a different stall:
+
+| column | meaning | a gap before it means |
+|---|---|---|
+| `LASTLOG` | entries this node holds | it is not receiving `AppendEntries` |
+| `COMMIT` | entries a majority holds | replication is not reaching a majority |
+| `APPLIED` | entries the state machine consumed | the apply loop is stuck or parked |
+| `SNAP` | index of the latest snapshot | nothing has been compacted yet |
+| `SNAPBY` | what set that snapshot index | — |
+
+`COMMIT` above `APPLIED` is the one to watch: the entries are committed and durable, but the state
+machine has not consumed them — so a write can report committed while a read of the same key still
+returns nothing. `leader_id` is blank on the leader itself.
+
+`SNAPBY` says which path last moved `snapshot_index`: `runSnapshotOnce` means the node snapshotted
+its own state machine, `installSnapshot` means a leader pushed one to it. Same number, two very
+different histories — a follower showing `installSnapshot` fell far enough behind that the leader
+gave up on sending entries.
 
 Or a one-liner per node, if you just want the essentials without the table:
 
 ```bash
-for i in 1 2 3 4 5; do curl -s http://localhost:808${i}/status | jq -c '{id,role,term,commit_index,leader_id}'; done
+for i in 1 2 3 4 5; do curl -s http://localhost:808${i}/status | jq -c '{id,role,term,commit_index,last_applied,snapshot_index,snapshot_caller,leader_id}'; done
 ```
 
 ### Replication progress, per peer
@@ -517,18 +534,8 @@ peers:
 - [x] Client `WriteLog` / `ReadLog` RPCs, and key/value endpoints on the debug server
 - [x] Graceful shutdown via context cancellation
 - [x] Debug HTTP server
-
-## What's Not Yet Implemented
-
-- [ ] **Linearizable reads** — `/kv/get` reads the local Pebble directly, so it returns whatever that
-      node has applied. A correct read needs a log entry per read or a ReadIndex round trip.
-- [ ] **Exactly-once commands** — command ids are server-generated, so a client retry proposes a
+- [x] **Exactly-once commands** — command ids are server-generated, so a client retry proposes a
       second entry. Needs client-supplied ids plus a dedup table in `Apply`.
-- [ ] **Tests for `example/statemachine`** — the only package in the repo without any. A
-      `Persist` → `Restore` round trip is the obvious first one.
-- [ ] Futures carrying `(index, term)` — keyed by index alone, a truncated proposal is
-      indistinguishable from a committed one, so it conservatively reports `ErrLeadershipLost`
-
 ---
 
 ## Further Reading

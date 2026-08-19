@@ -654,6 +654,71 @@ exactly like code that handles three.
 
 ---
 
+## Bug 12: a deadlock in the adapter, redesigned four times in the library
+
+The symptom was a follower that could never be caught up. Every attempt, forever:
+
+```
+install snapshot: error restoring state machine from snapshot   error: context canceled
+```
+
+`sm.Restore` is the last irreversible step of `HandleInstallSnapshot`, so a cancellation
+landing *there* reads unambiguously: the receiver is too slow, and the leader gave up
+while the state machine was being written. Everything that followed was a response to
+that reading.
+
+**What it produced.** `Storage` grew a `Batch` so the log deletion, term and vote could
+be staged and committed as one write instead of leaving a half-updated node behind.
+`HandleInstallSnapshot` was reordered so the destructive half stages before `Restore`
+and commits after it, with `captureNodeState`/`restoreNodeState` unwinding the
+in-memory writes — the snapshot boundary in particular, which was being set *before*
+`Restore` and left the node claiming a boundary its state machine never reached.
+`lastApplied` moved out of `Storage` entirely, because the one write that had to follow
+`Restore` was the one that could fail and could not be undone. And the InstallSnapshot
+deadline stopped deriving its base from `RPCTimeoutMs`, which is pinned under
+`HeartbeatMs` and had been budgeting ~70ms for two fsyncs, a rename and a full
+state-machine restore.
+
+**None of that was the bug.** The bug was six lines away in the embedding, in the gRPC
+adapter that turns a stream into the `io.Reader` the library consumes:
+
+```go
+pr, pw := io.Pipe()
+defer func() { pw.Close() }()      // ← runs when InstallSnapshot returns
+```
+
+`HandleInstallSnapshot` reads that reader to EOF. The pipe reaches EOF only when the
+write end closes. The write end closes only when the enclosing RPC handler returns.
+The enclosing handler returns only after `HandleInstallSnapshot` finishes. Three-way
+deadlock, broken solely by the leader's deadline expiring — which is why the failure
+always appeared at `Restore`, the first place downstream of the stall that consults
+`ctx`.
+
+**The tell was in the timestamps the whole time.** Attempts failed *exactly* one
+deadline apart. A receiver that is genuinely too slow varies with load; a deadlock is
+metronomic. Raising the base from 70ms to 5s and watching the interval move to exactly
+5s should have settled it immediately — instead it read as "still too slow, tune
+further", because that was the hypothesis already in hand.
+
+**Why the library looked guilty.** Every library test mocks `Transport`, so nothing in
+the suite has ever executed the adapter. All green, always, no matter what that code
+does — the same blind spot recorded under Bug 10 and in What Remains. When the only
+component with coverage is the one you can see failing, it collects the blame.
+
+Two things worth keeping separate afterwards. The redesign work is right on its own
+merits and stays: staging beats reverting, the boundary should not move before the
+restore it describes, and a deadline for a disk-and-restore operation has no business
+starting from a heartbeat's budget. But it was justified by evidence that did not
+support it, and had the adapter been fixed first, none of it would have been prompted.
+Being correct is not the same as being what the evidence called for.
+
+The contract that made the mistake possible is now written on `HandleInstallSnapshot`
+itself — it reads to EOF on every path, so the producer must close when the *stream*
+ends, and must close *with* an error, since a clean close is indistinguishable from a
+complete transfer and installs a truncated snapshot without complaint.
+
+---
+
 ## What Remains
 
 Snapshotting, membership changes (both directions), pre-vote and leadership transfer have all landed
