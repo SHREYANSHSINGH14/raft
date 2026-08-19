@@ -28,6 +28,7 @@ type Config struct {
 	SnapshotInterval  uint // in seconds
 	SnapshotThreshold uint // in number of log entries
 
+	InstallSnapshotBaseMs                int
 	InstallSnapshotDeadlineScaleSizeByte int
 	InstallSnapshotDeadlineScaleTimeMs   int
 }
@@ -65,8 +66,14 @@ func LoadConfig() *Config {
 	// InstallSnapshot RPC deadline scales with snapshot size: allow
 	// InstallSnapshotDeadlineScaleTime ms per InstallSnapshotDeadlineScaleSize bytes.
 	// Nothing consumes these yet — the leader-side send path doesn't exist.
-	c.InstallSnapshotDeadlineScaleSizeByte = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE", 1024)
-	c.InstallSnapshotDeadlineScaleTimeMs = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS", 10)
+	// The base is deliberately not RPC_TIMEOUT_MS: that one is validated below to sit
+	// under HEARTBEAT_MS, and an InstallSnapshot's fixed cost — two fsyncs, a rename,
+	// a full state machine Restore — has nothing to do with a heartbeat's budget.
+	c.InstallSnapshotBaseMs = getEnvInt("INSTALL_SNAPSHOT_BASE_MS", 5000)
+	// 1s per MB on top of the base: slow enough not to false-fail on a loaded disk,
+	// fast enough that a wedged transfer gives up in seconds rather than minutes.
+	c.InstallSnapshotDeadlineScaleSizeByte = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_SIZE_BYTE", 1024*1024)
+	c.InstallSnapshotDeadlineScaleTimeMs = getEnvInt("INSTALL_SNAPSHOT_DEADLINE_SCALE_TIME_MS", 1000)
 
 	// Validate timing relationships
 	// RPCTimeout < HeartbeatMs < ElectionMinMs is required for Raft correctness
